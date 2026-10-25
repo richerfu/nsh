@@ -280,6 +280,12 @@ from Rust. Every member below except `initLogging` belongs to its instance.
 | `readonly isDisposed: boolean` | The instance has been permanently released. |
 | `readonly lastError: string` | Latest load, engine or mount error, cleared when new source is accepted. |
 | `setErrorHandler(handler: (message: string) => void): void` | Receives asynchronous load, engine and mount errors on the UI thread. |
+| `setParams(params?: object \| null): void` | Sets launch parameters (`host.params` in `nsh/host`) for subsequent module loads on this surface. |
+| `send(name: string, data?: string \| number \| boolean \| object \| null): void` | Sends a host event to the running module (`host.on(name, listener)` in `nsh/host`). |
+| `handle(name: string, handler?: ((data: string \| number \| boolean \| object \| null, reply: NshHostReply) => void) \| null): void` | Handles `host.call(name, data)` and `host.post(name, data)` from the module on the UI thread. |
+| `removeHandler(name: string): void` | Removes a `nsh/host` handler previously registered with `handle`. |
+| `setOpenUrlHandler(handler?: ((url: string) => boolean) \| null): void` | Intercepts URLs opened by the module; return `true` when handled by the host or `false` for the system handler. |
+| `setThemeOverrides(json?: string \| null): void` | Applies host theme token overrides (a shadcn/ui `cssVars` JSON string) or `null` to restore the module's theme. |
 | `setEnvironment(changes: NshEnvironment): void` | Applies supplied per-instance observations, including before the first load. |
 | `registerComponent(name: string, factory: (id: number) => object): void` | Registers a native widget factory for this instance. |
 | `unregisterComponent(name: string): void` | Removes the factory for future mounts; live widgets keep their owners. |

@@ -579,13 +579,19 @@ impl Runtime {
             context: Default::default(),
             pinned: Default::default(),
             clipboard: None,
-            host: Default::default(),
+            host: config.channel.clone(),
             picker: None,
         };
-        let engine = Engine::start(
+        let host_tokens = config.host_tokens.clone();
+        let engine = Engine::start_with(
             engine_config,
             move || OhosTextEngine::new(scale),
             Sink(dispatcher.clone(), app.chunks),
+            move |control| {
+                if let Some(tokens) = host_tokens {
+                    control.set_tokens(Some(tokens));
+                }
+            },
         )
         .map_err(|error| napi_ohos::Error::from_reason(error.to_string()))?;
         images.set_disk_cache(engine.image_cache());
@@ -671,6 +677,13 @@ impl Runtime {
             return Ok(());
         }
         state.update_environment(changes).map_err(napi_error)
+    }
+    pub(crate) fn set_tokens(&self, tokens: Option<nsh_engine::Tokens>) -> napi_ohos::Result<()> {
+        let state = self.state.try_borrow().map_err(reentry)?;
+        if let Some(engine) = &state.engine {
+            engine.control().set_tokens(tokens);
+        }
+        Ok(())
     }
     pub(crate) fn is_running(&self) -> bool {
         self.running.get()

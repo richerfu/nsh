@@ -254,6 +254,12 @@ Row() {
 | `readonly isDisposed: boolean` | 实例已永久释放。 |
 | `readonly lastError: string` | 最近的加载、引擎或挂载错误，接收新源码时清空。 |
 | `setErrorHandler(handler: (message: string) => void): void` | 在 UI 线程接收异步加载、引擎和挂载错误。 |
+| `setParams(params?: object \| null): void` | 设置该 surface 后续模块加载的启动参数（`nsh/host` 的 `host.params`）。 |
+| `send(name: string, data?: string \| number \| boolean \| object \| null): void` | 向当前运行的模块发送宿主事件（`nsh/host` 的 `host.on(name, listener)`）。 |
+| `handle(name: string, handler?: ((data: string \| number \| boolean \| object \| null, reply: NshHostReply) => void) \| null): void` | 在 UI 线程处理模块发起的 `host.call(name, data)` 和 `host.post(name, data)`。 |
+| `removeHandler(name: string): void` | 移除此前通过 `handle` 注册的 `nsh/host` 处理器。 |
+| `setOpenUrlHandler(handler?: ((url: string) => boolean) \| null): void` | 拦截模块打开的 URL；由宿主处理时返回 `true`，交由系统打开时返回 `false`。 |
+| `setThemeOverrides(json?: string \| null): void` | 应用宿主主题 token 覆盖（shadcn/ui `cssVars` JSON 字符串），传 `null` 恢复模块自身主题。 |
 | `setEnvironment(changes: NshEnvironment): void` | 更新该实例提供的环境字段，首次加载前也可调用。 |
 | `registerComponent(name: string, factory: (id: number) => object): void` | 注册该实例的原生组件工厂。 |
 | `unregisterComponent(name: string): void` | 移除工厂，已挂载组件继续持有自己的宿主对象。 |

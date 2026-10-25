@@ -13,7 +13,7 @@ use std::{
 use napi_derive_ohos::napi;
 use napi_ohos::{
     Env, Error, Result, Status,
-    bindgen_prelude::{Function, FunctionRef, Object, ObjectRef, PromiseRaw},
+    bindgen_prelude::{FnArgs, Function, FunctionRef, Object, ObjectRef, PromiseRaw},
     threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
 use nsh_engine::Bundle;
@@ -24,6 +24,7 @@ use ohos_arkui_binding::{
     },
     types::advanced::LengthMetricUnit,
 };
+use rustc_hash::FxHashMap;
 
 use crate::{
     app::{
@@ -83,7 +84,48 @@ pub(crate) enum Message {
     Size(i32, i32),
     Window(bool),
     Visible(bool),
+    HostCall(nsh_engine::HostCall),
+    OpenUrl(nsh_engine::OpenUrlRequest),
     Dispose,
+}
+
+type HostHandler = FunctionRef<FnArgs<(serde_json::Value, NshHostReply)>, ()>;
+type OpenUrlHandler = FunctionRef<String, bool>;
+
+/// Reply handle for a `host.call(...)` or `host.post(...)` from the app (`nsh/host`).
+#[napi]
+pub struct NshHostReply {
+    call: Arc<std::sync::Mutex<Option<nsh_engine::HostCall>>>,
+    is_post: bool,
+}
+
+#[napi]
+impl NshHostReply {
+    /// True when the app used `host.post(name, data)` (one-way; `resolve` and `reject` are no-ops).
+    #[napi(getter)]
+    pub fn is_post(&self) -> bool {
+        self.is_post
+    }
+
+    /// Resolves `host.call(name, data)` with a JSON-serializable value (`null` when omitted).
+    #[napi]
+    pub fn resolve(
+        &self,
+        #[napi(ts_arg_type = "string | number | boolean | object | null | undefined")]
+        value: Option<serde_json::Value>,
+    ) {
+        if let Some(call) = self.call.lock().unwrap().take() {
+            call.resolve(value.unwrap_or(serde_json::Value::Null));
+        }
+    }
+
+    /// Rejects `host.call(name, data)` with an error message.
+    #[napi]
+    pub fn reject(&self, message: String) {
+        if let Some(call) = self.call.lock().unwrap().take() {
+            call.reject(message);
+        }
+    }
 }
 
 struct State {
@@ -91,6 +133,8 @@ struct State {
     viewport_mounted: bool,
     config: Config,
     components: Components,
+    host_handlers: FxHashMap<String, Rc<HostHandler>>,
+    open_url_handler: Option<Rc<OpenUrlHandler>>,
     errors: Errors,
     runtime: Option<Runtime>,
     bundle: Option<App>,
@@ -373,6 +417,42 @@ impl State {
                 // like an iOS UIView. Only stop/dispose/Ability destruction ends it.
                 self.start(env)
             }
+            Message::HostCall(mut call) => {
+                if let Some(handler) = self.host_handlers.get(call.name()).cloned() {
+                    let name = call.name().to_owned();
+                    let data = call.take_data();
+                    let is_post = call.is_post();
+                    let call_slot = Arc::new(std::sync::Mutex::new(Some(call)));
+                    let reply = NshHostReply {
+                        call: call_slot.clone(),
+                        is_post,
+                    };
+                    let callback = handler.borrow_back(&env)?;
+                    if let Err(error) = callback.call((data, reply).into()) {
+                        log::error!("OHOS host handler {name}: {error}");
+                        if let Some(call) = call_slot.lock().unwrap().take() {
+                            call.reject(error.to_string());
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Message::OpenUrl(request) => {
+                let handled = if let Some(handler) = self.open_url_handler.clone() {
+                    let callback = handler.borrow_back(&env)?;
+                    match callback.call(request.url().to_owned()) {
+                        Ok(handled) => handled,
+                        Err(error) => {
+                            log::error!("OHOS openUrl handler: {error}");
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+                request.answer(handled);
+                Ok(())
+            }
             Message::Dispose => unreachable!(),
         }
     }
@@ -427,6 +507,8 @@ impl State {
             return Err(error);
         }
         self.components.clear();
+        self.host_handlers.clear();
+        self.open_url_handler = None;
         self.errors.dispose();
         let content = self.content.as_mut().expect("live surface content");
         content.clear_window_callback().map_err(native_error)?;
@@ -500,6 +582,8 @@ impl NshSurface {
             viewport_mounted: false,
             config,
             components: components.clone(),
+            host_handlers: FxHashMap::default(),
+            open_url_handler: None,
             errors: errors.clone(),
             runtime: None,
             bundle: None,
@@ -823,19 +907,22 @@ impl NshSurface {
     pub fn connect_dev_server(&self, address: String) -> Result<()> {
         self.check()?;
         #[cfg(feature = "dev")]
-        {
-            self.state
-                .try_borrow_mut()
-                .map_err(reentry)?
-                .connect_dev(address)
-        }
+        let result = self
+            .state
+            .try_borrow_mut()
+            .map_err(reentry)?
+            .connect_dev(address);
         #[cfg(not(feature = "dev"))]
-        {
+        let result = {
             let _ = address;
             Err(Error::from_reason(
                 "connectDevServer requires the development SDK",
             ))
+        };
+        if let Err(error) = &result {
+            self.errors.report(error.to_string());
         }
+        result
     }
     /// Disconnects the development client, retaining the last loaded module.
     #[napi]
@@ -846,6 +933,145 @@ impl NshSurface {
             .try_borrow_mut()
             .map_err(reentry)?
             .disconnect_dev();
+        Ok(())
+    }
+
+    /// Sets the launch parameters (`host.params` in `nsh/host`) for apps started from now on.
+    /// A running app keeps the parameters it started with.
+    #[napi]
+    pub fn set_params(
+        &self,
+        #[napi(ts_arg_type = "object | null | undefined")] params: Option<serde_json::Value>,
+    ) -> Result<()> {
+        self.check()?;
+        let map = match params {
+            None | Some(serde_json::Value::Null) => serde_json::Map::new(),
+            Some(serde_json::Value::Object(map)) => map,
+            Some(_) => {
+                return Err(Error::from_reason(
+                    "params must be a JSON object, null, or undefined",
+                ));
+            }
+        };
+        let state = self.state.try_borrow().map_err(reentry)?;
+        state.config.channel.set_params(map);
+        Ok(())
+    }
+
+    /// Sends event `name` with `data` to the running app (`host.on(name, listener)` in `nsh/host`).
+    /// Events sent before the app listens or starts are queued up to the channel limit.
+    #[napi]
+    pub fn send(
+        &self,
+        name: String,
+        #[napi(ts_arg_type = "string | number | boolean | object | null | undefined")] data: Option<
+            serde_json::Value,
+        >,
+    ) -> Result<()> {
+        self.check()?;
+        let state = self.state.try_borrow().map_err(reentry)?;
+        state
+            .config
+            .channel
+            .send(name, data.unwrap_or(serde_json::Value::Null))
+            .map_err(Error::from_reason)
+    }
+
+    /// Registers a handler for `host.call(name, data)` and `host.post(name, data)` (`nsh/host`).
+    /// Pass `null` or `undefined` to remove the handler for `name`.
+    #[napi]
+    pub fn handle(
+        &self,
+        name: String,
+        #[napi(
+            ts_arg_type = "((data: string | number | boolean | object | null, reply: NshHostReply) => void) | null | undefined"
+        )]
+        handler: Option<HostHandler>,
+    ) -> Result<()> {
+        self.check()?;
+        let mut state = self.state.try_borrow_mut().map_err(reentry)?;
+        if let Some(handler) = handler {
+            let weak = state.queue.clone();
+            state.config.channel.handle(name.clone(), move |call| {
+                if let Some(queue) = weak.upgrade() {
+                    let status = queue.call(
+                        Message::HostCall(call),
+                        ThreadsafeFunctionCallMode::NonBlocking,
+                    );
+                    if status != Status::Ok {
+                        log::error!("OHOS host call dispatch failed: {status:?}");
+                    }
+                }
+            });
+            state.host_handlers.insert(name, Rc::new(handler));
+        } else {
+            state.config.channel.remove_handler(&name);
+            state.host_handlers.remove(&name);
+        }
+        Ok(())
+    }
+
+    /// Removes a `nsh/host` call/post handler previously registered with `handle`.
+    #[napi]
+    pub fn remove_handler(&self, name: String) -> Result<()> {
+        self.check()?;
+        let mut state = self.state.try_borrow_mut().map_err(reentry)?;
+        state.config.channel.remove_handler(&name);
+        state.host_handlers.remove(&name);
+        Ok(())
+    }
+
+    /// Intercepts URLs opened by the app (`openUrl` in `nsh/core` and Markdown links)
+    /// after scheme checks pass. Return `true` if handled by the host, or `false` to
+    /// fall back to the system URL handler. Pass `null` or `undefined` to remove.
+    #[napi]
+    pub fn set_open_url_handler(
+        &self,
+        #[napi(ts_arg_type = "((url: string) => boolean) | null | undefined")] handler: Option<
+            OpenUrlHandler,
+        >,
+    ) -> Result<()> {
+        self.check()?;
+        let mut state = self.state.try_borrow_mut().map_err(reentry)?;
+        if let Some(handler) = handler {
+            let weak = state.queue.clone();
+            state.config.channel.handle_open_url(move |request| {
+                if let Some(queue) = weak.upgrade() {
+                    let status = queue.call(
+                        Message::OpenUrl(request),
+                        ThreadsafeFunctionCallMode::NonBlocking,
+                    );
+                    if status != Status::Ok {
+                        log::error!("OHOS openUrl dispatch failed: {status:?}");
+                    }
+                }
+            });
+            state.open_url_handler = Some(Rc::new(handler));
+        } else {
+            state.config.channel.remove_open_url_handler();
+            state.open_url_handler = None;
+        }
+        Ok(())
+    }
+
+    /// Applies the embedding app's theme overrides (a shadcn/ui `cssVars` theme JSON string,
+    /// or `null`/`undefined` to restore the app's own theme), taking effect immediately and
+    /// for all subsequent loads on this surface.
+    #[napi]
+    pub fn set_theme_overrides(&self, json: Option<String>) -> Result<()> {
+        self.check()?;
+        let tokens = match json {
+            None => None,
+            Some(json) => Some(
+                nsh_base::theme_overrides(&json)
+                    .map_err(|err| Error::from_reason(format!("invalid theme: {err}")))?,
+            ),
+        };
+        let mut state = self.state.try_borrow_mut().map_err(reentry)?;
+        state.config.host_tokens = tokens.clone();
+        if let Some(runtime) = &state.runtime {
+            runtime.set_tokens(tokens)?;
+        }
         Ok(())
     }
 

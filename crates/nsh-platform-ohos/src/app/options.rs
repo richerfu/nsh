@@ -37,6 +37,8 @@ pub(crate) struct Config {
     pub(crate) policy: nsh_engine::Policy,
     pub(crate) limits: nsh_engine::Limits,
     pub(crate) environment: NshEnvironment,
+    pub(crate) channel: nsh_engine::HostChannel,
+    pub(crate) host_tokens: Option<nsh_engine::Tokens>,
 }
 impl Config {
     pub(crate) fn new(
@@ -126,6 +128,8 @@ impl Config {
             policy,
             limits,
             environment,
+            channel: nsh_engine::HostChannel::new(),
+            host_tokens: None,
         })
     }
 }
