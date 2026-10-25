@@ -20,8 +20,8 @@ struct Index {
 
   private overlayChecks(): void {
     const source = (name: string): string =>
-      'import { mount } from "nsh"; import { Alert } from "nsh/base"; ' +
-      'mount(() => null); Alert.alert("Overlay ' + name + '", "System back routing").then(i=>console.log("overlay:' + name + ':"+i));';
+      'import { mount } from "nsh"; import { AlertDialog } from "nsh/base"; ' +
+      'mount(() => null); AlertDialog.show({ title: "Overlay ' + name + '", description: "System back routing", actions: [{ label: "OK" }] }).then(i=>console.log("overlay:' + name + ':"+i));';
     this.left.loadSource(source("left"));
     this.right?.loadSource(source("right"));
     setTimeout(() => { this.left.activate(); this.checks = "overlay-first:" + onBackPressIntercept(); }, 1500);

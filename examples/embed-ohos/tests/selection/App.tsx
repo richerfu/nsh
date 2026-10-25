@@ -7,12 +7,12 @@ function App() {
     <View testID={id} onPress={action} style={{ padding: 5, backgroundColor: "#dbeafe" }}><Text>{label}</Text></View>;
   return <View style={{ flex: 1, padding: 8, gap: 6, backgroundColor: "white" }}>
     <View style={{ flexDirection: "row", gap: 8 }}>
-      {button("read-copy", "Read clipboard", async () => { copy.set(await Clipboard.getString()); reads.set(reads() + 1); })}
+      {button("read-copy", "Read clipboard", async () => { copy.set(await Clipboard.readText()); reads.set(reads() + 1); })}
       {button("replace-text", "Remove / restore text", () => shown.set(!shown()))}
     </View>
     <Text testID={`selection-focus:${focused()}`}>Long press and drag a handle.</Text>
     <If when={shown()}>
-      <Text testID="select-words" selectable selectionColor="#4499ff66" style={{ fontSize: 18, lineHeight: 24 }}>
+      <Text testID="select-words" selectable style={{ selectionColor: "#4499ff66", fontSize: 18, lineHeight: 24 }}>
         Alpha bravo Charlie. 👩🏽‍💻 Café 中文测试. A second line wraps for selection.
       </Text>
       <Text testID="select-rtl" selectable style={{ fontSize: 18, writingDirection: "rtl" }}>שלום עולם مرحبا</Text>

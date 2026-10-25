@@ -12,8 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use nsh_core::{EventKind, EventPayload, ImageOptions, ImageSource, PayloadValue, ResizeMode};
+use nsh_core::{
+    EventKind, EventPayload, ImageData, ImageOptions, ImageSource, PayloadValue, ResizeMode,
+    image::{CacheHeaders, DiskCache, Fetched},
+};
 use nsh_engine::{Access, Assets};
 use ohos_arkui_binding::{
     component::{
@@ -78,6 +80,7 @@ pub(crate) struct Loader {
     dispatcher: Weak<Dispatcher>,
     agent: ureq::Agent,
     cache: Mutex<Cache>,
+    disk_cache: Mutex<Option<DiskCache>>,
     pending: Mutex<FxHashMap<String, Arc<crate::media::request::Request<Target>>>>,
 }
 impl Data {
@@ -129,10 +132,19 @@ impl Loader {
                 .build()
                 .into(),
             cache: Mutex::default(),
+            disk_cache: Mutex::default(),
             pending: Mutex::default(),
         })
     }
-    pub(crate) fn load(self: &Arc<Self>, target: Target, uri: String) -> Arc<AtomicBool> {
+    pub(crate) fn set_disk_cache(&self, cache: Option<DiskCache>) {
+        *self.disk_cache.lock().expect("disk cache") = cache;
+    }
+    pub(crate) fn load(
+        self: &Arc<Self>,
+        target: Target,
+        uri: String,
+        inline: Option<ImageData>,
+    ) -> Arc<AtomicBool> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let request = {
             let mut pending = self.pending.lock().expect("pending images");
@@ -163,7 +175,7 @@ impl Loader {
         let key = uri.clone();
         if let Err(error) = crate::services::executor::Executor::images().and_then(|pool| {
             pool.submit(move || {
-                let data = loader.read(&uri, &loading);
+                let data = loader.read(&uri, inline, &loading);
                 loader.finish(&uri, &loading, data);
             })
         }) {
@@ -200,6 +212,7 @@ impl Loader {
     fn read(
         &self,
         uri: &str,
+        inline: Option<ImageData>,
         request: &crate::media::request::Request<Target>,
     ) -> std::result::Result<Arc<Data>, String> {
         {
@@ -211,103 +224,39 @@ impl Loader {
                 return Ok(data.clone());
             }
         }
-        if !self.access.allows_media(uri) {
+        if inline.is_none() && !self.access.allows_media(uri) {
             return Err("image URL is not granted by capabilities.network".into());
         }
         if request.cancelled() {
             return Err("cancelled".into());
         }
-        let bytes = if uri.starts_with("asset:") {
+        let bytes = if let Some(inline) = inline {
+            if inline.len() > MAX_DATA {
+                return Err("image exceeds 16 MiB".into());
+            }
+            inline.to_vec()
+        } else if uri.starts_with("asset:") {
             self.assets.read(uri)?
-        } else if let Some(data) = uri.strip_prefix("data:") {
-            let (_, encoded) = data
-                .split_once(";base64,")
-                .ok_or("expected a base64 image data URI")?;
-            if encoded.len() > MAX_DATA * 4 / 3 + 4 {
+        } else if uri.starts_with("data:") {
+            let (_, bytes) = nsh_core::image::decode_data_uri(uri)?;
+            if bytes.len() > MAX_DATA {
                 return Err("image exceeds 16 MiB".into());
-            }
-            STANDARD.decode(encoded).map_err(|e| e.to_string())?
-        } else if uri.starts_with("http://") || uri.starts_with("https://") {
-            let mut url = uri.to_owned();
-            let proxy =
-                crate::services::net::SystemProxy::read().map_err(|error| error.to_string())?;
-            let mut response = None;
-            for hop in 0..=20 {
-                if request.cancelled() {
-                    return Err("cancelled".into());
-                }
-                let current = self
-                    .agent
-                    .get(&url)
-                    .config()
-                    .proxy(proxy.value())
-                    .build()
-                    .call()
-                    .map_err(|e| e.to_string())?;
-                let status = current.status().as_u16();
-                if matches!(status, 301 | 302 | 303 | 307 | 308)
-                    && let Some(location) = current.headers().get("location")
-                {
-                    if hop == 20 {
-                        return Err("too many image redirects".into());
-                    }
-                    url = self
-                        .access
-                        .media_redirect(&url, location.to_str().map_err(|e| e.to_string())?)?;
-                } else {
-                    if !(200..300).contains(&status) {
-                        return Err(format!("image HTTP status {status}"));
-                    }
-                    response = Some(current);
-                    break;
-                }
-            }
-            let mut response = response.ok_or("no image response")?;
-            let total = response
-                .headers()
-                .get("content-length")
-                .and_then(|n| n.to_str().ok())
-                .and_then(|n| n.parse::<u64>().ok())
-                .unwrap_or_default();
-            if total > MAX_DATA as u64 {
-                return Err("image exceeds 16 MiB".into());
-            }
-            let mut reader = response
-                .body_mut()
-                .with_config()
-                .limit(MAX_DATA as u64 + 1)
-                .reader();
-            let mut bytes = Vec::new();
-            let mut buffer = [0; 64 << 10];
-            let mut progress = Instant::now();
-            loop {
-                if request.cancelled() {
-                    return Err("cancelled".into());
-                }
-                let size = reader.read(&mut buffer).map_err(|e| e.to_string())?;
-                if size == 0 {
-                    break;
-                }
-                if bytes.len() + size > MAX_DATA {
-                    return Err("image exceeds 16 MiB".into());
-                }
-                bytes.extend_from_slice(&buffer[..size]);
-                if progress.elapsed() >= Duration::from_millis(100) {
-                    if let Some(dispatcher) = self.dispatcher.upgrade() {
-                        for waiter in request.waiters.lock().expect("image waiters").iter() {
-                            if !waiter.cancelled.load(Ordering::Relaxed) {
-                                dispatcher.image_progress(Progress {
-                                    target: waiter.target,
-                                    loaded: bytes.len() as u64,
-                                    total,
-                                });
-                            }
-                        }
-                    }
-                    progress = Instant::now();
-                }
             }
             bytes
+        } else if uri.starts_with("http://") || uri.starts_with("https://") {
+            let disk_cache = self.disk_cache.lock().expect("disk cache").clone();
+            match disk_cache {
+                Some(cache) => cache
+                    .load(uri, |headers| self.download(uri, headers, request))?
+                    .to_vec(),
+                None => {
+                    let fetched = self.download(uri, &[], request)?;
+                    if !(200..300).contains(&fetched.status) {
+                        return Err(format!("image HTTP status {}", fetched.status));
+                    }
+                    fetched.body
+                }
+            }
         } else {
             return Err("images require asset:/, data: or HTTP(S) URIs".into());
         };
@@ -349,6 +298,104 @@ impl Loader {
             }
         }
         Ok(data)
+    }
+    fn download(
+        &self,
+        uri: &str,
+        headers: &[(&'static str, String)],
+        request: &crate::media::request::Request<Target>,
+    ) -> std::result::Result<Fetched, String> {
+        let mut url = uri.to_owned();
+        let proxy = crate::services::net::SystemProxy::read().map_err(|error| error.to_string())?;
+        let mut response = None;
+        for hop in 0..=20 {
+            if request.cancelled() {
+                return Err("cancelled".into());
+            }
+            let mut req = self.agent.get(&url);
+            for (name, value) in headers {
+                req = req.header(*name, value);
+            }
+            let current = req
+                .config()
+                .proxy(proxy.value())
+                .build()
+                .call()
+                .map_err(|e| e.to_string())?;
+            let status = current.status().as_u16();
+            if matches!(status, 301 | 302 | 303 | 307 | 308)
+                && let Some(location) = current.headers().get("location")
+            {
+                if hop == 20 {
+                    return Err("too many image redirects".into());
+                }
+                url = self
+                    .access
+                    .media_redirect(&url, location.to_str().map_err(|e| e.to_string())?)?;
+            } else {
+                response = Some(current);
+                break;
+            }
+        }
+        let mut response = response.ok_or("no image response")?;
+        let status = response.status().as_u16();
+        let cache_headers = CacheHeaders::from_lookup(|name| {
+            let values: Vec<&str> = response
+                .headers()
+                .get_all(name)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .collect();
+            (!values.is_empty()).then(|| values.join(", "))
+        });
+        if status >= 300 {
+            return Ok(Fetched::new(status, cache_headers, Vec::new()));
+        }
+        let total = response
+            .headers()
+            .get("content-length")
+            .and_then(|n| n.to_str().ok())
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or_default();
+        if total > MAX_DATA as u64 {
+            return Err("image exceeds 16 MiB".into());
+        }
+        let mut reader = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_DATA as u64 + 1)
+            .reader();
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 64 << 10];
+        let mut progress = Instant::now();
+        loop {
+            if request.cancelled() {
+                return Err("cancelled".into());
+            }
+            let size = reader.read(&mut buffer).map_err(|e| e.to_string())?;
+            if size == 0 {
+                break;
+            }
+            if bytes.len() + size > MAX_DATA {
+                return Err("image exceeds 16 MiB".into());
+            }
+            bytes.extend_from_slice(&buffer[..size]);
+            if progress.elapsed() >= Duration::from_millis(100) {
+                if let Some(dispatcher) = self.dispatcher.upgrade() {
+                    for waiter in request.waiters.lock().expect("image waiters").iter() {
+                        if !waiter.cancelled.load(Ordering::Relaxed) {
+                            dispatcher.image_progress(Progress {
+                                target: waiter.target,
+                                loaded: bytes.len() as u64,
+                                total,
+                            });
+                        }
+                    }
+                }
+                progress = Instant::now();
+            }
+        }
+        Ok(Fetched::new(status, cache_headers, bytes))
     }
 }
 struct NativeImage {
@@ -573,6 +620,7 @@ impl ImageView {
                             placeholder,
                         },
                         source.uri.to_string(),
+                        source.data,
                     ));
                 }
             }

@@ -13,7 +13,7 @@ function App() {
   let badge: YNode | undefined;
   return <View
     testID={`viewport:${size()}`}
-    onLayout={event => size.set(`${Math.round(event.width)}:${Math.round(event.height)}`)}
+    onLayout={event => size.set(`${Math.round(event.size.width)}:${Math.round(event.size.height)}`)}
     style={{ flex: 1, padding: 16, gap: 12, backgroundColor: "#eef2ff" }}>
     <Text testID={`count:${count()}`} style={{ fontSize: 28 }}>{`Count ${count()}`}</Text>
     <View testID="increment" onPress={() => count.set(count() + 1)}

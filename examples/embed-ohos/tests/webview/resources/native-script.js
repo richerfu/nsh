@@ -1,1 +1,1 @@
-window.ReactNativeWebView.postMessage("asset-script");
+window.nsh.postMessage("asset-script");

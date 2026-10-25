@@ -1,7 +1,7 @@
 import { mount, signal, Text, View } from "nsh";
-import { Animated, createNativeValue } from "nsh/animated";
+import { Animated, createAnimatedValue } from "nsh/animated";
 import { Canvas } from "nsh/canvas";
-const amount = createNativeValue(0);
+const amount = createAnimatedValue(0);
 const state = signal("idle");
 const image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8DwH4QZYAwAR8oH+WdZbrcAAAAASUVORK5CYII=";
 function App() {

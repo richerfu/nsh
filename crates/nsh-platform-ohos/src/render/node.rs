@@ -640,11 +640,13 @@ impl Node {
             return Ok(());
         }
         if let Some(transition) = animation.and_then(|a| a.create) {
-            self.live
+            let initial = self
+                .live
                 .borrow_mut()
                 .get_or_insert_with(Default::default)
-                .present(transition, 0.0, 1.0);
-            self.tick_transition(self.animator.now())?;
+                .appear(transition);
+            self.extra.set(initial);
+            self.restore_style()?;
             self.animator.track(self);
         }
         Ok(())
@@ -679,14 +681,10 @@ impl Node {
             Attribute::HitTestBehavior,
             ohos_arkui_binding::types::view::HitTestMode::None.into(),
         )?;
-        let from = match transition.property {
-            nsh_core::LayoutProperty::Opacity => self.extra.get().0,
-            nsh_core::LayoutProperty::Scale => self.extra.get().1.scale,
-        };
         self.live
             .borrow_mut()
             .get_or_insert_with(Default::default)
-            .present(transition, from, 0.0);
+            .disappear(transition);
         self.animator.track(self);
         Ok(true)
     }
@@ -721,7 +719,7 @@ impl Node {
         let step = if self.platform.get().reduce_motion {
             live.finish(&mut self.style.borrow_mut())
         } else {
-            live.step(now, &mut self.style.borrow_mut())
+            live.step(now, self.frame.get(), &mut self.style.borrow_mut())
         };
         if step.active {
             *self.live.borrow_mut() = Some(live);
@@ -981,10 +979,10 @@ impl Node {
             m
         } else {
             Matrix::of(K::Scale, extra.scale as f64)
-                .mul(&Matrix::of(K::Rotate, extra.rotate as f64))
+                .mul(&Matrix::of(K::Rotate, extra.rotate.to_degrees() as f64))
                 .mul(&Matrix::of(
                     K::TranslateY,
-                    (extra.shift_y * self.frame.get().height) as f64,
+                    (extra.shift_y.0 * self.frame.get().height) as f64,
                 ))
                 .mul(&m)
         };
@@ -1129,13 +1127,44 @@ impl Node {
                         .map(|(link, _)| link.node)
                 })
         };
+        let payload = self.press_payload(x, y);
         if let Some(id) = target {
             if self.active.get() {
-                self.control.dispatch_event(id, event, EventPayload::None);
+                self.control.dispatch_event(id, event, payload);
             }
         } else if self.interaction.mask().contains(event) {
-            self.emit(event, EventPayload::None);
+            self.emit(event, payload);
         }
+    }
+    pub(crate) fn press_payload(&self, x: f32, y: f32) -> EventPayload {
+        let position = nsh_core::Point::new(Points(x), Points(y));
+        let mut page_position = position;
+        if self.id != nsh_core::ROOT_ID
+            && self.kind != ViewKind::Modal
+            && let Ok(node_pos) = self.native.borrow().layout_position_in_window()
+        {
+            let mut top = self.parent_node.borrow().upgrade();
+            let mut root_origin = None;
+            while let Some(parent) = top {
+                if parent.id == nsh_core::ROOT_ID || parent.kind == ViewKind::Modal {
+                    root_origin = parent.native.borrow().layout_position_in_window().ok();
+                    break;
+                }
+                top = parent.parent_node.borrow().upgrade();
+            }
+            if let Some(origin) = root_origin {
+                page_position = nsh_core::Point::new(
+                    Points((node_pos.x - origin.x) as f32 / self.scale + x),
+                    Points((node_pos.y - origin.y) as f32 / self.scale + y),
+                );
+            }
+        }
+        EventPayload::Press(nsh_core::PressEvent {
+            position,
+            page_position,
+            modifiers: Default::default(),
+            clicks: 1,
+        })
     }
     pub(crate) fn press_feedback_allowed(&self) -> bool {
         if !self.touches.borrow().press_allowed(self.id) {

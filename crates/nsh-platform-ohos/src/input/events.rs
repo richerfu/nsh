@@ -162,18 +162,20 @@ impl Interaction {
                             {
                                 owner.touches.borrow_mut().input(&owner, &input)?;
                             }
+                            let x = input.pointer_x_by_index(0);
+                            let y = input.pointer_y_by_index(0);
                             match input.action {
                                 UIInputAction::Down => {
                                     owner.interaction.long_fired.set(false);
                                     if owner.press_feedback_allowed() {
                                         owner.interaction.state(&owner, state::PRESSED, true)?;
-                                        owner.emit(EventKind::PressDown, EventPayload::None);
+                                        owner.emit(EventKind::PressDown, owner.press_payload(x, y));
                                     }
                                 }
                                 UIInputAction::Up | UIInputAction::Cancel => {
                                     owner.interaction.state(&owner, state::PRESSED, false)?;
                                     if owner.press_feedback_allowed() {
-                                        owner.emit(EventKind::PressUp, EventPayload::None);
+                                        owner.emit(EventKind::PressUp, owner.press_payload(x, y));
                                     }
                                 }
                                 _ => {}
@@ -430,25 +432,40 @@ impl Interaction {
                                         .set(id, start[1] + pan.offset_y / owner.scale)?;
                                 }
                                 if accept || ended {
+                                    let translation = nsh_core::Point::new(
+                                        nsh_core::Points(pan.offset_x / owner.scale),
+                                        nsh_core::Points(pan.offset_y / owner.scale),
+                                    );
+                                    let velocity_x = pan.velocity_x / owner.scale;
+                                    let velocity_y = pan.velocity_y / owner.scale;
+                                    let value_x = values
+                                        .pan_x
+                                        .map(|id| nsh_core::Points(owner.animator.value(id)));
+                                    let value_y = values
+                                        .pan_y
+                                        .map(|id| nsh_core::Points(owner.animator.value(id)));
                                     owner.emit(
                                         if accept {
                                             EventKind::PanStart
                                         } else {
                                             EventKind::PanEnd
                                         },
-                                        EventPayload::Pan {
-                                            translation: nsh_core::Point::new(
-                                                nsh_core::Points(pan.offset_x / owner.scale),
-                                                nsh_core::Points(pan.offset_y / owner.scale),
-                                            ),
-                                            velocity_x: pan.velocity_x / owner.scale,
-                                            velocity_y: pan.velocity_y / owner.scale,
-                                            value_x: values.pan_x.map(|id| {
-                                                nsh_core::Points(owner.animator.value(id))
-                                            }),
-                                            value_y: values.pan_y.map(|id| {
-                                                nsh_core::Points(owner.animator.value(id))
-                                            }),
+                                        if event.event_action_type == GestureEventAction::Cancel {
+                                            EventPayload::PanCancelled {
+                                                translation,
+                                                velocity_x,
+                                                velocity_y,
+                                                value_x,
+                                                value_y,
+                                            }
+                                        } else {
+                                            EventPayload::Pan {
+                                                translation,
+                                                velocity_x,
+                                                velocity_y,
+                                                value_x,
+                                                value_y,
+                                            }
                                         },
                                     );
                                 }

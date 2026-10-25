@@ -9,21 +9,42 @@ import importlib.util
 from pathlib import Path
 import time
 
-from PIL import Image
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 module = importlib.util.spec_from_file_location(
     "surfaces", Path(__file__).with_name("check-surfaces.py"))
 surfaces = importlib.util.module_from_spec(module)
 module.loader.exec_module(surfaces)
+_images_spec = importlib.util.spec_from_file_location(
+    "images", Path(__file__).with_name("check-images.py"))
+_images = importlib.util.module_from_spec(_images_spec)
+_images_spec.loader.exec_module(_images)
+
+
+class _PngImage:
+    def __init__(self, reader):
+        self._reader = reader
+
+    def getpixel(self, xy):
+        return self._reader(xy[0], xy[1])
 
 
 def check(device):
     def shot(name):
-        remote = "/data/local/tmp/nsh-composition.jpeg"
-        local = device.directory / f"{name}.jpeg"
-        device.run("shell", "snapshot_display", "-f", remote)
+        if Image is not None:
+            remote = "/data/local/tmp/nsh-composition.jpeg"
+            local = device.directory / f"{name}.jpeg"
+            device.run("shell", "snapshot_display", "-f", remote)
+            device.run("file", "recv", remote, str(local))
+            return Image.open(local).convert("RGB")
+        remote = "/data/local/tmp/nsh-composition.png"
+        local = device.directory / f"{name}.png"
+        device.run("shell", "uitest", "screenCap", "-p", remote)
         device.run("file", "recv", remote, str(local))
-        return Image.open(local).convert("RGB")
+        return _PngImage(_images.pixels(local))
 
     def pixel(image, bounds, point, expected):
         left, top, right, bottom = device.bounds(bounds)

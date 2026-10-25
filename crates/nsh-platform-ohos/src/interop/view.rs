@@ -36,16 +36,20 @@ impl Wrapper {
         self.context_live.set(false);
         // Keep the old target through SDK lifecycle cleanup; replacement queues its final owner.
     }
+    fn replace_target(&self, owner: &Node) -> Result<u32> {
+        let target = NativeAttachment::for_subtree(&self.outer, &owner.native)?;
+        let id = target.id();
+        if let Some(old) = self.target.replace(Some(target)) {
+            owner.view_remove(old);
+        }
+        // The native target is the unique, nonreused callback generation.
+        let weak = self.owner.clone();
+        *self.route.borrow_mut() = Some(ViewRoute::new(id, weak, &owner.native));
+        Ok(id)
+    }
     fn ensure_context(&self, owner: &Node) -> Result<()> {
         if !self.context_live.get() {
-            let target = NativeAttachment::for_subtree(&self.outer, &owner.native)?;
-            let id = target.id();
-            if let Some(old) = self.target.replace(Some(target)) {
-                owner.view_remove(old);
-            }
-            // The native target is the unique, nonreused callback generation.
-            let weak = self.owner.clone();
-            *self.route.borrow_mut() = Some(ViewRoute::new(id, weak, &owner.native));
+            let id = self.replace_target(owner)?;
             if self.composite.borrow_mut().take().is_some() {
                 *self.composite.borrow_mut() =
                     Some(crate::render::composition::worker::Composite::new(
@@ -198,6 +202,19 @@ impl Wrapper {
             return Ok(());
         }
         self.ensure_context(owner)?;
+        let texture_surface = self
+            .composite
+            .borrow()
+            .as_ref()
+            .and_then(|composite| composite.surface());
+        if self
+            .settings
+            .borrow()
+            .as_ref()
+            .is_some_and(|previous| previous.texture_surface != texture_surface)
+        {
+            self.replace_target(owner)?;
+        }
         let Some(target_id) = self.target.borrow().as_ref().map(NativeAttachment::id) else {
             return Ok(());
         };
@@ -209,11 +226,7 @@ impl Wrapper {
                 .borrow()
                 .as_ref()
                 .map(|composite| composite.insets()),
-            texture_surface: self
-                .composite
-                .borrow()
-                .as_ref()
-                .and_then(|composite| composite.surface()),
+            texture_surface,
             target_id,
             test_id: owner.interaction.test_id(),
             width: frame.width as f64,

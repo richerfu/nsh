@@ -96,6 +96,7 @@ impl CanvasView {
                         index: next.len(),
                     },
                     image.uri.to_string(),
+                    None,
                 )
             } else {
                 Arc::new(AtomicBool::new(false))

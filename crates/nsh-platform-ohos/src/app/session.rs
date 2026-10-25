@@ -63,6 +63,11 @@ enum Operation {
         text: Option<String>,
         request: Option<(u32, bool)>,
     },
+    OpenUrl {
+        route: Weak<Dispatcher>,
+        id: u32,
+        url: String,
+    },
     Window,
     Accessibility,
     Stop,
@@ -395,6 +400,9 @@ impl Services {
                             text,
                             request,
                         } => services.clipboard(route, text, request),
+                        Operation::OpenUrl { route, id, url } => {
+                            services.open_url_operation(route, id, url)
+                        }
                         Operation::Window => services.window(),
                         Operation::Accessibility => services.accessibility(),
                         Operation::Stop => unreachable!(),
@@ -609,6 +617,29 @@ impl Services {
             text,
             request,
         })
+    }
+
+    pub(crate) fn open_url(&self, route: Weak<Dispatcher>, id: u32, url: String) -> Result<()> {
+        self.enqueue(Operation::OpenUrl { route, id, url })
+    }
+
+    fn open_url_operation(&self, route: Weak<Dispatcher>, id: u32, url: String) {
+        use openharmony_ability_plugin_url::UrlExt;
+        if route.strong_count() == 0 {
+            return;
+        }
+        let opened = futures_executor::block_on(self.app.open_url(url)).is_ok();
+        if self.check().is_ok()
+            && let Some(route) = route.upgrade()
+        {
+            route.send(Message::HostEvent(
+                EventKind::OpenUrl,
+                EventPayload::Map(vec![
+                    ("id", PayloadValue::Number(id as f64)),
+                    ("opened", PayloadValue::Bool(opened)),
+                ]),
+            ));
+        }
     }
 
     fn enqueue(&self, operation: Operation) -> Result<()> {

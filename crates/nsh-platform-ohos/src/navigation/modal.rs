@@ -57,9 +57,9 @@ impl Modal {
             overlay: RefCell::default(),
         });
         let weak = Rc::downgrade(&modal);
-        modal.dialog.borrow().dismiss_handler(move |_| {
+        modal.dialog.borrow().dismiss_handler(move |reason| {
             if let Some(modal) = weak.upgrade() {
-                crate::render::node::callback(|| modal.request_close());
+                crate::render::node::callback(|| modal.on_dismiss_attempt(reason.into()));
             }
             // Dismissal is always answered from mounted props and animated here.
             true
@@ -123,13 +123,28 @@ impl Modal {
         Ok(())
     }
     pub(crate) fn request_close(&self) -> Result<()> {
+        self.on_dismiss_attempt(0)
+    }
+    fn on_dismiss_attempt(&self, reason: i32) -> Result<()> {
         if self.closing.get() {
             return Ok(());
         }
+        let config = self.config.get();
+        let (reason_str, should_close) = match reason {
+            1 => ("backdropPress", config.close_on_backdrop_press),
+            3 => ("swipe", config.close_on_swipe),
+            _ => ("cancel", config.close_on_escape),
+        };
         if let Some(owner) = self.owner.upgrade() {
-            owner.emit(EventKind::RequestClose, EventPayload::None);
+            owner.emit(
+                EventKind::RequestClose,
+                EventPayload::Map(vec![(
+                    "reason",
+                    nsh_core::PayloadValue::Str(reason_str.into()),
+                )]),
+            );
         }
-        if self.config.get().close_on_escape {
+        if should_close {
             self.close(true)?;
         }
         Ok(())
@@ -159,7 +174,7 @@ impl Modal {
         let duration = if self.config.get().animation == ModalAnimation::None || reduced {
             0.0
         } else {
-            0.3 * (self.progress.get() - to).abs()
+            nsh_core::navigation::MODAL.as_secs_f32() * (self.progress.get() - to).abs()
         };
         if duration <= 0.0 {
             return self.finish(to);
@@ -180,7 +195,7 @@ impl Modal {
         let state = self.transition.borrow().as_ref().map(|transition| {
             let t =
                 (transition.start.elapsed().as_secs_f32() / transition.duration).clamp(0.0, 1.0);
-            let eased = t * t * (3.0 - 2.0 * t);
+            let eased = nsh_core::navigation::ease(t as f64);
             (
                 transition.from + (transition.to - transition.from) * eased,
                 t >= 1.0,
@@ -205,7 +220,7 @@ impl Modal {
                 1.0
             };
             let dy = if self.config.get().animation == ModalAnimation::Slide {
-                (1.0 - progress) * owner.frame.get().height
+                nsh_core::navigation::modal_in_offset(Points(owner.frame.get().height), progress).0
             } else {
                 0.0
             };

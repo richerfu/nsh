@@ -70,7 +70,9 @@ impl Decoration {
             .flat_map(|e| &e.background_images)
         {
             if matches!(g.kind, GradientKind::Conic { .. }) && g.repeating && !g.stops.is_empty() {
-                let stops = g.resolved_stops(CoreSize::default());
+                let frame = owner.frame.get();
+                let stops =
+                    g.resolved_stops(CoreSize::new(Points(frame.width), Points(frame.height)));
                 let span = stops.last().unwrap().1.0 - stops[0].1.0;
                 if span > 1e-5 && (1.0 / span + 3.0) * stops.len() as f32 > 4096.0 {
                     log::warn!("OHOS repeating conic gradient: limiting repeated stops to 4096");

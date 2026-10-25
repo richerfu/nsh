@@ -16,7 +16,7 @@ export default class EntryAbility extends NativeAbility {
     new LazyPlugin(() => new ResourcePlugin()),
     new LazyPlugin(() => new AccessibilityPlugin()),
     ...nativeShellPlugins(),
-    new LazyPlugin(() => new ClipboardPlugin({ metadataMimeType: "application/x-nsh-clipboard" })),
+    new LazyPlugin(() => new ClipboardPlugin()),
     new LazyPlugin(() => new WindowPlugin()),
     new LazyPlugin(() => new WebviewPlugin()),
     new LazyPlugin(() => new UrlPlugin()),

@@ -20,12 +20,12 @@ function App() {
     <Text testID={`password-state:${value().length}:${value().split("\n").length}:${changes()}:${focus()}`}>Length {value().length}; lines {value().split("\n").length}; changes {changes()}</Text>
     <Text testID={`password-selection:${selection()}`}>Selection {selection()}</Text>
     <If when={visible()}>
-      <Input ref={editor} testID="password-editor" secureTextEntry multiline={multiline()} value={value()} editable={editable()} submitBehavior={submit() ? "blurAndSubmit" : "newline"}
+      <Input ref={editor} testID="password-editor" masked multiline={multiline()} value={value()} readonly={!editable()} submitBehavior={submit() ? "blurAndSubmit" : "newline"}
         accessibilityLabel="Multiline password" placeholder="Multiline password" maxLength={80}
-        onChangeText={text => { value.set(text); changes.set(changes() + 1); }}
+        onChange={text => { value.set(text); changes.set(changes() + 1); }}
         onSelectionChange={event => selection.set(`${event.start}:${event.end}`)}
         onFocus={() => focus.set(true)} onBlur={() => focus.set(false)}
-        onSubmitEditing={() => submitted.set(submitted() + 1)}
+        onSubmit={() => submitted.set(submitted() + 1)}
         style={{ height: 110, padding: 8, fontSize: 24, lineHeight: 32, borderWidth: 1, borderColor: "#64748b" }} />
     </If>
     <View style={{ flexDirection: "row", gap: 8 }}>
@@ -44,8 +44,8 @@ function App() {
     {action(`password-submit:${submit()}`, "Return behavior", () => submit.set(!submit()))}
     </View>
     <View style={{ flexDirection: "row", gap: 8 }}>
-    {action("password-clipboard-seed", "Seed clipboard", () => Clipboard.setString("paste😀\nline"))}
-    {action("password-clipboard-read", "Check clipboard", async () => clipboard.set((await Clipboard.getString()) === "paste😀\nline" ? "seed" : "changed"))}
+    {action("password-clipboard-seed", "Seed clipboard", () => { void Clipboard.writeText("paste😀\nline"); })}
+    {action("password-clipboard-read", "Check clipboard", async () => clipboard.set((await Clipboard.readText()) === "paste😀\nline" ? "seed" : "changed"))}
     </View>
     {action(`password-multiline:${multiline()}`, "Toggle multiline", () => multiline.set(!multiline()))}
     <Text testID={`password-submitted:${submitted()}`}>Submitted {submitted()}</Text>

@@ -11,7 +11,7 @@ function App() {
   const pressed = signal(false);
   return <View style={{ flex: 1, padding: 12, gap: 8, backgroundColor: "white" }}>
     <Text>Live native subtree composition</Text>
-    <Scroll testID="composition-scroll" onScroll={event => offset.set(Math.round(event.y))} style={{ position: "absolute", left: 260, top: 50, width: 140, height: 180, backgroundColor: "#ffeecc" }}>
+    <Scroll testID="composition-scroll" onScroll={event => offset.set(Math.round(event.offset.y))} style={{ position: "absolute", left: 260, top: 50, width: 140, height: 180, backgroundColor: "#ffeecc" }}>
       <View style={{ height: 600, width: 140, backgroundColor: "#88ccaa" }}><Text>Native scroll chrome</Text></View>
     </Scroll>
     <Text testID={`composition-offset:${offset()}`} style={{ position: "absolute", left: 260, top: 240 }}>Scroll {offset()}</Text>
@@ -35,7 +35,7 @@ function App() {
       <View style={{ position: "absolute", left: 180, top: 0, width: 40, height: 60, backgroundColor: "#6680e680", mixBlendMode: composed() ? "plus-darker" : "normal" }} />
     </View>
     <View testID={`composition-scene:${composed()}`} onPress={() => composed.set(!composed())} style={{ height: 24, backgroundColor: "#dbeafe" }}><Text>Toggle backdrop composition</Text></View>
-    <View testID={`composition-background:${background()}`} onPressIn={() => pressed.set(true)} onPressOut={() => pressed.set(false)} onPress={() => { presses.set(presses() + 1); background.set(!background()); }} style={{ height: 24, backgroundColor: "#dbeafe" }}><Text testID={`composition-pressed:${pressed()}`}>Change backdrop source</Text></View>
+    <View testID={`composition-background:${background()}`} onPressDown={() => pressed.set(true)} onPressUp={() => pressed.set(false)} onPress={() => { presses.set(presses() + 1); background.set(!background()); }} style={{ height: 24, backgroundColor: "#dbeafe" }}><Text testID={`composition-pressed:${pressed()}`}>Change backdrop source</Text></View>
     <View testID={`composition-shift:${shifted()}`} onPress={() => shifted.set(!shifted())} style={{ height: 24, backgroundColor: "#dbeafe" }}><Text>Move source child</Text></View>
     <View testID="composition-retire" onPress={() => visible.set(false)} style={{ height: 24, backgroundColor: "#dbeafe" }}><Text>Retire exports</Text></View>
     <View testID="composition-remount" onPress={() => visible.set(true)} style={{ height: 24, backgroundColor: "#dbeafe" }}><Text>Recreate exports</Text></View>

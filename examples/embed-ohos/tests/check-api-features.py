@@ -41,7 +41,7 @@ def check(device, directory, api23, api26):
     pixels = screenshot()
     for node in device.matching("hue-host"):
         left, top, right, bottom = device.bounds(node)
-        assert pixels((left + right) // 2, (top + bottom) // 2) == (0, 255, 0)
+        assert pixels((left + right) // 2, (top + bottom) // 2) == (0, 113, 0)
     for node in device.matching("layered-shadow"):
         left, top, right, bottom = device.bounds(node)
         unit = (right - left) / 160

@@ -556,6 +556,15 @@ impl Runtime {
         );
         let access = Arc::new(app.bundle.policy.access());
         let assets = app.assets.clone();
+        let cache_root = config.host.video_cache_directory().ok();
+        let data_dir = cache_root
+            .as_ref()
+            .and_then(|dir| dir.parent().map(|parent| parent.join("files/nsh")))
+            .or_else(|| cache_root.as_ref().map(|dir| dir.join("nsh-data")));
+        let mut cache = nsh_engine::CacheOptions::default();
+        if let Some(dir) = &cache_root {
+            cache.location = nsh_engine::CacheLocation::Dir(dir.join("nsh"));
+        }
         let engine_config = EngineConfig {
             app: app.bundle.into(),
             viewport: size.into(),
@@ -569,8 +578,8 @@ impl Runtime {
             limits: config.limits,
             ui_sets: vec![nsh_base::registry()],
             runtime: None,
-            data_dir: None,
-            cache: Default::default(),
+            data_dir,
+            cache,
             storage: None,
             clock: Default::default(),
             context: Default::default(),
@@ -585,6 +594,7 @@ impl Runtime {
             Sink(dispatcher.clone(), app.chunks),
         )
         .map_err(|error| napi_ohos::Error::from_reason(error.to_string()))?;
+        images.set_disk_cache(engine.image_cache());
         let control = engine.control();
         let context = Rc::new(crate::render::mount::UiContext {
             scene: RefCell::default(),

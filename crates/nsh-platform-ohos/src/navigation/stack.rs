@@ -224,23 +224,18 @@ impl Screen {
         let fade = self.config.borrow().animation == ScreenAnimation::Fade
             || owner.platform.get().reduce_motion;
         let sign = if owner.platform.get().rtl { -1.0 } else { 1.0 };
+        let (enter_x, _) =
+            nsh_core::navigation::push_offsets(nsh_core::Points(owner.frame.get().width), 1.0 - p);
         owner.navigation_presentation(
             if fade { 1.0 - p } else { 1.0 },
-            if fade {
-                0.0
-            } else {
-                p * owner.frame.get().width * sign
-            },
+            if fade { 0.0 } else { enter_x.0 * sign },
         )?;
         if let Some(peer) = self.peer.borrow().upgrade() {
-            peer.navigation_presentation(
-                1.0,
-                if fade {
-                    0.0
-                } else {
-                    -0.3 * (1.0 - p) * peer.frame.get().width * sign
-                },
-            )?;
+            let (_, below_x) = nsh_core::navigation::push_offsets(
+                nsh_core::Points(peer.frame.get().width),
+                1.0 - p,
+            );
+            peer.navigation_presentation(1.0, if fade { 0.0 } else { below_x.0 * sign })?;
         }
         Ok(())
     }

@@ -24,6 +24,7 @@ pub(crate) struct Animator {
     bindings: RefCell<Vec<Option<Bindings>>>,
     motion: RefCell<Vec<Option<Weak<Node>>>>,
     scrolls: RefCell<Vec<Option<Weak<Node>>>>,
+    sticky: RefCell<Vec<Option<Weak<Node>>>>,
     selection: RefCell<Weak<Node>>,
     removals: RefCell<Vec<u32>>,
     control: EngineControl,
@@ -41,6 +42,7 @@ impl Animator {
             bindings: RefCell::default(),
             motion: RefCell::default(),
             scrolls: RefCell::default(),
+            sticky: RefCell::default(),
             selection: RefCell::default(),
             removals: RefCell::default(),
             control,
@@ -77,6 +79,16 @@ impl Animator {
         if let Some(slot) = self.scrolls.borrow_mut().get_mut(id as usize) {
             *slot = None;
         }
+        if let Some(slot) = self.sticky.borrow_mut().get_mut(id as usize) {
+            *slot = None;
+        }
+    }
+    pub(crate) fn set_sticky(&self, owner: &Rc<Node>, animated: bool) {
+        let mut sticky = self.sticky.borrow_mut();
+        if sticky.len() <= owner.id as usize {
+            sticky.resize_with(owner.id as usize + 1, || None);
+        }
+        sticky[owner.id as usize] = animated.then(|| Rc::downgrade(owner));
     }
     pub(crate) fn now(&self) -> f64 {
         self.clock.elapsed().as_secs_f64() * 1000.0
@@ -180,6 +192,17 @@ impl Animator {
                 );
             }
             owner.animate(&values)?;
+        }
+        for owner in self
+            .sticky
+            .borrow()
+            .iter()
+            .flatten()
+            .filter_map(Weak::upgrade)
+        {
+            if let Some(scroll) = owner.scroll.borrow().as_ref() {
+                scroll.pin_sticky()?;
+            }
         }
         let finished = std::mem::take(&mut self.state.borrow_mut().finished);
         if !finished.is_empty() {

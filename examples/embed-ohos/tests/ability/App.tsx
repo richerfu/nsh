@@ -1,6 +1,6 @@
 import { mount, signal, Text, View } from "nsh";
 import { Clipboard } from "nsh/clipboard";
-import { Platform, PixelRatio } from "nsh/device";
+import { platform, fontScale } from "nsh/device";
 import { Image } from "nsh/image";
 import pixel from "./pixel.png";
 
@@ -10,14 +10,14 @@ function App() {
   const has = signal("idle");
   const image = signal("loading");
   const copy = () => {
-    Clipboard.setString(value());
+    void Clipboard.writeText(value());
     result.set("pending");
-    Clipboard.getString().then(text => result.set(text));
-    Clipboard.hasString().then(value => has.set(String(value)));
+    Clipboard.readText().then(text => result.set(text));
+    Clipboard.hasText().then(value => has.set(String(value)));
   };
   return <View style={{ flex: 1, padding: 16, gap: 12, backgroundColor: "#f3f4f6" }}>
     <Text testID={`reply:${value()}:${result()}:${has()}:${image()}`}>{`${value()} → ${result()} (${has()})`}</Text>
-    <Text testID={`platform:${Platform.OS}:${Platform.Version}:${PixelRatio.getFontScale()}`}>{`${Platform.OS} API ${Platform.Version}`}</Text>
+    <Text testID={`platform:${platform.os}:${platform.version}:${fontScale()}`}>{`${platform.os} API ${platform.version}`}</Text>
     <View testID="alpha" onPress={() => value.set("alpha")} style={{ height: 52, backgroundColor: "#bfdbfe" }}><Text>Alpha</Text></View>
     <View testID="beta" onPress={() => value.set("beta")} style={{ height: 52, backgroundColor: "#bbf7d0" }}><Text>Beta</Text></View>
     <View testID="copy" onPress={copy} style={{ height: 52, backgroundColor: "#fde68a" }}><Text>Copy and read through Ability</Text></View>

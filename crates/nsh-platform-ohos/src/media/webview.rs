@@ -33,7 +33,7 @@ use crate::{
     },
 };
 
-const BRIDGE: &str = "window.ReactNativeWebView={postMessage:function(data){window.__nshNative.postMessage(String(data));}};";
+const BRIDGE: &str = "window.nsh = window.nsh || { postMessage: function (data) { window.__nshNative.postMessage(String(data)); } };";
 struct AssetReply(Option<openharmony_ability_plugin_webview::WebviewProtocolResponder>);
 impl AssetReply {
     fn respond(mut self, response: ureq::http::Response<Vec<u8>>) {

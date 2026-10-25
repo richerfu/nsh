@@ -765,15 +765,24 @@ impl Scroller {
                 node.pin(0.0, 0.0)?;
             }
         }
+        let animated = cells.iter().any(|(c, _)| c.offset.is_some());
         *self.sticky.borrow_mut() = cells;
+        if let Some(owner) = self.owner.upgrade() {
+            owner.animator.set_sticky(&owner, animated);
+        }
         self.pin_sticky()
     }
-    fn pin_sticky(&self) -> Result<()> {
+    pub(crate) fn pin_sticky(&self) -> Result<()> {
         let horizontal = self.horizontal.get();
         let offset = self.offset.get();
+        let owner = self.owner.upgrade();
         for (cell, node) in self.sticky.borrow().iter() {
             if let Some(node) = node.upgrade() {
-                let shift = ((if horizontal { offset.0 } else { offset.1 }) - cell.start.0)
+                let extra = cell
+                    .offset
+                    .and_then(|id| owner.as_ref().map(|o| o.animator.value(id)))
+                    .unwrap_or(0.0);
+                let shift = ((if horizontal { offset.0 } else { offset.1 }) + extra - cell.start.0)
                     .clamp(0.0, (cell.end.0 - cell.start.0).max(0.0));
                 node.pin(
                     if horizontal { shift } else { 0.0 },

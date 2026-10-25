@@ -13,7 +13,7 @@ impl Motion {
             from,
             to,
             duration: if animated {
-                300.0 * (from - to).abs() as f64
+                nsh_core::navigation::SLIDE.as_secs_f64() * 1000.0 * (from - to).abs() as f64
             } else {
                 0.0
             },
@@ -26,7 +26,7 @@ impl Motion {
             ((now - self.start) / self.duration).clamp(0.0, 1.0) as f32
         };
         (
-            self.from + (self.to - self.from) * (1.0 - (1.0 - t).powi(3)),
+            self.from + (self.to - self.from) * nsh_core::navigation::ease(t as f64),
             t >= 1.0,
             self.to,
         )

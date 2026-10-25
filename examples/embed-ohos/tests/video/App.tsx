@@ -1,5 +1,5 @@
 import { mount, signal, View, Text, Scroll, type YNode } from "nsh";
-import { Modal } from "nsh/base";
+import { Dialog } from "nsh/base";
 import { Video } from "nsh/video";
 import sample from "./sample.mp4";
 function App() {
@@ -14,7 +14,7 @@ function App() {
   };
   const state = signal("idle"), progress = signal(0), paused = signal(false), shown = signal(true), controls = signal(false), volume = signal(1);
   const button = (id: string, label: string, press: () => void) => <View testID={id} onPress={press} style={{ height: 32, backgroundColor: "#dbeafe" }}><Text>{label}</Text></View>;
-  const media = () => <Video ref={video} source={source()} paused={paused()} controls={controls()} volume={volume()} repeat={true}
+  const media = () => <Video ref={video} src={source()} paused={paused()} controls={controls()} volume={volume()} repeat={true}
           testID="embedded-video" style={{ transform: geometry() ? [{ translateX: 30 }, { rotate: 8 }, { scale: 0.85 }] : [], height: 180, marginVertical: 8, overflow: "hidden", borderRadius: 12 }}
           onLoad={() => { state.set("loaded"); loads.update(v => v + 1); }} onProgress={e => progress.set(Math.floor(e.currentTime))}
           onError={e => state.set(`error:${e.message}`)} onEnd={() => { if (!state().startsWith("error:")) state.set("ended"); }} />;
@@ -45,12 +45,12 @@ function App() {
       <View style={{ height: 500 }} />
     </Scroll>
     <If when={modal()}>
-      <Modal visible={true} animationType="none" onRequestClose={() => modal.set(false)}>
+      <Dialog open={true} animation="none" onOpenChange={open => { if (!open) modal.set(false); }}>
         <View testID="media-modal" style={{ flex: 1, padding: 30, backgroundColor: "white" }}>
           {button("media-modal-close", "Close media modal", () => modal.set(false))}
           {media()}
         </View>
-      </Modal>
+      </Dialog>
     </If>
   </View>;
 }

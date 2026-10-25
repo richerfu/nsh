@@ -32,7 +32,7 @@ function App() {
     </Scroll>
     <Text testID={`snap:${Math.round(offset())}`}>{`Snap offset ${Math.round(offset())}`}</Text>
     <Scroll ref={snap} testID="snap-scroll" snapToInterval={100} disableIntervalMomentum={true} decelerationRate="fast"
-      onScroll={e => offset.set(e.y)} style={{ height: 100, backgroundColor: "#e0e7ff" }}>
+      onScroll={e => offset.set(e.offset.y)} style={{ height: 100, backgroundColor: "#e0e7ff" }}>
       <Each of={Array.from({ length: 20 }, (_, i) => i)}>{i => <Text style={{ height: 50 }}>{`Snap row ${i()}`}</Text>}</Each>
     </Scroll>
     <Scroll ref={center} testID="center-scroll" centerContent={true} minimumZoomScale={0.5} maximumZoomScale={2} style={{ height: 80, backgroundColor: "#f3f4f6" }}>

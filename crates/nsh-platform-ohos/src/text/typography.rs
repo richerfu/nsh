@@ -49,6 +49,7 @@ impl Drop for Reservation {
 }
 pub(crate) struct Prepared {
     paragraph: RefCell<Typography>,
+    utf16: Vec<u16>,
     no_wrap: bool,
     links: Vec<nsh_core::TextLink>,
     decorations: Vec<crate::text::decoration::Decoration>,
@@ -252,6 +253,7 @@ impl TextEngine for OhosTextEngine {
         }
         Prepared {
             paragraph: RefCell::new(builder.build()),
+            utf16,
             no_wrap: text.no_wrap,
             links: text.links.clone(),
             decorations,
@@ -305,18 +307,22 @@ impl TextEngine for OhosTextEngine {
         // Geometry remains available even if this block cannot obtain a raster.
         raster.lines = (0..paragraph.line_count().min(i32::MAX as usize))
             .filter_map(|index| paragraph.line_metrics(index as i32))
-            .map(|line| nsh_core::TextLine {
-                text: String::new(),
-                start: line.start_index as u32,
-                end: line.end_index as u32,
-                x: Points(line.x as f32),
-                y: Points(line.y as f32),
-                width: Points(line.width as f32),
-                height: Points(line.height as f32),
-                ascender: Points(line.ascender as f32),
-                descender: Points(line.descender as f32),
-                cap_height: Points(line.cap_height as f32),
-                x_height: Points(line.x_height as f32),
+            .map(|line| {
+                let start = line.start_index.min(prepared.utf16.len());
+                let end = line.end_index.min(prepared.utf16.len()).max(start);
+                nsh_core::TextLine {
+                    text: String::from_utf16_lossy(&prepared.utf16[start..end]),
+                    start: line.start_index as u32,
+                    end: line.end_index as u32,
+                    x: Points(line.x as f32),
+                    y: Points(line.y as f32),
+                    width: Points(line.width as f32),
+                    height: Points(line.height as f32),
+                    ascender: Points(line.ascender as f32),
+                    descender: Points(line.descender as f32),
+                    cap_height: Points(line.cap_height as f32),
+                    x_height: Points(line.x_height as f32),
+                }
             })
             .collect();
         raster.links = prepared

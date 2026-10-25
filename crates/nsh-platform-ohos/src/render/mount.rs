@@ -16,18 +16,22 @@ use crate::{
 };
 
 struct MountTarget {
-    parent: crate::render::node::NativeNode,
+    parent: std::rc::Weak<std::cell::RefCell<ohos_arkui_binding::common::node::ArkUINode>>,
     attached: bool,
 }
 impl MountTarget {
     fn mount(&mut self, root: crate::render::node::NativeNode) -> Result<()> {
-        self.parent.borrow_mut().insert_child(root, 0)?;
-        self.attached = true;
+        if let Some(parent) = self.parent.upgrade() {
+            parent.borrow_mut().insert_child(root, 0)?;
+            self.attached = true;
+        }
         Ok(())
     }
     fn unmount(&mut self) -> Result<()> {
         if self.attached {
-            self.parent.borrow_mut().remove_child(0)?;
+            if let Some(parent) = self.parent.upgrade() {
+                parent.borrow_mut().remove_child(0)?;
+            }
             self.attached = false;
         }
         Ok(())
@@ -342,7 +346,7 @@ impl Mounter {
         context: Rc<UiContext>,
     ) -> Result<Self> {
         let mut mount = MountTarget {
-            parent,
+            parent: Rc::downgrade(&parent),
             attached: false,
         };
         let root = Node::new(1, ViewKind::View, context.clone())?;
@@ -353,7 +357,7 @@ impl Mounter {
             height: size.height,
         })?;
         mount.mount(root.native.clone())?;
-        *root.mount_parent.borrow_mut() = Rc::downgrade(&mount.parent);
+        *root.mount_parent.borrow_mut() = mount.parent.clone();
         root.set_events(nsh_core::EventMask::default())?;
         *context.scene.borrow_mut() = Some(Rc::new(crate::render::composition::scene::Scene::new(
             &root,
@@ -810,7 +814,49 @@ impl Mounter {
                         Command::Toast { text, .. } => log::info!("OHOS toast: {text}"),
                         Command::ExitApp => log::warn!("OHOS ExitApp: the embedding host owns Ability lifetime"),
                         Command::ImageInfo { id, uri } => {
-                            self.images.load(crate::media::image::Target::Info(id), uri);
+                            self.images
+                                .load(crate::media::image::Target::Info(id), uri, None);
+                        }
+                        Command::OpenUrl { id, url } => {
+                            if self
+                                .host
+                                .open_url(self.dispatcher.clone(), id, url)
+                                .is_err()
+                            {
+                                self.control.dispatch_event(
+                                    nsh_core::ROOT_ID,
+                                    nsh_core::EventKind::OpenUrl,
+                                    nsh_core::EventPayload::Map(vec![
+                                        ("id", nsh_core::PayloadValue::Number(id as f64)),
+                                        ("opened", nsh_core::PayloadValue::Bool(false)),
+                                    ]),
+                                );
+                            }
+                        }
+                        Command::SetClipboardImage(_) => {}
+                        Command::ReadClipboardImage { id, .. } => {
+                            self.control.dispatch_event(
+                                nsh_core::ROOT_ID,
+                                nsh_core::EventKind::Clipboard,
+                                nsh_core::platform::clipboard::image_answer(id, false, None),
+                            );
+                        }
+                        Command::ReadClipboardFiles { id } => {
+                            self.control.dispatch_event(
+                                nsh_core::ROOT_ID,
+                                nsh_core::EventKind::Clipboard,
+                                nsh_core::platform::clipboard::files_answer(id, &[]),
+                            );
+                        }
+                        Command::PickImages { id, .. } => {
+                            self.control.dispatch_event(
+                                nsh_core::ROOT_ID,
+                                nsh_core::EventKind::Pick,
+                                nsh_core::EventPayload::Picked {
+                                    id,
+                                    files: Vec::new(),
+                                },
+                            );
                         }
                         Command::Native { name, args } => {
                             if let Some(component) = self.node(id)?.component.borrow().as_ref() {

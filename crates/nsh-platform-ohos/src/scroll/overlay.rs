@@ -107,27 +107,32 @@ impl Plane {
     pub(crate) fn key(&self) -> Option<Key> {
         self.composite.borrow().as_ref().map(Composite::key)
     }
+    fn replace_target(&self, owner: &Node) -> Result<u32> {
+        let target = NativeAttachment::for_subtree(&self.outer, &self.inner)?;
+        let id = target.id();
+        *self.route.borrow_mut() = Some(crate::interop::sdk::ViewRoute::new(
+            id,
+            self.owner.clone(),
+            &self.inner,
+        ));
+        if let Some(old) = self.target.replace(Some(target)) {
+            owner.view_remove(old);
+        }
+        Ok(id)
+    }
     pub(crate) fn update(&self, owner: &Node) -> Result<()> {
         if self.closed.get() || !owner.host.has_ui_context() {
             return Ok(());
         }
         if !self.context_live.get() {
-            let target = NativeAttachment::for_subtree(&self.outer, &self.inner)?;
+            let id = self.replace_target(owner)?;
             *self.composite.borrow_mut() = Some(Composite::overlay(
                 &self
                     .owner
                     .upgrade()
                     .ok_or(crate::render::node::Error::InvalidNode(owner.id))?,
-                target.id(),
+                id,
             )?);
-            *self.route.borrow_mut() = Some(crate::interop::sdk::ViewRoute::new(
-                target.id(),
-                self.owner.clone(),
-                &self.inner,
-            ));
-            if let Some(old) = self.target.replace(Some(target)) {
-                owner.view_remove(old);
-            }
             self.context_live.set(true);
         }
         let composite = self.composite.borrow();
@@ -135,6 +140,15 @@ impl Plane {
             return Ok(());
         };
         composite.update(owner)?;
+        let texture_surface = composite.surface();
+        if self
+            .settings
+            .borrow()
+            .as_ref()
+            .is_some_and(|previous| previous.texture_surface != texture_surface)
+        {
+            self.replace_target(owner)?;
+        }
         let Some(target_id) = self.target.borrow().as_ref().map(NativeAttachment::id) else {
             return Ok(());
         };
@@ -143,7 +157,7 @@ impl Plane {
             target_id,
             width: frame.width as f64,
             height: frame.height as f64,
-            texture_surface: composite.surface(),
+            texture_surface,
             ..ViewOptions::default()
         };
         let mut previous = self.settings.borrow_mut();
