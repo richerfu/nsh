@@ -1,4 +1,7 @@
 .hvigor/
+.idea/
+.clangd
+.clang-tidy
 oh_modules/
 node_modules/
 **/build/
@@ -8,5 +11,4 @@ node_modules/
 oh-package-lock.json5
 entry/oh-package-lock.json5
 local.properties
-__pycache__/
-*.pyc
+*.hap

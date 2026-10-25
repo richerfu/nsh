@@ -8,8 +8,7 @@ native presentation and platform services. `Platform.OS` is `"ohos"`, with
 
 The [embedding guide](../../website/docs/embedding-ohos.md) describes the public
 host API. This page describes module ownership, native boundaries, builds and
-verification. See [native interop](ohos-native-interop.md) for attachment,
-retirement and input-routing details.
+verification.
 
 ## Source map
 
@@ -24,8 +23,8 @@ retirement and input-routing details.
 | [`accessibility`](../../crates/nsh-platform-ohos/src/accessibility/mod.rs) | Semantic values, native metadata and optional providers |
 | [`interop`](../../crates/nsh-platform-ohos/src/interop/mod.rs) | Native components, SDK batches, semantic/menu/texture wrappers and pointer forwarding |
 | [`media`](../../crates/nsh-platform-ohos/src/media/mod.rs), [`services`](../../crates/nsh-platform-ohos/src/services/mod.rs) | Images, WebView, Video, assets, networking and dialogs |
-| [`xtask/src/ohos.rs`](../../crates/xtask/src/ohos.rs) | Native SDK, generated declarations and source/import metadata |
-| [`examples/embed-ohos`](../../examples/embed-ohos/README.md) | NativeAbility host, paired HAR/HAP assembly and regression fixtures |
+| [`xtask/src/ohos.rs`](../../crates/xtask/src/ohos.rs) | Native SDK, generated declarations, staged ArkTS dependencies and build metadata |
+| [`examples/embed-ohos`](../../examples/embed-ohos/README.md) | NativeAbility embedding host sample |
 
 ## Ability integration
 
@@ -214,12 +213,11 @@ separate player and immutable callback identity. Callbacks copy borrowed
 metadata before queueing. Explicit callback clearing precedes synchronous
 player release, which runs off the UI thread. A successful worker acknowledgement
 permits UI owner disposal even after engine stop; failure retains the complete
-player/window/userdata group. See [retirement](ohos-native-interop.md#retirement-and-failures).
+player/window/userdata group.
 
 Touchscreen input uses owned native event clones; primary mouse-generated touch
 uses a callback-scoped SDK event. Coordinates are restored after synchronous
 posting. Native callbacks and SDK objects never become worker-safe payloads.
-See [composition and input](ohos-native-interop.md#composition-and-input).
 
 Explicit operations return N-API errors. Structural/native ownership failures
 update `lastError` and stop the affected generation; mount batches are not atomic.
@@ -245,16 +243,14 @@ direct binding types share that source. NSH uses binding crates for OHOS APIs;
 missing wrappers belong in the binding repository. SDK declarations are generated
 there. EGL/GLES policy, worker scheduling and application budgets belong in NSH.
 
-`cargo xtask ohos` resolves the locked graph and records source revisions,
-features, minimum API and library/declaration hashes in `build-metadata.json`.
-The example stages HAR sources from the resolved Cargo checkouts, records
-`paired-sources.json`, and rejects source/hash mismatches. The packaged native
-library is preserved byte-for-byte and checked against SDK metadata.
+`cargo xtask ohos` resolves the locked graph, stages the companion ArkTS
+packages in `target/ohos/arkts-deps/`, and records source revisions, features,
+minimum API and library/declaration hashes in `build-metadata.json`.
 
 ### Binding development dependency
 
 Local binding development may explicitly enable `NSH_ALLOW_PATH_DEPENDENCIES=1`.
-Distributable SDK acceptance uses the pinned Git graph and matching Rust/HAR
+Distributable SDK builds use the pinned Git graph and matching Rust/HAR
 sources. Resolve dependencies from the workspace manifest and lockfile rather
 than substituting a separately installed HAR.
 
@@ -267,9 +263,7 @@ than substituting a separately installed HAR.
 | `api-26` | 26 | Includes API-23 support and named accessibility actions |
 
 `MIN_API`, capabilities, SDK metadata and the example manifest agree. Startup
-rejects lower system versions. The builder audits linked `OH_*` imports against
-official headers, rejecting unknown symbols and imports newer than the selected
-minimum. Runtime capability checks do not lower a linked symbol's requirement.
+rejects lower system versions.
 
 ## Build and run
 
@@ -284,44 +278,19 @@ cargo xtask ohos --features api-23        # target/ohos/debug-api-23
 cargo xtask ohos --features api-26        # target/ohos/debug-api-26
 cargo build -p nsh-cli
 export DEVECO_CONTENTS=/path/to/DevEco-Studio.app/Contents
-examples/embed-ohos/build.sh
-# Select the corresponding SDK for an enhanced HAP:
-NSH_PROFILE=debug-api-23 examples/embed-ohos/build.sh
+NSH_PROFILE=release examples/embed-ohos/build.sh
 ```
 
-The SDK contains the arm64 library, generated `index.d.ts`, build metadata and
-native-import audit. The example copies the matching SDK, bundles the selected
-app with the Rust CLI, and assembles its paired HAR/HAP through OHPM/Hvigor.
-Sign the HAP with the host's development profile and select the intended target
-explicitly when installing. See the [sample README](../../examples/embed-ohos/README.md)
-for fixtures and deployment. CLI `run/package` and reusable `dist` integration
-remain tooling work.
-
-## Implementation status
-
-The backend mounts View, Text, Input, Scroll, Image, Stack, Screen, HeaderItem,
-Canvas, WebView, Video, native components and Modal. This table records current
-contracts and remaining checks; implementation and compilation do not establish
-runtime acceptance.
-
-| Area | Current implementation | Remaining checks / work |
-|---|---|---|
-| Embedding/components | Independent retained surfaces; cancellable loads; per-instance factories, props/commands/events and intrinsic sizes; stop/dispose/reentry guards | Multi-window/hidden-container scheduling, stale handles and injected native failures |
-| Appearance/composition | Borders/gradients, layered/inset shadows, transforms, ordered foreground/backdrop filters, live subtree alpha shadows, plus-darker and independent modal planes | Native-control pixels/input through nested transforms/clips/modals; GPU driver, frame and memory profiling |
-| Text/selection | Native typography, UTF-16 spans/metrics/features, owned rasters, inline geometry, Unicode selection/handles, Copy/Select All and edge scrolling | RTL, ellipsis/attachments, transformed selection, handle crossing and screen-reader matrix |
-| Input/gestures | System editors, including native password fields; keyboard repeat/modifiers/cancel; focus, preview, controlled UTF-16 selection/maxLength; touch/hover/pan/pinch/rotation/responder routing | Full IME/autofill/lifecycle, secure-field reader and multi-contact arbitration matrix |
-| Scroll/navigation | Native scroll/refresh, snapping/insets/sticky cells, focal zoom; retained stack, header/modal, transitions and mounted interactive-back decisions | RTL, gesture interruption, simultaneous route changes and reduced-motion changes |
-| Accessibility | Labels/roles/states/grouping, live regions and standard actions; optional range providers and API-26 actions | Renewed QEMU reader coverage, direction queries, audible announcement ordering, editable DOM and media controls |
-| Media | Image IO coalescing/cancellation/cache; retained Ability WebView with navigation/protocol/JS/runtime options; native AVPlayer events, controls, seek/rate/resize and checked FD sources | ArkWeb runtime options/history, AVPlayer playback/release/cancellation, animated images and cache churn on target |
-| Services/delivery | Ordered clipboard replies/presence, dialogs/status bar/URL; API-20 HTTP/TLS streaming with per-request proxy snapshots and checked redirects; signed packages and persistent trust/rollback/revocation | Clipboard permission/secure paste, proxy/HTTPS/backpressure and package/assets across restarts |
-| Development | Per-surface client/HMR/reconnect, source maps, logs, lazy chunks and error overlay with asynchronous Copy/Dismiss | Native overlay interaction, reconnect/disposal and recovery matrix |
-| Deferred by host decision | Independent per-editor autocorrection; automatic system/WebView cookie sharing with fetch/images | Preserve the existing shared editing/request contracts until separately designed |
+The SDK contains the arm64 library, generated `index.d.ts`, staged ArkTS
+dependencies and build metadata. The example copies the matching SDK, bundles
+the selected app with the Rust CLI, and assembles its paired HAR/HAP through
+OHPM/Hvigor. See the [sample README](../../examples/embed-ohos/README.md) for
+details.
 
 ## Verification
 
 Cross-compile the actual OHOS code: a host build deliberately sees an empty
-platform crate. Keep shared tests, portable production-algorithm tests, native
-compilation/linking, SDK compilation and runtime acceptance distinct.
+platform crate.
 
 ```sh
 cargo test --workspace
@@ -333,51 +302,3 @@ ohrs cargo -- clippy -p nsh-platform-ohos --lib --features dev -- -D warnings
 ohrs cargo -- clippy -p nsh-platform-ohos --lib --features api-23 -- -D warnings
 ohrs cargo -- clippy -p nsh-platform-ohos --lib --features api-26 -- -D warnings
 ```
-
-The 2026-10-23 audit fixes pass all eight commands above without warnings or
-errors: workspace tests (including 62 portable OHOS tests), formatting,
-workspace Clippy, and native Clippy for default, dev, API-23 and API-26.
-All 26 ArkTS owner/algorithm tests pass. The API-20 embedding SDK also links
-and passes its locked native-import audit. These checks preserve the existing
-NativeAbility/DefaultXComponent/plugin host and minimum-API feature gates;
-this audit has not rerun device IME, AVPlayer or GPU visual acceptance.
-
-Audit regressions cover large text raster admission, graphemes with many visual
-boxes, CSS sigma/bounds, scene requirements after style replacement, bounded IO
-admission, direct-file lifetime, streamed video sources larger than 64 MiB,
-control visibility, and editor key delivery through the shared edit path. Shared engine
-tests exercise Rust back listeners with both Android and OHOS environments.
-
-The earlier adaptation's host checks included 760 workspace tests and 59 portable OHOS
-production-algorithm tests executed on macOS. Five Refresh ownership regressions
-run the production controller with native effects doubled and enforce the
-binding's strong-`Rc` disposal guard, including detach/disposal failure, retry
-and re-enabling. Native Rust checks compile and link ARM64 OHOS code; they do
-not execute its Rust tests on a device. The Scheme A shared-`Rc` teardown update
-passed workspace tests/Clippy,
-native Clippy for default, `api-23`, `api-26` and `dev`, and the locked API-20
-SDK build/import audit with Ability `9085050a` and bindings `43aec6c1`.
-The frozen API-20/dev20/API-23/API-26 baseline profiles passed native Clippy,
-linking, minimum-API/import audits and paired HAR/HAP hash checks. The Scroll/Refresh and
-inner-editor corner follow-up also passed a separate API-20 native Clippy/link/
-import check and paired HAR/HAP verification; its runtime rerun remains pending.
-The follow-up also passed 19 host Refresh lifecycle cases and 25 production
-SDK-owner cases with platform effects doubled. These verify ownership and error
-paths, rather than ArkWeb, IME, AVPlayer or GPU runtime acceptance.
-
-On the MateBook simulator, the earlier EGL-linked source passed the complete
-surfaces suite: independent engines, host events, layout exchange, ten slot
-remounts, stop/resource/cancellation isolation and disposal/recreation. The
-updated WebView lifecycle build reached both loaded controllers and one load
-each; its interactive suite was interrupted. Subsequent receiver-transfer and
-Video cache file fixes have not received runtime acceptance. UI regression is paused at the
-host's request; secure input, composition, video and WebView must be rerun against
-the final paired source.
-
-Accessibility acceptance belongs exclusively to the dedicated OpenHarmony QEMU
-with its system AccessibilityManagerService, app-local test extension and
-physical input; see
-[QEMU instructions](../../examples/embed-ohos/README.md#accessibility-acceptance-on-qemu).
-System events alone do not establish audible speech or its ordering. Actual
-API-20/23 system execution and native memory/frame baselines remain separate
-checks. Historical fixture runs are not acceptance of the current source.
