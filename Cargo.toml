@@ -97,13 +97,13 @@ jni = "0.21"
 napi-ohos = { version = "1.2", default-features = false, features = ["napi8", "serde-json", "tokio_rt"] }
 napi-derive-ohos = "1.2"
 napi-build-ohos = "1.2"
-openharmony-ability = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39", default-features = false }
-openharmony-ability-plugin-accessibility = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39" }
-openharmony-ability-plugin-clipboard = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39" }
-openharmony-ability-plugin-resource = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39" }
-openharmony-ability-plugin-window = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39" }
-openharmony-ability-plugin-webview = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39" }
-openharmony-ability-plugin-url = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39" }
+openharmony-ability = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "9085050a6c8dcb02fa297a6f44c4795160c93f86", default-features = false }
+openharmony-ability-plugin-accessibility = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "9085050a6c8dcb02fa297a6f44c4795160c93f86" }
+openharmony-ability-plugin-clipboard = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "9085050a6c8dcb02fa297a6f44c4795160c93f86" }
+openharmony-ability-plugin-resource = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "9085050a6c8dcb02fa297a6f44c4795160c93f86" }
+openharmony-ability-plugin-window = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "9085050a6c8dcb02fa297a6f44c4795160c93f86" }
+openharmony-ability-plugin-webview = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "9085050a6c8dcb02fa297a6f44c4795160c93f86" }
+openharmony-ability-plugin-url = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "9085050a6c8dcb02fa297a6f44c4795160c93f86" }
 futures-executor = "0.3"
 ohos-arkui-binding = { version = "0.4.2", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["napi", "xcomponent", "api-20"] }
 ohos-accessibility-binding = { version = "0.1.2", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }

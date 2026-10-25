@@ -356,7 +356,7 @@ and re-enabling. Native Rust checks compile and link ARM64 OHOS code; they do
 not execute its Rust tests on a device. The Scheme A shared-`Rc` teardown update
 passed workspace tests/Clippy,
 native Clippy for default, `api-23`, `api-26` and `dev`, and the locked API-20
-SDK build/import audit with Ability `b6550250` and bindings `43aec6c1`.
+SDK build/import audit with Ability `9085050a` and bindings `43aec6c1`.
 The frozen API-20/dev20/API-23/API-26 baseline profiles passed native Clippy,
 linking, minimum-API/import audits and paired HAR/HAP hash checks. The Scroll/Refresh and
 inner-editor corner follow-up also passed a separate API-20 native Clippy/link/

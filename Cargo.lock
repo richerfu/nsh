@@ -4069,7 +4069,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "openharmony-ability"
 version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=b65502500b820a570496f3798c931d12d3b71d39#b65502500b820a570496f3798c931d12d3b71d39"
+source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
 dependencies = [
  "futures-channel",
  "log",
@@ -4091,7 +4091,7 @@ dependencies = [
 [[package]]
 name = "openharmony-ability-plugin-accessibility"
 version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=b65502500b820a570496f3798c931d12d3b71d39#b65502500b820a570496f3798c931d12d3b71d39"
+source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
 dependencies = [
  "log",
  "napi-derive-ohos",
@@ -4102,7 +4102,7 @@ dependencies = [
 [[package]]
 name = "openharmony-ability-plugin-clipboard"
 version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=b65502500b820a570496f3798c931d12d3b71d39#b65502500b820a570496f3798c931d12d3b71d39"
+source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
 dependencies = [
  "napi-derive-ohos",
  "napi-ohos",
@@ -4115,7 +4115,7 @@ dependencies = [
 [[package]]
 name = "openharmony-ability-plugin-resource"
 version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=b65502500b820a570496f3798c931d12d3b71d39#b65502500b820a570496f3798c931d12d3b71d39"
+source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
 dependencies = [
  "napi-derive-ohos",
  "napi-ohos",
@@ -4126,7 +4126,7 @@ dependencies = [
 [[package]]
 name = "openharmony-ability-plugin-url"
 version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=b65502500b820a570496f3798c931d12d3b71d39#b65502500b820a570496f3798c931d12d3b71d39"
+source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
 dependencies = [
  "napi-derive-ohos",
  "napi-ohos",
@@ -4136,7 +4136,7 @@ dependencies = [
 [[package]]
 name = "openharmony-ability-plugin-webview"
 version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=b65502500b820a570496f3798c931d12d3b71d39#b65502500b820a570496f3798c931d12d3b71d39"
+source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
 dependencies = [
  "crossbeam-channel",
  "http",
@@ -4150,7 +4150,7 @@ dependencies = [
 [[package]]
 name = "openharmony-ability-plugin-window"
 version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=b65502500b820a570496f3798c931d12d3b71d39#b65502500b820a570496f3798c931d12d3b71d39"
+source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
 dependencies = [
  "napi-derive-ohos",
  "napi-ohos",
