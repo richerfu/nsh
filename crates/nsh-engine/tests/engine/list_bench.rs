@@ -10,7 +10,10 @@
 
 use std::time::{Duration, Instant};
 
-use nsh_core::{ApproxTextEngine, Core, ListBind, MountItem, Size, ViewKind};
+use nsh_core::{
+    ApproxTextEngine, Core, ListBind, MountItem, Size, ViewKind,
+    geometry::{point, px},
+};
 use nsh_js::Host;
 
 enum Gap {
@@ -30,18 +33,24 @@ fn bench_gallery_scroll() {
         entry,
         minify: false,
         split: false,
-        ui_sets: vec![nsh_ui_mobile::registry()],
+        ui_sets: vec![nsh_base::registry().into()],
     })
     .unwrap();
-    let bytecode = nsh_js::compile_bytecode(&bundle.code, true).unwrap();
-    let host = Host::new().unwrap();
+    let bytecode =
+        nsh_js::compile_bytecode_with(&bundle.code, true, &[nsh_base::registry().into()]).unwrap();
+    let host = Host::with_options(nsh_js::HostOptions {
+        ui_sets: vec![nsh_base::registry()],
+        ..Default::default()
+    })
+    .unwrap();
     // The runtime reads the environment while it loads.
     host.set_environment(&nsh_js::Environment {
-        window: (390.0, 844.0),
+        window: Size::new(px(390.0), px(844.0)),
         ..Default::default()
     });
     host.eval_bytecode(&bytecode).unwrap();
-    let mut core = Core::new(ApproxTextEngine, Size::new(390.0, 844.0));
+    let mut core = Core::new(ApproxTextEngine, Size::new(px(390.0), px(844.0)));
+    core.set_components(nsh_base::registry());
     let mut ops = Vec::new();
     let mut binds: Vec<ListBind> = Vec::new();
     let list = std::cell::Cell::new(None);
@@ -75,6 +84,10 @@ fn bench_gallery_scroll() {
                 }
             }
             core.take_list_binds(binds);
+            // The overscan the engine paces over frames, all in this one.
+            if binds.is_empty() {
+                core.take_paced_list_binds(usize::MAX, binds);
+            }
             if binds.is_empty() {
                 break;
             }
@@ -95,7 +108,7 @@ fn bench_gallery_scroll() {
         let mut y = 0.0;
         for _ in 0..2000 {
             y += 8.0;
-            core.set_scroll_offset(list, 0.0, y, u32::MAX);
+            core.set_scroll_offset(list, point(px(0.0), px(y)), u32::MAX);
             let Some((t, j)) = frame(&mut core, &mut binds) else {
                 continue;
             };
@@ -116,7 +129,7 @@ fn bench_gallery_scroll() {
             }
         }
         // Scroll back to the top for the next run.
-        core.set_scroll_offset(list, 0.0, 0.0, u32::MAX);
+        core.set_scroll_offset(list, point(px(0.0), px(0.0)), u32::MAX);
         frame(&mut core, &mut binds);
         println!(
             "{label}: {n} rebinding frames, {:?}/frame (js {:?})",

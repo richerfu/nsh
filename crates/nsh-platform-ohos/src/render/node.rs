@@ -6,7 +6,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use nsh_core::{EventKind, EventMask, EventPayload, NodeId, Rect, Size, ViewKind, ViewStyle};
+use nsh_core::{EventKind, EventMask, EventPayload, NodeId, Points, ViewKind, ViewStyle};
 use ohos_arkui_binding::{
     api::node_custom_event::NodeCustomEvent,
     common::{attribute::ArkUINodeAttributeNumber as Number, node::ArkUINode},
@@ -23,6 +23,7 @@ use ohos_drawing_binding::{Bitmap, BitmapFormat, Canvas};
 
 use crate::{
     input::{editor::Input, events::Interaction},
+    render::geometry::{Rect, Size},
     scroll::controller::Scroller,
     text::typography::{RasterText, argb},
 };
@@ -325,7 +326,7 @@ impl Node {
             y += node.frame.get().y;
             parent = node.parent_node.borrow().upgrade();
         }
-        (self.platform.get().safe_area.top - y).max(0.0)
+        (self.platform.get().safe_area.top.0 - y).max(0.0)
     }
     pub(crate) fn clips_children(&self) -> bool {
         self.style.borrow().overflow_hidden || self.kind == ViewKind::Scroll
@@ -352,7 +353,7 @@ impl Node {
         self.id == nsh_core::ROOT_ID
             || self.kind != ViewKind::View
             || !style.background_color.is_transparent()
-            || style.borders.widths.iter().any(|v| *v > 0.0)
+            || style.borders.widths.any(|v| v.0 > 0.0)
             || style.shadow.is_visible()
             || style.outline.is_visible()
             || style.effects.as_ref().is_some_and(|effects| {
@@ -476,7 +477,7 @@ impl Node {
         if self.active.get() || event == EventKind::Dismiss {
             if matches!(
                 event,
-                EventKind::Focus | EventKind::PressIn | EventKind::Press
+                EventKind::Focus | EventKind::PressDown | EventKind::Press
             ) {
                 self.host.activate(self.dispatcher.clone());
             }
@@ -743,7 +744,7 @@ impl Node {
         self.restore_style()
     }
     pub(crate) fn style(self: &Rc<Self>, style: &ViewStyle) -> Result<()> {
-        if style.outline.width > 0.0 && !self.outlined.replace(true) {
+        if style.outline.width.0 > 0.0 && !self.outlined.replace(true) {
             let weak = Rc::downgrade(self);
             self.native
                 .borrow_mut()
@@ -820,20 +821,29 @@ impl Node {
         self.transform(style, |_| None)?;
         let node = self.native.borrow();
         node.background_color(argb(style.background_color))?;
+        let corners = style
+            .corner_radius
+            .map(|r| r.unwrap_or(style.border_radius).0);
         node.set_number_attribute(
             Attribute::BorderRadius,
-            [0, 1, 3, 2]
-                .into_iter()
-                .map(|i| Number::Float(style.corner_radius[i].unwrap_or(style.border_radius)))
-                .collect(),
+            [
+                corners.top_left,
+                corners.top_right,
+                corners.bottom_left,
+                corners.bottom_right,
+            ]
+            .into_iter()
+            .map(Number::Float)
+            .collect(),
         )?;
         node.set_number_attribute(
             Attribute::BorderWidth,
             style
                 .borders
                 .widths
-                .iter()
-                .map(|v| Number::Float(*v))
+                .to_array()
+                .into_iter()
+                .map(|v| Number::Float(v.0))
                 .collect(),
         )?;
         node.set_number_attribute(
@@ -858,10 +868,10 @@ impl Node {
             node.set_number_attribute(
                 Attribute::CustomShadow,
                 vec![
-                    Number::Float(shadow.radius),
+                    Number::Float(shadow.radius.0),
                     Number::Int(0),
-                    Number::Float(shadow.offset_x * self.scale),
-                    Number::Float(shadow.offset_y * self.scale),
+                    Number::Float(shadow.offset_x.0 * self.scale),
+                    Number::Float(shadow.offset_y.0 * self.scale),
                     Number::Int(0),
                     Number::Uint(argb(shadow.color.with_alpha(shadow.opacity))),
                     Number::Uint(0),
@@ -903,9 +913,12 @@ impl Node {
     }
     pub(crate) fn animate(
         &self,
-        values: &[(nsh_animation::AnimationProp, nsh_animation::AnimationValue)],
+        values: &[(
+            nsh_core::animation::AnimationProp,
+            nsh_core::animation::AnimationValue,
+        )],
     ) -> Result<()> {
-        use nsh_animation::AnimationProp as P;
+        use nsh_core::animation::AnimationProp as P;
         let mut style = self.style.borrow().clone();
         for (prop, value) in values {
             match prop {
@@ -930,7 +943,7 @@ impl Node {
                     .fill(crate::render::animation::color(*value)),
                 P::ShadowColor => style.shadow.color = crate::render::animation::color(*value),
                 P::ShadowOpacity => style.shadow.opacity = value.number().clamp(0.0, 1.0),
-                P::ShadowRadius => style.shadow.radius = value.number().max(0.0),
+                P::ShadowRadius => style.shadow.radius = Points(value.number().max(0.0)),
                 _ => {}
             }
         }
@@ -1004,20 +1017,25 @@ impl Node {
             i32::from(style.hidden || self.backface_away.get()),
         )?;
         let frame = self.frame.get();
-        native.set_attribute(
-            Attribute::TransformCenter,
-            vec![
-                style.transform_origin.x.resolve(frame.width),
-                style.transform_origin.y.resolve(frame.height),
-                style.transform_origin.z,
-            ]
-            .into(),
-        )?;
-        let origin = (
-            style.transform_origin.x.resolve(frame.width) as f64,
-            style.transform_origin.y.resolve(frame.height) as f64,
-            style.transform_origin.z as f64,
-        );
+        let ox = style
+            .transform_origin
+            .x
+            .to_points(
+                nsh_core::geometry::AbsoluteLength::Points(Points(frame.width)),
+                nsh_core::geometry::REM_SIZE,
+            )
+            .0;
+        let oy = style
+            .transform_origin
+            .y
+            .to_points(
+                nsh_core::geometry::AbsoluteLength::Points(Points(frame.height)),
+                nsh_core::geometry::REM_SIZE,
+            )
+            .0;
+        let oz = style.transform_origin.z.0;
+        native.set_attribute(Attribute::TransformCenter, vec![ox, oy, oz].into())?;
+        let origin = (ox as f64, oy as f64, oz as f64);
         let mut before = Matrix::IDENTITY;
         before.0[12] = -origin.0;
         before.0[13] = -origin.1;

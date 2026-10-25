@@ -12,7 +12,7 @@ use std::{
     },
 };
 
-use nsh_core::{Command, EventKind, EventPayload, PayloadValue, Size, WebProps, WebSource};
+use nsh_core::{Command, EventKind, EventPayload, PayloadValue, WebProps, WebSource};
 use nsh_engine::{Access, Assets, EngineControl};
 use ohos_arkui_binding::{
     component::{attribute::ArkUICommonAttribute, built_in_component::Stack},
@@ -27,7 +27,10 @@ use openharmony_ability_plugin_webview::{
 
 use crate::{
     app::{runtime::Dispatcher, session::Services},
-    render::node::{NativeNode, Node, Result},
+    render::{
+        geometry::Size,
+        node::{NativeNode, Node, Result},
+    },
 };
 
 const BRIDGE: &str = "window.ReactNativeWebView={postMessage:function(data){window.__nshNative.postMessage(String(data));}};";
@@ -393,7 +396,7 @@ impl Worker {
     fn settings(&self, props: &WebProps) -> NativeWebviewSettings {
         NativeWebviewSettings {
             id: self.id.clone(),
-            scroll_enabled: props.scroll_enabled,
+            scroll_enabled: props.scrollable,
             injected_javascript: props.injected_js.as_deref().map(str::to_owned),
             html_base_url: match &props.source {
                 WebSource::Html { base_url, .. } => base_url.as_deref().map(asset_url),

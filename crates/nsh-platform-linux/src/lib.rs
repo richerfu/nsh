@@ -16,6 +16,8 @@
 #![cfg(all(target_os = "linux", not(target_env = "ohos")))]
 
 mod access;
+#[cfg(feature = "dev")]
+mod agent;
 mod animation;
 mod app;
 mod canvas;
@@ -24,16 +26,18 @@ mod decor;
 #[cfg(feature = "dev")]
 pub mod dev;
 mod file_drop;
+mod fps;
 mod image;
 mod input;
 mod keymap;
 mod mount;
 mod native;
 mod navigation;
-mod net;
-mod script;
 mod scroll;
+mod selection_area;
 mod surface;
+#[cfg(feature = "dev")]
+mod synth;
 mod system;
 mod text;
 mod text_input;
@@ -41,9 +45,13 @@ mod transition;
 mod view;
 
 pub use gtk4;
-pub use nsh_core::platform::Appearance;
-pub use nsh_engine::{App, Bundle, Limits, Root};
+pub use nsh_core::platform::{Appearance, Locale};
+pub use nsh_engine::{
+    App, Bundle, ByteSize, CacheLocation, CacheOptions, CachePolicy, Limits, Root,
+};
 
+#[cfg(feature = "dev")]
+pub use crate::app::set_root;
 pub use crate::{
     app::{AppOptions, AppSource, AppView, run_app, set_ui_sets},
     image::AssetBase,

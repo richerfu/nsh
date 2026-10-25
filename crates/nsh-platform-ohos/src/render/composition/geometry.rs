@@ -45,15 +45,15 @@ impl Bounds {
             self.extend(
                 0.0,
                 0.0,
-                (style.outline.width + style.outline.offset).max(0.0),
+                (style.outline.width.0 + style.outline.offset.0).max(0.0),
             );
         }
         if style.shadow.is_visible() {
             let mut shadow = border;
             shadow.extend(
-                style.shadow.offset_x,
-                style.shadow.offset_y,
-                style.shadow.radius.max(0.0) * 3.0,
+                style.shadow.offset_x.0,
+                style.shadow.offset_y.0,
+                style.shadow.radius.0.max(0.0) * 3.0,
             );
             self.union(shadow);
         }
@@ -65,9 +65,9 @@ impl Bounds {
             {
                 let mut bounds = border;
                 bounds.extend(
-                    shadow.offset_x,
-                    shadow.offset_y,
-                    shadow.spread + shadow.blur.max(0.0) * 1.5,
+                    shadow.offset_x.0,
+                    shadow.offset_y.0,
+                    shadow.spread.0 + shadow.blur.0.max(0.0) * 1.5,
                 );
                 self.union(bounds);
             }
@@ -77,13 +77,13 @@ impl Bounds {
     pub(crate) fn filters(mut self, filters: &[Filter]) -> Self {
         for filter in filters {
             match *filter {
-                Filter::Blur(radius) => self.extend(0.0, 0.0, blur_sigma(radius, 1.0) * 3.0),
+                Filter::Blur(radius) => self.extend(0.0, 0.0, blur_sigma(radius.0, 1.0) * 3.0),
                 Filter::DropShadow {
                     offset_x,
                     offset_y,
                     blur,
                     ..
-                } => self.extend(offset_x, offset_y, blur_sigma(blur, 1.0) * 3.0),
+                } => self.extend(offset_x.0, offset_y.0, blur_sigma(blur.0, 1.0) * 3.0),
                 _ => {}
             }
         }
@@ -131,7 +131,7 @@ impl Bounds {
 
 #[cfg(test)]
 mod tests {
-    use nsh_core::{Color, TransformKind};
+    use nsh_core::{Color, Points, TransformKind};
 
     use super::*;
     #[test]
@@ -144,7 +144,7 @@ mod tests {
         style.blend_mode = nsh_core::BlendMode::Normal;
         assert!(!requires_scene(&style));
         let mut effects = nsh_core::Effects {
-            backdrop_filters: vec![Filter::Blur(4.0), Filter::Blur(8.0)],
+            backdrop_filters: vec![Filter::Blur(Points(4.0)), Filter::Blur(Points(8.0))],
             ..Default::default()
         };
         style.effects = Some(std::sync::Arc::new(effects.clone()));
@@ -158,16 +158,18 @@ mod tests {
         assert_eq!(blur_sigma(8.0, 3.0), 12.0);
         assert_eq!(blur_sigma(-8.0, 3.0), 0.0);
         assert_eq!(
-            Bounds::new(10.0, 10.0).filters(&[Filter::Blur(8.0)]).0,
+            Bounds::new(10.0, 10.0)
+                .filters(&[Filter::Blur(Points(8.0))])
+                .0,
             [-12.0, -12.0, 22.0, 22.0]
         );
     }
     #[test]
     fn nested_shadow_overflow_and_negative_translation() {
         let child = Bounds::new(40.0, 20.0).filters(&[Filter::DropShadow {
-            offset_x: 8.0,
-            offset_y: 4.0,
-            blur: 2.0,
+            offset_x: Points(8.0),
+            offset_y: Points(4.0),
+            blur: Points(2.0),
             color: Color::BLACK,
         }]);
         let child = child

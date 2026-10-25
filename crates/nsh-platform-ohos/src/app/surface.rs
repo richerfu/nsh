@@ -16,7 +16,6 @@ use napi_ohos::{
     bindgen_prelude::{Function, FunctionRef, Object, ObjectRef, PromiseRaw},
     threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
-use nsh_core::Size;
 use nsh_engine::Bundle;
 use ohos_arkui_binding::{
     component::{
@@ -34,7 +33,10 @@ use crate::{
         runtime::{App, Errors, Runtime},
     },
     interop::component::Components,
-    render::node::{NativeNode, callback},
+    render::{
+        geometry::Size,
+        node::{NativeNode, callback},
+    },
 };
 
 pub(crate) type Queue = ThreadsafeFunction<Message, (), (), Status, false>;
@@ -154,6 +156,15 @@ impl State {
         match event {
             DevEvent::Connected => log::info!("OHOS dev server connected"),
             DevEvent::Disconnected => log::info!("OHOS dev server disconnected"),
+            DevEvent::Testing
+            | DevEvent::Step { .. }
+            | DevEvent::TestSetup { .. }
+            | DevEvent::Fetch { .. } => {}
+            DevEvent::Root => {
+                self.errors.report(
+                    "The app is of Rust only, and this host was not built with its root.".into(),
+                );
+            }
             DevEvent::Building => {}
             DevEvent::BuildFailed(message) | DevEvent::CannotRun { message, .. } => {
                 self.errors.report(message)
@@ -189,9 +200,16 @@ impl State {
                 bytes,
                 source_map,
                 capabilities,
+                app_id,
+                ..
             } => {
-                let bundle =
-                    crate::app::dev::Session::bundle(format, bytes, source_map, capabilities)?;
+                let bundle = crate::app::dev::Session::bundle(
+                    format,
+                    bytes,
+                    source_map,
+                    capabilities,
+                    app_id,
+                )?;
                 let dev = self.dev.as_mut().unwrap();
                 dev.latest = Some(((session, version), bundle.clone()));
                 if dev.running == Some((session, version)) {
@@ -903,7 +921,7 @@ impl NshSurface {
         let context = self.components.context(handle)?;
         context
             .control
-            .set_component_size(context.node, Size::new(width as f32, height as f32));
+            .set_component_size(context.node, Size::new(width as f32, height as f32).into());
         Ok(())
     }
 

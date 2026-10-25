@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 pub use nsh_macros::HostProps;
 
-use crate::{EdgeInsets, EventKind, style::Color, ui::TsTypes};
+use crate::{EdgeInsets, EventKind, geometry::Points, style::Color, ui::TsTypes};
 
 /// A JS value as host props read it.
 pub trait HostInput: Sized {
@@ -41,11 +41,15 @@ pub trait HostInput: Sized {
     fn entries(&self) -> Vec<(String, Self)>;
     /// Truthy, as JS sees it.
     fn truthy(&self) -> bool;
-    /// The native animation node this value is (`NativeNode.__nv`).
-    fn native_node(&self) -> Option<nsh_animation::NodeId> {
-        self.field("__nv")
+    /// The host element this value is (the node object a `ref` holds).
+    fn node(&self) -> Option<crate::NodeId> {
+        None
+    }
+    /// The native animation node this value is (`AnimatedNode.__av`).
+    fn animated_node(&self) -> Option<crate::animation::NodeId> {
+        self.field("__av")
             .and_then(|v| v.as_number())
-            .map(|n| n as nsh_animation::NodeId)
+            .map(|n| n as crate::animation::NodeId)
     }
 }
 
@@ -63,18 +67,62 @@ pub trait HostList {
     fn item(&self, index: usize) -> Option<Self::Item>;
 }
 
-/// Where decoding reports what it could not take.
+/// Where decoding reports what it could not take, and the element it
+/// decodes for.
 #[derive(Debug, Default)]
 pub struct HostCx {
-    /// Warnings for the app's console (`unknown accessibilityRole`).
+    /// Warnings for the app's console (`unknown role`).
     pub warnings: Vec<String>,
+    /// The [`on`] bits of the element the props are set on
+    /// ([`element_bits`]); 0 when unknown, which decodes a name several
+    /// elements share as the first prop of that name.
+    pub element: u32,
 }
 
 impl HostCx {
+    /// The context of props set on an element `tag`.
+    pub fn for_element(tag: crate::Tag) -> Self {
+        Self {
+            element: element_bits(tag),
+            ..Self::default()
+        }
+    }
+
     /// Reports `message`.
     pub fn warn(&mut self, message: impl Into<String>) {
         self.warnings.push(message.into());
     }
+
+    /// Whether a prop of the elements `on` applies to the element decoded
+    /// for (always, when it is unknown).
+    pub fn on_element(&self, on: u32) -> bool {
+        self.element == 0 || self.element & on != 0
+    }
+}
+
+/// The [`on`] bits of the props element `tag` takes.
+pub fn element_bits(tag: crate::Tag) -> u32 {
+    use crate::Tag;
+    on::ALL
+        | match tag {
+            Tag::Text => on::TEXT,
+            Tag::Image => on::IMAGE,
+            Tag::Scroll => on::SCROLLING | on::SCROLL,
+            Tag::List => on::SCROLLING | on::LIST,
+            Tag::Input => on::INPUT,
+            Tag::Screen => on::SCREEN,
+            Tag::Modal => on::MODAL,
+            Tag::WebView => on::WEBVIEW,
+            Tag::Video => on::VIDEO,
+            Tag::InputAccessory => on::INPUT_ACCESSORY,
+            Tag::View
+            | Tag::Cell
+            | Tag::Stack
+            | Tag::HeaderItem
+            | Tag::Canvas
+            | Tag::Native
+            | Tag::Overlay => 0,
+        }
 }
 
 /// A prop's value: how it comes out of a JS value and its TypeScript type.
@@ -113,6 +161,8 @@ pub mod on {
     pub const VIDEO: u32 = 1 << 10;
     /// Input accessories (iOS).
     pub const INPUT_ACCESSORY: u32 = 1 << 11;
+    /// `<overlay>`.
+    pub const OVERLAY: u32 = 1 << 12;
     /// Set by the runtime itself, not part of the elements' types.
     pub const INTERNAL: u32 = 1 << 31;
 }
@@ -177,6 +227,12 @@ impl Clamped for f32 {
     }
 }
 
+impl Clamped for Points {
+    fn clamped(self, min: Option<f64>, max: Option<f64>) -> Self {
+        Points(self.0.clamped(min, max))
+    }
+}
+
 impl Clamped for u32 {
     fn clamped(self, min: Option<f64>, max: Option<f64>) -> Self {
         let v = min.map_or(self, |m| self.max(m as u32));
@@ -203,6 +259,17 @@ impl HostValue for bool {
 impl HostValue for f32 {
     fn decode<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Self> {
         input.as_number().map(|n| n as f32)
+    }
+
+    fn ts_type(_: &mut TsTypes) -> String {
+        "number".into()
+    }
+}
+
+/// A number of points.
+impl HostValue for Points {
+    fn decode<I: HostInput>(input: &I, cx: &mut HostCx) -> Option<Self> {
+        f32::decode(input, cx).map(Points)
     }
 
     fn ts_type(_: &mut TsTypes) -> String {
@@ -296,7 +363,7 @@ impl<T: HostValue> HostValue for Vec<T> {
 /// `{ top, right, bottom, left }` (each 0 when left out).
 impl HostValue for EdgeInsets {
     fn decode<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Self> {
-        let side = |key| input.field(key).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+        let side = |key| Points(input.field(key).and_then(|v| v.as_number()).unwrap_or(0.0) as f32);
         Some(EdgeInsets {
             top: side("top"),
             right: side("right"),
@@ -306,7 +373,7 @@ impl HostValue for EdgeInsets {
     }
 
     fn ts_type(_: &mut TsTypes) -> String {
-        "{ top?: number; right?: number; bottom?: number; left?: number }".into()
+        "Partial<Edges>".into()
     }
 }
 
@@ -315,17 +382,60 @@ pub fn field<T: HostValue, I: HostInput>(input: &I, key: &str, cx: &mut HostCx) 
     input.field(key).and_then(|v| T::decode(&v, cx))
 }
 
-/// The payloads of the host elements' events.
-const EVENT_TYPES: &str = r#"/** A frame relative to the parent: the payload of `onLayout`. */
-export interface LayoutEvent {
+/// The payloads of the host elements' events, and the shapes they are made
+/// of: `nsh_core::geometry`'s `Point`, `Size`, `Bounds` and `Edges` (in
+/// points) and `keymap::Modifiers`, with GPUI's field names.
+const EVENT_TYPES: &str = r#"/** A position, in points (`nsh_core::geometry::Point`). */
+export interface Point {
   x: number;
   y: number;
+}
+
+/** An extent, in points (`nsh_core::geometry::Size`). */
+export interface Size {
   width: number;
   height: number;
 }
 
+/** A position and an extent, in points (`nsh_core::geometry::Bounds`). */
+export interface Bounds {
+  /** The top left corner. */
+  origin: Point;
+  size: Size;
+}
+
+/** A length on each side, in points (`nsh_core::geometry::Edges`): insets, a safe area. */
+export interface Edges {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+/** The modifier keys held (GPUI's `Modifiers`). */
+export interface Modifiers {
+  control: boolean;
+  /** Option on Apple platforms, Alt elsewhere. */
+  alt: boolean;
+  shift: boolean;
+  /** Command on Apple platforms, the Windows / Super key elsewhere. */
+  platform: boolean;
+}
+
+/** Where the core placed an overlay: the payload of `onPosition`. */
+export interface OverlayPosition {
+  /** The side of the anchor it went on: the one asked for, or the other one when only that one has room. */
+  placement: "top" | "bottom" | "left" | "right";
+  /** Its frame in the root view (the surface, or the dialog it is in). */
+  bounds: Bounds;
+  /** The room on that side, inside the safe area less `margin`: what a menu may grow to. */
+  available: Size;
+}
+
 /** A drag: translation since the start and velocity (points / second). */
 export interface PanEvent {
+  /** The system cancelled the drag rather than releasing it. */
+  cancelled: boolean;
   translationX: number;
   translationY: number;
   velocityX: number;
@@ -336,26 +446,69 @@ export interface PanEvent {
   valueY?: number;
 }
 
+/** Where the pointer was at a press, the modifier keys held when it began and its click count: the payload of `onPress`, `onLongPress`, `onPressDown` and `onPressUp` on backends that know it. */
+export interface PressEvent {
+  /** Position in the pressed view (its transforms undone; a pressed span's text view). */
+  position: Point;
+  /** Position in the root view the view is in (the surface or its modal), as touches' `pageX` / `pageY`. */
+  pagePosition: Point;
+  modifiers: Modifiers;
+  /** Consecutive clicks at the same place: 1 for a click, 2 for a double click. */
+  clickCount: number;
+}
+
+/** Where the mouse is over a hovered view: the payload of `onHoverMove` (GPUI's `MouseMoveEvent`). */
+export interface HoverEvent {
+  /** Position in the view (its transforms undone). */
+  position: Point;
+  /** Position in the root view the view is in (the surface or its modal), as touches' `pageX` / `pageY`. */
+  pagePosition: Point;
+  modifiers: Modifiers;
+}
+
+/** Where a context menu was asked for: the payload of `onContextMenu`. */
+export interface ContextMenuEvent {
+  /** Position in the view (its transforms undone). */
+  position: Point;
+  /** Position in the root view the view is in: where `Menu.popup` opens a menu (`Menu.popup(items, e.pagePosition)`). */
+  pagePosition: Point;
+  modifiers: Modifiers;
+}
+
 /** Where a scroll view is: the payload of `onScroll`. */
 export interface ScrollEvent {
-  x: number;
-  y: number;
+  /** The content offset. */
+  offset: Point;
   /** The content's size (zoomed). */
-  contentWidth: number;
-  contentHeight: number;
-  width: number;
-  height: number;
+  contentSize: Size;
+  /** The scroll view's size. */
+  size: Size;
   /** The zoom scale (1 unless the scroll view zooms). */
   zoomScale: number;
+}
+
+/** Where an input's caret is: the payload of `onCaretMove`. */
+export interface CaretEvent {
+  /** The caret in the input (its border box), the input's own scrolling applied: as wide as the platform draws it, as tall as its line. Empty until the input is laid out. */
+  bounds: Bounds;
+  /** The caret in the root view the input is in (the surface or its dialog), as of the event: an `Overlay`'s `anchor`. */
+  pageBounds: Bounds;
+}
+
+/** What the user pasted into an input: the payload of `onPaste`. The platform read the clipboard as the user pasted; the app never reads it for this. */
+export interface PasteEvent {
+  /** The plain text, `""` when there was none. */
+  text: string;
+  /** Files with their bytes: images (a screenshot, an image copied from a page or an app), as `File`s an app can upload. */
+  files: File[];
+  /** `file:` URLs of local files copied in a file manager (as `onFileDrop`'s). */
+  uris: string[];
 }
 
 /** A line of a laid-out text (in the text's content box). */
 export interface TextLayoutLine {
   text: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+  bounds: Bounds;
   ascender: number;
   descender: number;
   capHeight: number;
@@ -377,21 +530,59 @@ export interface WebViewNavigation {
 /// its documentation. An event whose payload differs between elements has
 /// a row per payload.
 pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
-    (EventKind::Press, on::ALL, "() => void", ""),
-    (EventKind::LongPress, on::ALL, "() => void", ""),
-    (EventKind::PressIn, on::ALL, "() => void", ""),
-    (EventKind::PressOut, on::ALL, "() => void", ""),
+    (
+        EventKind::Press,
+        on::ALL,
+        "(e?: PressEvent) => void",
+        "A tap. `e` is where the pointer was, with the modifier keys and the click count, on backends that know it.",
+    ),
+    (
+        EventKind::LongPress,
+        on::ALL,
+        "(e?: PressEvent) => void",
+        "A press held for about half a second. `e` is where the pointer was, with the modifier keys and the click count, on backends that know it.",
+    ),
+    (
+        EventKind::PressDown,
+        on::ALL,
+        "(e?: PressEvent) => void",
+        "A press went down. `e` is where the pointer was, with the modifier keys and the click count, on backends that know it.",
+    ),
+    (
+        EventKind::PressUp,
+        on::ALL,
+        "(e?: PressEvent) => void",
+        "The press ended. `e` is where the pointer was, with the modifier keys and the click count, on backends that know it.",
+    ),
     (
         EventKind::HoverIn,
         on::ALL,
         "() => void",
-        "The mouse came over the view or a view inside it (macOS and Linux; never on touches).",
+        "The mouse came over the view or a view inside it (never on touches).",
     ),
     (
         EventKind::HoverOut,
         on::ALL,
         "() => void",
-        "The mouse left the view and the views inside it, or the window (macOS and Linux).",
+        "The mouse left the view and the views inside it, or the window.",
+    ),
+    (
+        EventKind::HoverMove,
+        on::ALL,
+        "(e: HoverEvent) => void",
+        "The mouse moved over the view (or a view inside it) with no button down, at most once per frame.",
+    ),
+    (
+        EventKind::ContextMenu,
+        on::ALL,
+        "(e: ContextMenuEvent) => void",
+        "The secondary button (a right click, Control-click on Apple platforms) was pressed over the view: open a menu with `Menu.popup(items, e.pagePosition)`. The nearest listener hears it; a text input or selectable text nearer shows its own menu instead.",
+    ),
+    (
+        EventKind::MouseMove,
+        on::ALL,
+        "(e: Point) => void",
+        "The mouse moved inside the view, including with a button down (desktops and web); `x`/`y` are local coordinates in points, delivered at most once per frame.",
     ),
     (
         EventKind::FileDragEnter,
@@ -411,7 +602,12 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         "(e: { uris: string[] }) => void",
         "Local file URLs dropped on this desktop destination.",
     ),
-    (EventKind::Layout, on::ALL, "(e: LayoutEvent) => void", ""),
+    (
+        EventKind::Layout,
+        on::ALL,
+        "(bounds: Bounds) => void",
+        "The frame changed: its bounds in the parent.",
+    ),
     (EventKind::PanStart, on::ALL, "(e: PanEvent) => void", ""),
     (
         EventKind::PanEnd,
@@ -482,7 +678,7 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
     (
         EventKind::Load,
         on::IMAGE,
-        "(e: { width: number; height: number }) => void",
+        "(e: Size) => void",
         "The source image's size in pixels (not the decoded, downsampled one).",
     ),
     (
@@ -494,7 +690,7 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
     (
         EventKind::Load,
         on::VIDEO,
-        "(e: { duration: number; width: number; height: number }) => void",
+        "(e: { duration: number; size: Size }) => void",
         "",
     ),
     (
@@ -516,37 +712,43 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         "",
     ),
     (
-        EventKind::ScrollBeginDrag,
+        EventKind::ScrollDragStart,
         on::SCROLLING,
-        "(e: { x: number; y: number }) => void",
+        "(e: Point) => void",
         "",
     ),
     (
-        EventKind::ScrollEndDrag,
+        EventKind::ScrollDragEnd,
         on::SCROLLING,
-        "(e: { x: number; y: number }) => void",
+        "(e: Point) => void",
         "",
     ),
     (
-        EventKind::MomentumScrollBegin,
+        EventKind::MomentumStart,
         on::SCROLLING,
-        "(e: { x: number; y: number }) => void",
+        "(e: Point) => void",
         "",
     ),
     (
-        EventKind::MomentumScrollEnd,
+        EventKind::MomentumEnd,
         on::SCROLLING,
-        "(e: { x: number; y: number }) => void",
+        "(e: Point) => void",
         "",
     ),
     (
         EventKind::ScrollEnd,
         on::SCROLL | on::LIST,
-        "(e: { x: number; y: number }) => void",
+        "(e: Point) => void",
         "",
     ),
     (EventKind::Refresh, on::SCROLL | on::LIST, "() => void", ""),
-    (EventKind::EndReached, on::LIST, "() => void", ""),
+    (EventKind::LoadMore, on::LIST, "() => void", ""),
+    (
+        EventKind::LoadMoreAtStart,
+        on::LIST,
+        "() => void",
+        "Within `loadMoreAtStartThreshold` viewports of the start, once the user or a scroll command moved the list: load what comes before the first item.",
+    ),
     (
         EventKind::ChangeText,
         on::INPUT,
@@ -568,22 +770,40 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         "",
     ),
     (
+        EventKind::Paste,
+        on::INPUT,
+        "(e: PasteEvent) => void",
+        "The user pasted (the keyboard's shortcut, a menu's Paste, a keyboard's image): the text, images as `File`s, local files' `file:` URLs. It comes before the `onChange` of the text it inserts; `pasteBehavior` decides whether the input inserts the text (images and files never are).",
+    ),
+    (
+        EventKind::CaretMove,
+        on::INPUT,
+        "(e: CaretEvent) => void",
+        "The caret moved: with the selection, or as the text scrolled or wrapped again. `bounds` is where it is in the input, `pageBounds` in the root view (an `Overlay`'s `anchor`): an `@` mention's suggestions open there.",
+    ),
+    (
         EventKind::KeyPress,
         on::INPUT,
         "(e: { key: string }) => void",
         "Before the text changes: `key` is the typed text, `Backspace` or `Enter`.",
     ),
     (
+        EventKind::CompositionChange,
+        on::INPUT,
+        "(e: { composing: boolean; text: string }) => void",
+        "An input method's composition started, changed or ended: `text` is what is being composed (pinyin before a character is chosen), empty once it ends. The committed text reaches `onChange` before the composition's end; while composing, the platform holds the `value` the app sets and shows it once the composition ends.",
+    ),
+    (
         EventKind::ContentSizeChange,
         on::INPUT,
-        "(e: { width: number; height: number }) => void",
-        "The size of the text (at the input's width when multiline): grow a multiline input with it.",
+        "(e: Size) => void",
+        "The size of the text (at the input's width when `multiline`; one empty line's while it is empty, whatever its placeholder): grow a multiline input with it.",
     ),
     (
         EventKind::Message,
         on::WEBVIEW,
         "(e: { data: string }) => void",
-        "The page called `window.ReactNativeWebView.postMessage(data)`.",
+        "The page called `window.nsh.postMessage(data)`.",
     ),
     (
         EventKind::NavigationStateChange,
@@ -599,23 +819,27 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         "",
     ),
     (
-        EventKind::BackRequest,
-        on::SCREEN,
-        "() => void",
-        "The user tried to leave a screen with `preventBack`.",
+        EventKind::PressOutside,
+        on::OVERLAY,
+        "(e: { pagePosition: Point }) => void",
+        "A press went down outside the overlay, its anchor and the overlays inside it (where, in the root view). Closing is the app's: leave the overlay out.",
     ),
-    (EventKind::Dismiss, on::SCREEN | on::MODAL, "() => void", ""),
     (
-        EventKind::RequestClose,
-        on::MODAL,
+        EventKind::Cancel,
+        on::OVERLAY,
         "() => void",
-        "The user asked to close (Android back button, iOS sheet swipe): set `visible` to false to close it.",
+        "Escape or the Android back button, while this is the top overlay listening to it (it takes the key from the overlays below, the pages and `BackHandler`). Closing is the app's.",
     ),
-    (EventKind::Show, on::MODAL, "() => void", ""),
+    (
+        EventKind::Position,
+        on::OVERLAY,
+        "(e: OverlayPosition) => void",
+        "The core placed the overlay (again: the anchor moved, the overlay changed size, it went to the other side).",
+    ),
 ];
 
 /// The events no element's props declare: the root's (`BackHandler`,
-/// `nsh/keymap`, dialogs, `Image.getSize`, clipboard reads, menus), the runtime's own (touches, insets, native
+/// `nsh/keymap`, dialogs, `Image.getSize`, clipboard reads, menus, `nsh/host`'s replies and events), the runtime's own (touches, insets, native
 /// components' events) and those whose payload a module makes
 /// (`List`'s viewable items, with the app's items).
 pub const INTERNAL_EVENTS: &[EventKind] = &[
@@ -626,9 +850,19 @@ pub const INTERNAL_EVENTS: &[EventKind] = &[
     EventKind::BackPress,
     EventKind::ImageInfo,
     EventKind::Clipboard,
+    EventKind::Host,
+    EventKind::Pick,
+    EventKind::OpenUrl,
     EventKind::KeyCommand,
     EventKind::Menu,
-    EventKind::ViewableItemsChanged,
+    EventKind::ViewableItemsChange,
+    // `NavPage`'s `onDismiss` / `onBackPress` and `Dialog`'s `onClose` /
+    // `onCancel` / `onOpenChange` / `onOpen`: the navigation's handlers
+    // (`nsh-js` `navigation.rs`), declared with its components.
+    EventKind::BackRequest,
+    EventKind::Dismiss,
+    EventKind::RequestClose,
+    EventKind::Show,
 ];
 
 /// The interfaces of the host props, by the elements their props apply
@@ -645,11 +879,12 @@ const GROUPS: &[(u32, &str, &str)] = &[
     (on::SCROLL, "Scroll", "`<Scroll>`"),
     (on::LIST, "List", "lists"),
     (on::INPUT, "Input", "`<Input>`"),
-    (on::SCREEN, "Screen", "the screens of a stack"),
-    (on::MODAL, "Modal", "modals"),
+    (on::SCREEN, "NavPage", "the pages of a `NavStack`"),
+    (on::MODAL, "Dialog", "dialogs"),
     (on::WEBVIEW, "WebView", "web views"),
     (on::VIDEO, "Video", "videos"),
     (on::INPUT_ACCESSORY, "InputAccessory", "input accessories"),
+    (on::OVERLAY, "Overlay", "`<Overlay>`"),
 ];
 
 /// The declarations of the host elements' props: the named types they use
@@ -700,7 +935,7 @@ pub fn declarations() -> String {
                 if !doc.is_empty() {
                     let _ = writeln!(out, "  /** {doc} */");
                 }
-                let _ = writeln!(out, "  {}?: {handler};", kind.prop_name());
+                let _ = writeln!(out, "  {}?: {handler};", kind.handler_name());
             }
             out.push_str("}\n");
         }

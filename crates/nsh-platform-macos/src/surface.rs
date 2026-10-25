@@ -5,7 +5,13 @@
 //! wakes the main thread once (`DispatchQueue::main`); the main thread
 //! drains the queue and applies every batch in order ([`Surface::drain`]).
 //! Native animations and JS frame requests run on the root view's display
-//! link while there is something to do.
+//! link while there is something to do. While native animations or the
+//! platform's own (scroll glides) run, batches wait for the start of the
+//! next frame and each frame applies them for at most
+//! [`FRAME_BATCHES`] ([`Surface::apply_queued`]): a scroll glide's frames
+//! are not delayed by batches landing between them, and several batches
+//! (list binds while scrolling) spread over frames instead of one frame
+//! taking them all. An idle surface applies a batch as soon as it lands.
 //!
 //! The one exception to "the main thread never waits for JS": when the
 //! window resizes the root ([`Surface::resized`]), the main thread waits
@@ -21,6 +27,8 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
+    path::PathBuf,
     rc::{Rc, Weak},
     sync::{
         Arc,
@@ -30,9 +38,11 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
-use dispatch2::DispatchQueue;
-use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, ROOT_ID, Size};
-use nsh_engine::{Engine, EngineConfig, EngineControl, Environment, MountSink, perf::PerfMonitor};
+use dispatch2::{DispatchQueue, DispatchQueueGlobalPriority, GlobalQueueIdentifier};
+use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, Points, ROOT_ID, Size};
+use nsh_engine::{
+    Chunk, Engine, EngineConfig, EngineControl, Environment, MountSink, perf::PerfMonitor,
+};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained, sel,
 };
@@ -51,12 +61,20 @@ enum Message {
     Frame,
     HotUpdateFailed,
     /// The engine laid the app out at this size ([`MountSink::resized`]).
-    Resized(Size),
+    Resized(Size<Points>),
+    /// The app imports chunk `id` (`import()` of a split bundle), which its
+    /// bundle does not hold ([`MountSink::load_chunk`]).
+    LoadChunk(String),
 }
 
 /// How long the main thread waits for the layout at a new window size
 /// (a frame at 60 Hz): see the module doc.
 const RESIZE_WAIT: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// The main-thread time one frame spends applying queued batches
+/// ([`Surface::apply_queued`]): about half a refresh at 120 Hz, which
+/// leaves the rest to input, animations and Core Animation's commit.
+const FRAME_BATCHES: std::time::Duration = std::time::Duration::from_millis(4);
 
 thread_local! {
     /// The surfaces of this (main) thread, by key: the sink wakes one by
@@ -79,6 +97,8 @@ struct Sink {
     pending: Arc<AtomicBool>,
     /// A performance monitor measures: batches carry when they were sent.
     perf: Arc<AtomicBool>,
+    /// The directory `import()` chunks load from ([`AppOptions::chunks`]).
+    chunks: Option<PathBuf>,
 }
 
 impl Sink {
@@ -113,8 +133,16 @@ impl MountSink for Sink {
         self.send(Message::HotUpdateFailed);
     }
 
-    fn resized(&self, size: Size) {
+    fn resized(&self, size: Size<Points>) {
         self.send(Message::Resized(size));
+    }
+
+    fn load_chunk(&self, id: &str) -> bool {
+        if self.chunks.is_none() {
+            return false;
+        }
+        self.send(Message::LoadChunk(id.to_owned()));
+        true
     }
 }
 
@@ -167,11 +195,27 @@ pub(crate) struct Surface {
     /// The app's appearance (`nsh.json`, `setColorScheme`): the color
     /// scheme is the system's resolved with it ([`crate::system`]).
     pub(crate) appearance: Cell<nsh_core::platform::Appearance>,
+    /// The directory `import()` chunks load from ([`crate::AppOptions::chunks`]).
+    pub(crate) chunks: RefCell<Option<PathBuf>>,
+    /// The embedding app's locale and text size, standing in for the
+    /// system's ([`crate::AppView::set_locale`], `set_font_scale`).
+    pub(crate) host_environment: Cell<nsh_core::platform::HostEnvironment>,
+    /// The embedding app's theme overrides
+    /// ([`crate::AppView::set_theme_overrides`]): sent to every engine the
+    /// surface starts, before its first frame.
+    pub(crate) host_tokens: RefCell<Option<nsh_engine::Tokens>>,
     /// JS asked for a display frame.
     js_frame: Cell<bool>,
+    /// Batches that arrived while animations run, and what came after
+    /// them, applied at the start of the next frames
+    /// ([`Surface::apply_queued`]).
+    queued: RefCell<VecDeque<Message>>,
     /// Frame callbacks of the platform's own animations (scroll glides,
     /// transitions): called on every frame while they return true.
     frame_callbacks: RefCell<Vec<FrameCallback>>,
+    /// The model of a test session's app (`nsh test --target`).
+    #[cfg(feature = "dev")]
+    test_model: RefCell<Option<std::sync::Arc<nsh_testing::agent::Model>>>,
     /// The display link, while it runs.
     link: RefCell<Option<Retained<CADisplayLink>>>,
     /// The performance monitor ([`Surface::set_perf_monitor`]), and whether
@@ -191,6 +235,8 @@ pub(crate) struct Surface {
     on_hot_update_failed: RefCell<Option<Box<dyn Fn()>>>,
     /// Where `asset:/` image URIs resolve ([`crate::image::set_asset_base`]).
     pub(crate) asset_base: RefCell<Option<crate::image::AssetBase>>,
+    /// The disk cache of downloaded images ([`crate::image::set_disk_cache`]).
+    pub(crate) image_cache: RefCell<Option<nsh_core::image::DiskCache>>,
     /// The window's chrome: title bar, menus ([`crate::chrome`]).
     pub(crate) chrome: crate::chrome::Chrome,
     /// Videos, web views and registered native components.
@@ -224,8 +270,14 @@ impl Surface {
             pending: RefCell::new(Arc::new(AtomicBool::new(false))),
             environment: Cell::new(environment),
             appearance: Cell::default(),
+            chunks: RefCell::new(None),
+            host_environment: Cell::default(),
+            host_tokens: RefCell::new(None),
             js_frame: Cell::new(false),
+            queued: RefCell::default(),
             frame_callbacks: RefCell::default(),
+            #[cfg(feature = "dev")]
+            test_model: RefCell::default(),
             link: RefCell::new(None),
             perf: RefCell::new(None),
             perf_on: Arc::new(AtomicBool::new(false)),
@@ -236,6 +288,7 @@ impl Surface {
             on_error: RefCell::new(None),
             on_hot_update_failed: RefCell::new(None),
             asset_base: RefCell::new(None),
+            image_cache: RefCell::new(None),
             native: Default::default(),
             keymap: Default::default(),
             file_drop: Default::default(),
@@ -266,8 +319,13 @@ impl Surface {
     pub(crate) fn start(self: &Rc<Self>, mut config: EngineConfig) {
         self.stop();
         let env = self.environment.get();
-        config.viewport = Size::new(env.window.0, env.window.1);
+        config.viewport = Size::new(env.window.width, env.window.height);
         config.environment = env;
+        // A test session's app: the test's storage, network and trace.
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.borrow() {
+            model.set_up_engine(&mut config);
+        }
         let (tx, rx) = crossbeam_channel::unbounded();
         let pending = Arc::new(AtomicBool::new(false));
         let sink = Sink {
@@ -275,11 +333,26 @@ impl Surface {
             tx,
             pending: pending.clone(),
             perf: self.perf_on.clone(),
+            chunks: self.chunks.borrow().clone(),
         };
         *self.rx.borrow_mut() = Some(rx);
         *self.pending.borrow_mut() = pending;
-        match Engine::start(config, CoreTextEngine::default, sink) {
+        // The embedding app's theme overrides are in the first frame.
+        let tokens = self.host_tokens.borrow().clone();
+        let setup = |control: &EngineControl| {
+            if tokens.is_some() {
+                control.set_tokens(tokens);
+            }
+        };
+        match Engine::start_with(config, CoreTextEngine::default, sink, setup) {
             Ok(engine) => {
+                // The app's downloaded images go through its disk cache.
+                crate::image::set_disk_cache(self, engine.image_cache());
+                // The test moves its clock through the engine.
+                #[cfg(feature = "dev")]
+                if let Some(model) = &*self.test_model.borrow() {
+                    model.engine_started(engine.control());
+                }
                 if let Some(monitor) = &*self.perf.borrow() {
                     engine.control().set_perf_monitor(Some(monitor.clone()));
                 }
@@ -304,6 +377,7 @@ impl Surface {
         crate::input::reset(self);
         crate::keymap::clear(self);
         self.js_frame.set(false);
+        self.queued.borrow_mut().clear();
         self.resize_late.set(false);
         self.frame_callbacks.borrow_mut().clear();
     }
@@ -333,7 +407,9 @@ impl Surface {
     }
 
     /// Updates the environment and tells the engine.
-    pub(crate) fn set_environment(&self, environment: Environment) {
+    pub(crate) fn set_environment(&self, mut environment: Environment) {
+        // The embedding app's settings over the system's.
+        self.host_environment.get().apply(&mut environment);
         if self.environment.replace(environment) != environment {
             self.control(|c| c.set_environment(environment));
             crate::system::environment_applied(self);
@@ -346,29 +422,29 @@ impl Surface {
     pub(crate) fn resized(self: &Rc<Self>, width: f32, height: f32) {
         {
             let mut s = self.root.state_mut();
-            if s.frame.width == width && s.frame.height == height {
+            if s.frame.size.width.0 == width && s.frame.size.height.0 == height {
                 return;
             }
-            s.frame.width = width;
-            s.frame.height = height;
+            s.frame.size.width.0 = width;
+            s.frame.size.height.0 = height;
         }
         let mut env = self.environment.get();
-        env.window = (width, height);
+        env.window = nsh_core::Size::new(nsh_core::Points(width), nsh_core::Points(height));
         self.environment.set(env);
         self.control(|c| {
-            c.resize(Size::new(width, height));
+            c.resize(Size::new(Points(width), Points(height)));
             c.set_environment(env);
         });
         crate::navigation::surface_resized(self, width, height);
         crate::system::surface_resized(self, width, height);
         // Full screen and the window's size change the title bar's area.
         crate::chrome::update_area(self);
-        self.await_layout(Size::new(width, height));
+        self.await_layout(Size::new(Points(width), Points(height)));
     }
 
     /// Waits for the engine's layout at `size` and applies what it sent
     /// meanwhile ([`Surface::resized`]).
-    fn await_layout(self: &Rc<Self>, size: Size) {
+    fn await_layout(self: &Rc<Self>, size: Size<Points>) {
         if self.resize_late.get() || self.mounter.try_borrow_mut().is_err() {
             return;
         }
@@ -384,6 +460,11 @@ impl Surface {
         // Measured as main-thread work: the wait is part of the frame.
         self.measure(true, || {
             quiet(|| {
+                // What waited for a frame comes before the new layout.
+                let queued = std::mem::take(&mut *self.queued.borrow_mut());
+                for message in queued {
+                    applied |= self.handle(message, monitor.as_deref());
+                }
                 loop {
                     let Ok(message) = rx.recv_deadline(deadline) else {
                         self.resize_late.set(true);
@@ -429,7 +510,8 @@ impl Surface {
         r
     }
 
-    /// Applies what the engine sent.
+    /// Handles what the engine sent. While animations run (see the module
+    /// doc), batches wait for the next frame ([`Surface::apply_queued`]).
     fn drain(self: &Rc<Self>) {
         let monitor = self.perf.borrow().clone();
         let start = monitor.as_ref().map(|_| Instant::now());
@@ -441,6 +523,18 @@ impl Surface {
         let mut applied = false;
         quiet(|| {
             for message in messages {
+                // A batch waits while the platform's own animations run;
+                // whatever follows a waiting batch waits behind it, which
+                // keeps the order (a frame request only sets a flag).
+                let wait = match message {
+                    Message::Batch(..) => self.defers_batches(),
+                    Message::Frame => false,
+                    _ => !self.queued.borrow().is_empty(),
+                };
+                if wait {
+                    self.queued.borrow_mut().push_back(message);
+                    continue;
+                }
                 applied |= self.handle(message, monitor.as_deref());
             }
             if applied {
@@ -450,7 +544,11 @@ impl Surface {
         });
         if let (Some(monitor), Some(start)) = (monitor, start) {
             // Core Animation's commit (drawing what changed) included.
-            monitor.record_work(start.elapsed(), applied);
+            let cost = start.elapsed();
+            monitor.record_work(cost, applied);
+            if applied {
+                crate::fps::drained(cost);
+            }
         }
         self.ensure_ticking();
     }
@@ -468,6 +566,10 @@ impl Surface {
             }
             Message::Error(message) => {
                 log::error!("{message}");
+                #[cfg(feature = "dev")]
+                if let Some(model) = &*self.test_model.borrow() {
+                    model.error(message.to_string());
+                }
                 if let Some(f) = &*self.on_error.borrow() {
                     f(&message);
                 }
@@ -479,6 +581,39 @@ impl Surface {
                 }
             }
             Message::Resized(_) => self.resize_late.set(false),
+            Message::LoadChunk(id) => {
+                // The chunk's file name is its id: `is_chunk_name`
+                // (nsh-js) restricted it to a plain `<stem>.js`, so this
+                // join cannot leave the directory. Chunks load as source:
+                // they are files, and files can be replaced — bytecode
+                // only comes from trusted resources (`Bundle::read`).
+                let dir = self.chunks.borrow().clone();
+                // Keep the reply tied to this engine if the app is replaced
+                // while the file is being read. File I/O stays off AppKit's
+                // main thread, as it does for images.
+                let Some(control) = self.control.borrow().clone() else {
+                    return false;
+                };
+                DispatchQueue::global_queue(GlobalQueueIdentifier::Priority(
+                    DispatchQueueGlobalPriority::Default,
+                ))
+                .exec_async(move || {
+                    match dir
+                        .map(|dir| std::fs::read_to_string(dir.join(&id)))
+                        .transpose()
+                    {
+                        Ok(Some(code)) => control.chunk_loaded(Chunk::source(id, code)),
+                        Ok(None) => {
+                            log::error!("chunk {id}: no chunk directory");
+                            control.chunk_failed(id, "no chunk directory".to_owned());
+                        }
+                        Err(err) => {
+                            log::error!("chunk {id}: {err}");
+                            control.chunk_failed(id, err.to_string());
+                        }
+                    }
+                });
+            }
         }
         false
     }
@@ -495,6 +630,10 @@ impl Surface {
             }
         }
         self.mounter.borrow_mut().end_batch(self);
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.borrow() {
+            model.apply(batch);
+        }
     }
 
     /// Writes the animated values to the views and reports finished
@@ -505,6 +644,7 @@ impl Surface {
             anim.write(&self.mounter.borrow());
             std::mem::take(&mut anim.finished)
         };
+        crate::scroll::pin_animated_sticky(self);
         if !finished.is_empty() {
             self.control(|c| c.animations_finished(finished));
         }
@@ -519,8 +659,40 @@ impl Surface {
         self.ensure_ticking();
     }
 
-    fn wants_frames(&self) -> bool {
+    /// Whether a native animation runs: the graph's, or the platform's own
+    /// (scroll glides, zooms); or batches wait for the next frame.
+    #[cfg(feature = "dev")]
+    pub(crate) fn animating(&self) -> bool {
+        self.anim.borrow().animating()
+            || !self.frame_callbacks.borrow().is_empty()
+            || !self.queued.borrow().is_empty()
+    }
+
+    /// Keeps the model `nsh test --target` steps see of the app
+    /// ([`nsh_testing::agent::Model`]): every batch applied and every error
+    /// go to it from now on.
+    #[cfg(feature = "dev")]
+    pub(crate) fn set_test_model(&self, model: Option<std::sync::Arc<nsh_testing::agent::Model>>) {
+        *self.test_model.borrow_mut() = model;
+    }
+
+    /// Whether batches wait for the start of the next frame: while native
+    /// animations or the platform's own (scroll glides, zooms) run, so
+    /// their frames are not delayed by batches landing between them, and
+    /// behind batches already waiting. A frame JS asked for alone does not
+    /// make them wait: what it draws shows in the frame it was asked for.
+    fn defers_batches(&self) -> bool {
+        !self.queued.borrow().is_empty()
+            || self.anim.borrow().animating()
+            || !self.frame_callbacks.borrow().is_empty()
+    }
+
+    /// Whether the display link should run (animations, frame callbacks,
+    /// a JS frame request): while it does, a bounds commit mid-scroll
+    /// lands on a live frame.
+    pub(crate) fn wants_frames(&self) -> bool {
         self.js_frame.get()
+            || !self.queued.borrow().is_empty()
             || self.anim.borrow().animating()
             || !self.frame_callbacks.borrow().is_empty()
     }
@@ -630,7 +802,9 @@ impl Surface {
         let start = Instant::now();
         let dirty = self.wants_frames();
         quiet(|| self.tick(now));
-        monitor.record_work(start.elapsed(), dirty);
+        let cost = start.elapsed();
+        monitor.record_work(cost, dirty);
+        crate::fps::ticked(cost);
         monitor.vsync(
             Instant::now(),
             std::time::Duration::from_secs_f64(period.max(0.0)),
@@ -638,6 +812,7 @@ impl Surface {
     }
 
     fn tick(self: &Rc<Self>, now: f64) {
+        self.apply_queued(FRAME_BATCHES);
         if self.anim.borrow().animating() {
             self.anim.borrow_mut().tick(now);
             self.write_animations();
@@ -656,6 +831,28 @@ impl Surface {
             self.control(|c| c.frame());
         }
         self.revisit();
+    }
+
+    /// Applies the batches that waited for this frame, in order, until
+    /// `budget` is spent (at least one): the rest wait for the next frame,
+    /// so one frame's main-thread work stays bounded when the engine sent
+    /// several. A batch is the state of one commit and is applied whole.
+    fn apply_queued(self: &Rc<Self>, budget: std::time::Duration) {
+        if self.queued.borrow().is_empty() {
+            return;
+        }
+        let monitor = self.perf.borrow().clone();
+        let start = Instant::now();
+        let mut applied = false;
+        while !applied || start.elapsed() < budget {
+            let Some(message) = self.queued.borrow_mut().pop_front() else {
+                break;
+            };
+            applied |= self.handle(message, monitor.as_deref());
+        }
+        if applied {
+            self.write_animations();
+        }
     }
 
     /// Draws views whose drawing changed out of sight and that show now

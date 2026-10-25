@@ -163,6 +163,7 @@ impl Mounter {
                     // A removal animation detaches the view when it ends.
                     if !crate::transition::removing(surface, &view, self.layout_animation.as_ref())
                     {
+                        crate::transition::deleted(&view);
                         self.detach(surface, &view);
                     }
                 }
@@ -177,7 +178,7 @@ impl Mounter {
                     // Where a modal sits is the platform's (a sheet is a
                     // card inside the window): the core only sizes it.
                     let old = view.state().frame;
-                    (frame.x, frame.y) = (old.x, old.y);
+                    (frame.origin.x.0, frame.origin.y.0) = (old.origin.x.0, old.origin.y.0);
                 }
                 let frame = &frame;
                 // Compared with where a running layout animation is headed,
@@ -242,12 +243,18 @@ impl Mounter {
             MountItem::ScrollConfig {
                 id,
                 horizontal,
-                shows_indicator,
+                scrollbar_visible,
                 mirrored,
                 ..
             } => {
                 if let Some(view) = &self.get(*id) {
-                    crate::scroll::config(surface, view, *horizontal, *shows_indicator, *mirrored);
+                    crate::scroll::config(
+                        surface,
+                        view,
+                        *horizontal,
+                        *scrollbar_visible,
+                        *mirrored,
+                    );
                 }
             }
             MountItem::ScrollContent { id, size } => {
@@ -257,7 +264,7 @@ impl Mounter {
             }
             MountItem::ScrollBy { id, dx, dy } => {
                 if let Some(view) = &self.get(*id) {
-                    crate::scroll::scroll_by(surface, view, *dx, *dy);
+                    crate::scroll::scroll_by(surface, view, dx.0, dy.0);
                 }
             }
             MountItem::LayoutDirection { rtl } => self.rtl = *rtl,

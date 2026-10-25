@@ -1,6 +1,6 @@
 import { mount, signal, Text, View } from "nsh";
 import { Canvas } from "nsh/canvas";
-import { Alert, ActionSheet, createNavigator, Screen, Stack } from "nsh/ui/mobile";
+import { Alert, ActionSheet, createNavigator, Screen, Stack } from "nsh/base";
 
 function App() {
   const nav = createNavigator({ page: "home" });

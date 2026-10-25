@@ -1,7 +1,9 @@
 package com.longbridge.nsh;
 
+import android.animation.ValueAnimator;
 import android.annotation.SuppressLint;
 import android.content.Context;
+import android.graphics.Canvas;
 import android.graphics.Rect;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
@@ -28,6 +30,7 @@ final class ScrollBox extends FrameLayout implements Node {
     final Mounter mounter;
     final int id;
     final Decor decor = new Decor();
+    /** The events it listens to, kinds below 64 ({@link Mounter#wants} has all). */
     long events;
     boolean horizontal;
     int dismissMode; // 0 none, 1 on drag, 2 interactive
@@ -63,6 +66,14 @@ final class ScrollBox extends FrameLayout implements Node {
     /** This touch only dismisses the keyboard (`keyboardShouldPersistTaps`); -1: it does not. */
     private int tapMode = -1;
     private boolean swallowing;
+    /**
+     * Frames the platform scroll view drew. It draws again each frame while
+     * its overscroll effect (Android 12's stretch) relaxes, which moves no
+     * view: the test agent counts the frames as movement
+     * ({@link TestAgent#animating}), since a touch caught then only stops
+     * the stretch, and presses nothing.
+     */
+    int frames;
 
     /** The scrolled content, sized by the core (`ScrollContent`). */
     static final class Content extends Box {
@@ -131,9 +142,9 @@ final class ScrollBox extends FrameLayout implements Node {
                 // The scroll view takes the touches from JS responders.
                 mounter.cancelTouches();
                 // Caught while gliding: the glide ended.
-                if (momentum) emit(Native.MOMENTUM_SCROLL_END);
+                if (momentum) emit(Native.MOMENTUM_END);
                 momentum = false;
-                emit(Native.SCROLL_BEGIN_DRAG);
+                emit(Native.SCROLL_DRAG_START);
             } else if (swallowing) {
                 dragging = true;
             }
@@ -183,6 +194,16 @@ final class ScrollBox extends FrameLayout implements Node {
             if (!kept && v != null) {
                 if (horizontal) v.setTranslationX(0); else v.setTranslationY(0);
             }
+            if (!kept && mounter.stickyHosts.get(old) == this) mounter.stickyHosts.remove(old);
+            mounter.forgetStickyOffset(old);
+        }
+        // A cell may be in a list in this scroll view's viewport: its
+        // animated offset finds this scroll view. Its offset is forgotten:
+        // the outputs after the batch bring back the ones still animated,
+        // so a cell whose offset became a number no longer adds the old one.
+        for (int c : cells) {
+            mounter.stickyHosts.put(c, this);
+            mounter.forgetStickyOffset(c);
         }
         stickyCells = cells;
         stickyStart = start;
@@ -205,13 +226,14 @@ final class ScrollBox extends FrameLayout implements Node {
         return stickyCells.length > 0;
     }
 
-    /** Moves the sticky cells with the scroll offset. */
-    private void pinSticky() {
+    /** Moves the sticky cells with the scroll offset (and their animated offsets). */
+    void pinSticky() {
         float offset = horizontal ? scroller.getScrollX() : scroller.getScrollY();
         for (int i = 0; i < stickyCells.length; i++) {
             View v = mounter.view(stickyCells[i]);
             if (v == null) continue;
-            float t = Math.max(0, Math.min(offset - stickyStart[i], stickyEnd[i] - stickyStart[i]));
+            float extra = mounter.stickyOffset(stickyCells[i]);
+            float t = Math.max(0, Math.min(offset + extra - stickyStart[i], stickyEnd[i] - stickyStart[i]));
             if (horizontal) v.setTranslationX(t); else v.setTranslationY(t);
         }
     }
@@ -316,7 +338,7 @@ final class ScrollBox extends FrameLayout implements Node {
         return target != null ? target : velocity > 0 ? max : 0;
     }
 
-    /** The platform scroll views, with `scrollEnabled` and snapping. */
+    /** The platform scroll views, with `scrollable` and snapping. */
     private final class VScroll extends ScrollView {
         VScroll(Context context) {
             super(context);
@@ -340,6 +362,12 @@ final class ScrollBox extends FrameLayout implements Node {
         @Override
         public void fling(int velocity) {
             if (!ScrollBox.this.fling(velocity)) super.fling(velocity);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            super.draw(canvas);
+            frames++;
         }
     }
 
@@ -367,6 +395,12 @@ final class ScrollBox extends FrameLayout implements Node {
         public void fling(int velocity) {
             if (!ScrollBox.this.fling(velocity)) super.fling(velocity);
         }
+
+        @Override
+        public void draw(Canvas canvas) {
+            super.draw(canvas);
+            frames++;
+        }
     }
 
     /** Before the scroll view sees {@code e}: whether it ends the touch. */
@@ -384,10 +418,10 @@ final class ScrollBox extends FrameLayout implements Node {
             snap(0);
             flung = true;
         }
-        emit(Native.SCROLL_END_DRAG);
+        emit(Native.SCROLL_DRAG_END);
         if (flung) {
             momentum = true;
-            emit(Native.MOMENTUM_SCROLL_BEGIN);
+            emit(Native.MOMENTUM_START);
         }
     }
 
@@ -402,15 +436,25 @@ final class ScrollBox extends FrameLayout implements Node {
      * keyboard). `requestRectangleOnScreen` cannot: ScrollView ignores its
      * padding when it decides whether a rectangle is visible.
      */
-    void reveal(View v, int margin) {
+    /**
+     * Scrolls {@code v} (and {@code margin} px around it) into view, over
+     * {@code motion}: an animator from 0 to 1 the caller starts. False when
+     * there is nothing to scroll (the animator is left alone).
+     */
+    boolean reveal(View v, int margin, ValueAnimator motion) {
         Rect r = new Rect(0, -margin, v.getWidth(), v.getHeight() + margin);
         scroller.offsetDescendantRectToMyCoords(v, r);
         int top = scroller.getScrollY();
         int bottom = top + scroller.getHeight() - scroller.getPaddingBottom();
         int dy = r.bottom > bottom ? Math.min(r.bottom - bottom, r.top - top) : Math.min(0, r.top - top);
-        if (dy == 0) return;
-        if (scroller instanceof ScrollView) ((ScrollView) scroller).smoothScrollBy(0, dy);
-        else scroller.scrollBy(0, dy);
+        if (dy == 0) return false;
+        if (!(scroller instanceof ScrollView)) {
+            scroller.scrollBy(0, dy);
+            return false;
+        }
+        int x = scroller.getScrollX();
+        motion.addUpdateListener(a -> scroller.scrollTo(x, top + Math.round(dy * (float) a.getAnimatedValue())));
+        return true;
     }
 
     /** Scrolls the core asked for that were applied (reported with offsets). */
@@ -461,8 +505,9 @@ final class ScrollBox extends FrameLayout implements Node {
         }
         if (momentum) {
             momentum = false;
-            emit(Native.MOMENTUM_SCROLL_END);
+            emit(Native.MOMENTUM_END);
         }
+        mounter.scrollEnded(id);
         float d = mounter.density;
         mounter.event(id, Native.SCROLL_END, null, 0, scroller.getScrollX() / d, scroller.getScrollY() / d);
     }
@@ -895,12 +940,21 @@ final class ScrollBox extends FrameLayout implements Node {
         return keyboardTaps == 1 ? -1 : keyboardTaps;
     }
 
-    /** Whether an input is under ({@code x}, {@code y}) of {@code group}. */
+    /**
+     * Whether an input is under ({@code x}, {@code y}) of {@code group}: in
+     * any child there, topmost first, as a touch a child does not take goes
+     * on to the one below (a decoration over a field does not hide it).
+     */
     private static boolean inputAt(ViewGroup group, float x, float y) {
-        View v = childAt(group, x, y);
-        if (v == null) return false;
-        if (v instanceof InputBox) return true;
-        return v instanceof ViewGroup && inputAt((ViewGroup) v, localX(group, v, x), localY(group, v, y));
+        for (int i = group.getChildCount() - 1; i >= 0; i--) {
+            View c = group.getChildAt(i);
+            if (c.getVisibility() != VISIBLE) continue;
+            float lx = localX(group, c, x), ly = localY(group, c, y);
+            if (lx < 0 || ly < 0 || lx >= c.getWidth() || ly >= c.getHeight()) continue;
+            if (c instanceof InputBox) return true;
+            if (c instanceof ViewGroup && inputAt((ViewGroup) c, lx, ly)) return true;
+        }
+        return false;
     }
 
     /** Whether something under ({@code x}, {@code y}) of {@code group} handles taps. */

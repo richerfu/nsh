@@ -62,11 +62,11 @@ impl NshEnvironment {
     }
     pub(crate) fn snapshot(env: Environment) -> Self {
         Self {
-            safe_top: Some(env.safe_area.top as f64),
-            safe_right: Some(env.safe_area.right as f64),
-            safe_bottom: Some(env.safe_area.bottom as f64),
-            safe_left: Some(env.safe_area.left as f64),
-            keyboard_height: Some(env.keyboard_height as f64),
+            safe_top: Some(env.safe_area.top.0 as f64),
+            safe_right: Some(env.safe_area.right.0 as f64),
+            safe_bottom: Some(env.safe_area.bottom.0 as f64),
+            safe_left: Some(env.safe_area.left.0 as f64),
+            keyboard_height: Some(env.keyboard_height.0 as f64),
             keyboard_duration: Some(env.keyboard_duration as f64),
             font_scale: Some(env.font_scale as f64),
             color_scheme: Some(
@@ -106,11 +106,16 @@ impl NshEnvironment {
             }
             Ok(())
         }
-        number(self.safe_top, &mut env.safe_area.top, 0.0, 16384.0)?;
-        number(self.safe_right, &mut env.safe_area.right, 0.0, 16384.0)?;
-        number(self.safe_bottom, &mut env.safe_area.bottom, 0.0, 16384.0)?;
-        number(self.safe_left, &mut env.safe_area.left, 0.0, 16384.0)?;
-        number(self.keyboard_height, &mut env.keyboard_height, 0.0, 16384.0)?;
+        number(self.safe_top, &mut env.safe_area.top.0, 0.0, 16384.0)?;
+        number(self.safe_right, &mut env.safe_area.right.0, 0.0, 16384.0)?;
+        number(self.safe_bottom, &mut env.safe_area.bottom.0, 0.0, 16384.0)?;
+        number(self.safe_left, &mut env.safe_area.left.0, 0.0, 16384.0)?;
+        number(
+            self.keyboard_height,
+            &mut env.keyboard_height.0,
+            0.0,
+            16384.0,
+        )?;
         number(
             self.keyboard_duration,
             &mut env.keyboard_duration,

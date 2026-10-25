@@ -1,16 +1,16 @@
-//! The OS the platform reports decides `Platform` and which platform-only
+//! The OS the platform reports decides `platform` and which platform-only
 //! props (`ios={{…}}`, `android={{…}}`, `desktop={{…}}`, `web={{…}}`)
 //! apply; on the web, the idiom decides between mobile and desktop.
 
 use std::time::Duration;
 
-use nsh_core::{ApproxTextEngine, MountItem, Size};
+use nsh_core::{ApproxTextEngine, MountItem, Size, geometry::px};
 use nsh_engine::{Bundle, Engine, EngineConfig, Environment, Idiom, Os};
 
 use crate::ChannelSink;
 
 const APP: &str = r#"import { mount, Text, View } from "nsh";
-import { Platform } from "nsh/device";
+import { platform } from "nsh/device";
 
 mount(
   () => (
@@ -21,7 +21,7 @@ mount(
       desktop={{ accessibilityLabel: "desktop" }}
       web={{ accessibilityHint: "web" }}
     >
-      <Text>{`${Platform.OS} ${Platform.isDesktop} ${Platform.select({ ios: "i", ohos: "o", mobile: "m", desktop: "d" })} ${Platform.select({ native: "n", default: "-" })}`}</Text>
+      <Text>{`${platform.os} ${platform.idiom === "desktop"} ${platform.select({ ios: "i", ohos: "o", mobile: "m", desktop: "d" })} ${platform.select({ native: "n", default: "-" })}`}</Text>
     </View>
   ),
 );
@@ -41,25 +41,36 @@ fn first_frame(os: Os, idiom: Idiom) -> (Vec<String>, Vec<String>) {
         entry,
         minify: false,
         split: false,
-        ui_sets: vec![nsh_ui_mobile::registry()],
+        ui_sets: vec![nsh_base::registry().into()],
     })
     .unwrap();
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         app: nsh_engine::App::Js(Bundle::source(bundle.code)),
-        viewport: Size::new(320.0, 480.0),
+        viewport: Size::new(px(320.0), px(480.0)),
         trace: false,
         network: None,
+        websocket: None,
+        filesystem: None,
         assets: None,
         environment: Environment {
             os,
             idiom,
             ..Environment::default()
         },
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
+        data_dir: None,
+        cache: nsh_engine::CacheOptions::off(),
+        storage: None,
+        clock: Default::default(),
+        context: Default::default(),
+        pinned: Default::default(),
+        clipboard: None,
+        host: Default::default(),
+        picker: None,
     };
     let _engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
     let batch = rx

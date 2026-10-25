@@ -32,7 +32,7 @@ impl Decoration {
                         + self
                             .style
                             .underline_offset
-                            .unwrap_or(metrics.underline_position),
+                            .map_or(metrics.underline_position, |o| o.0),
                     metrics.underline_thickness,
                 ),
                 (
@@ -91,7 +91,7 @@ impl Decoration {
                         + self
                             .style
                             .underline_offset
-                            .unwrap_or(metrics.underline_position);
+                            .map_or(metrics.underline_position, |o| o.0);
                     self.line(canvas, range, y, metrics.underline_thickness, scale);
                 }
                 if self.style.decoration.line_through {
@@ -171,11 +171,11 @@ impl Decoration {
         canvas.detach_pen();
     }
     fn thickness(&self, default: f32, scale: f32) -> Option<f32> {
-        if self.style.decoration_thickness.is_some_and(|v| v <= 0.0) {
+        if self.style.decoration_thickness.is_some_and(|v| v.0 <= 0.0) {
             return None;
         }
         Some(
-            (self.style.decoration_thickness.unwrap_or(default) * scale)
+            (self.style.decoration_thickness.map_or(default, |v| v.0) * scale)
                 .round()
                 .max(1.0)
                 / scale,

@@ -439,8 +439,8 @@ Counter 覆盖状态、点击分发、文字变色和历史行增删。修改模
 ## 相关文档
 
 - [平台概览](./platforms.md)
-- [嵌入 iOS 应用](./embedding-ios.md)
-- [嵌入 Android 应用](./embedding-android.md)
+- [嵌入 iOS 应用](./ios.md)
+- [嵌入 Android 应用](./android.md)
 - [后端架构、实现状态与验证](../../../docs/dev/ohos.md)
 
 ## 原生 WebView 和视频

@@ -14,12 +14,15 @@ use std::{
     },
 };
 
-use nsh_core::{Command, Size, VideoProps};
+use nsh_core::{Command, VideoProps};
 use ohos_arkui_binding::component::attribute::ArkUICommonAttribute;
 use ohos_native_window_binding::NativeWindow;
 pub(crate) use ui::{UiState, retired, update};
 
-use crate::render::node::{NativeNode, Node, Result};
+use crate::render::{
+    geometry::Size,
+    node::{NativeNode, Node, Result},
+};
 
 enum Operation {
     Configure(Box<VideoProps>, u64),

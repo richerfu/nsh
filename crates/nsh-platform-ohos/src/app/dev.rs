@@ -55,7 +55,8 @@ impl Session {
                     device: "OHOS Native Shell".into(),
                     platform: HostPlatform::Ohos,
                     bytecode_version: nsh_engine::BYTECODE_VERSION.into(),
-                    ui_sets: vec!["nsh/ui/mobile".into()],
+                    ui_sets: vec!["nsh/base".into()],
+                    tests: false,
                 },
                 move |event| {
                     if let Some(queue) = callback_queue.upgrade() {
@@ -83,6 +84,7 @@ impl Session {
         bytes: Vec<u8>,
         map: Option<String>,
         capabilities: Option<String>,
+        app_id: Option<String>,
     ) -> Result<Bundle> {
         let mut bundle = match format {
             // SAFETY: DevClient negotiated this engine's bytecode version with
@@ -90,7 +92,8 @@ impl Session {
             BundleFormat::Bytecode => unsafe { Bundle::bytecode(bytes) },
             BundleFormat::Source => Bundle::source(String::from_utf8(bytes).map_err(error)?),
         }
-        .with_policy(Policy::development());
+        .with_policy(Policy::development())
+        .with_app_id(app_id.as_deref());
         bundle.source_map = map.map(Into::into);
         bundle
             .with_capabilities_json(capabilities.as_deref())
@@ -326,10 +329,10 @@ impl Overlay {
             }
         }
     }
-    pub(crate) fn resize(&self, size: nsh_core::Size) -> Result<()> {
+    pub(crate) fn resize(&self, size: crate::render::geometry::Size) -> Result<()> {
         self.layout(size).map_err(error)
     }
-    fn layout(&self, size: nsh_core::Size) -> crate::render::node::Result<()> {
+    fn layout(&self, size: crate::render::geometry::Size) -> crate::render::node::Result<()> {
         use ohos_arkui_binding::component::attribute::ArkUICommonAttribute;
         let width = size.width.max(0.0);
         let height = size.height.max(0.0);

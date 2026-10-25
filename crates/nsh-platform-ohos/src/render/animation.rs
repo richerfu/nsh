@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use nsh_animation::{AnimationOp, AnimationProp, AnimationValue, Finished, Graph};
+use nsh_core::animation::{AnimationOp, AnimationProp, AnimationValue, Finished, Graph};
 use nsh_engine::EngineControl;
 
 use crate::render::node::{Node, Result};

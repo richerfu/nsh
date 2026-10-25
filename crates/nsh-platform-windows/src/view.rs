@@ -10,7 +10,7 @@
 //! A view draws itself in [`crate::render`]: shadows and background
 //! ([`crate::decor`]), its content (text, image, canvas), its children
 //! (clipped to the rounded bounds when `overflow: hidden`), the items it
-//! hosts ([`ViewState::natives`]: text editors, headers, ...), then its
+//! hosts ([`ViewState::natives`]: text editors, web views, ...), then its
 //! border, as UIKit draws layer borders over the content.
 //!
 //! Changing what a view draws calls [`NshView::changed`], which walks up to
@@ -18,82 +18,19 @@
 //! drawn in one pass, so damage is the window.
 
 use std::{
-    cell::{Ref, RefCell, RefMut},
+    cell::{Cell, Ref, RefCell, RefMut},
     rc::{Rc, Weak},
 };
 
+// The scroll position, extent and motion of a `ViewKind::Scroll` view.
+pub(crate) use nsh_core::scroll::ScrollState;
 use nsh_core::{
-    EventMask, MAX_TRANSFORMS, NodeId, Rect, TransformKind, ViewKind, ViewProps, ViewStyle,
+    Bounds, EventMask, NodeId, Points, TransformKind, ViewKind, ViewProps, ViewStyle,
+    animation::AnimValues,
+    geometry::{AbsoluteLength, DefiniteLength, REM_SIZE},
 };
 
 use crate::{geom::Mat4, render::DrawCx};
-
-/// Values native animations set on a view; they win over the style's.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-pub(crate) struct AnimValues {
-    /// Animated opacity.
-    pub(crate) opacity: Option<f32>,
-    /// Animated background color.
-    pub(crate) background: Option<nsh_core::Color>,
-    /// Animated entries of the transform list (by position).
-    pub(crate) transform: [Option<f32>; MAX_TRANSFORMS],
-    /// Animated border color (every side).
-    pub(crate) border_color: Option<nsh_core::Color>,
-    /// Animated text color (a text view's runs, an input's text).
-    pub(crate) color: Option<nsh_core::Color>,
-    /// Animated shadow color.
-    pub(crate) shadow_color: Option<nsh_core::Color>,
-    /// Animated shadow opacity.
-    pub(crate) shadow_opacity: Option<f32>,
-    /// Animated shadow blur radius.
-    pub(crate) shadow_radius: Option<f32>,
-}
-
-/// Scroll position and extent of a [`ViewKind::Scroll`] view.
-#[derive(Default)]
-pub(crate) struct ScrollState {
-    /// Current offset (points; content coordinates of the viewport's top
-    /// left).
-    pub(crate) x: f32,
-    /// Vertical offset.
-    pub(crate) y: f32,
-    /// Size of the scrollable content.
-    pub(crate) content: (f32, f32),
-    /// Scrolls horizontally.
-    pub(crate) horizontal: bool,
-    /// Shows the scroll indicator.
-    pub(crate) indicator: bool,
-    /// How it scrolls (paging, snapping, insets...).
-    pub(crate) behavior: nsh_core::ScrollBehavior,
-    /// Scrolls the core asked for (`ScrollBy`, `scrollTo`) that were
-    /// applied: reported with each offset.
-    pub(crate) applied: u32,
-    /// The sticky cells: (cell, start, end).
-    pub(crate) sticky: Vec<nsh_core::StickyCell>,
-    /// A horizontal list laid out right to left: children are placed
-    /// mirrored (offsets stay left to right).
-    pub(crate) mirrored: bool,
-    /// Gestures, glides and the indicator ([`crate::scroll`]).
-    pub(crate) live: crate::scroll::Live,
-}
-
-impl ScrollState {
-    /// The largest offsets.
-    pub(crate) fn max(&self, viewport: (f32, f32)) -> (f32, f32) {
-        let inset = self.behavior.content_inset;
-        (
-            (self.content.0 + inset.left + inset.right - viewport.0).max(0.0),
-            (self.content.1 + inset.top + inset.bottom - viewport.1).max(0.0),
-        )
-    }
-
-    /// The offset children are drawn at: the scroll offset less the
-    /// content inset.
-    pub(crate) fn origin(&self) -> (f32, f32) {
-        let inset = self.behavior.content_inset;
-        (self.x - inset.left, self.y - inset.top)
-    }
-}
 
 /// A pointer event a hosted item gets, in its own coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -195,7 +132,7 @@ pub(crate) struct Native {
     /// The item.
     pub(crate) item: Rc<dyn Hosted>,
     /// Where it goes.
-    pub(crate) rect: Rect,
+    pub(crate) rect: Bounds<Points>,
 }
 
 /// Everything the mounter set on one view.
@@ -205,7 +142,7 @@ pub(crate) struct ViewState {
     /// What it is.
     pub(crate) kind: ViewKind,
     /// Frame in the parent (points).
-    pub(crate) frame: Rect,
+    pub(crate) frame: Bounds<Points>,
     /// Visual style.
     pub(crate) style: Box<ViewStyle>,
     /// Native animation values.
@@ -238,7 +175,7 @@ pub(crate) struct ViewState {
     pub(crate) natives: Vec<Native>,
     /// The area descendants cover outside the bounds (`MountItem::Overflow`):
     /// hit testing looks there too.
-    pub(crate) overflow: Option<Rect>,
+    pub(crate) overflow: Option<Bounds<Points>>,
     /// Running layout / style transitions and keyframes.
     pub(crate) live: Option<Box<crate::transition::Live>>,
     /// What accessibility last exposed.
@@ -250,7 +187,7 @@ impl ViewState {
         ViewState {
             id,
             kind,
-            frame: Rect::default(),
+            frame: Bounds::default(),
             style: Box::default(),
             anim: AnimValues::default(),
             events: EventMask::default(),
@@ -274,7 +211,7 @@ impl ViewState {
 
     /// The opacity it is drawn with.
     pub(crate) fn opacity(&self) -> f32 {
-        let live = self.live.as_ref().map_or(1.0, |l| l.opacity);
+        let live = self.live.as_ref().map_or(1.0, |l| l.opacity());
         self.anim.opacity.unwrap_or(self.style.opacity) * self.fade * live
     }
 
@@ -306,9 +243,9 @@ impl ViewState {
     /// clamped as CSS clamps them to the box.
     pub(crate) fn radii(&self) -> [f32; 4] {
         let s = &self.style;
-        let mut r: [f32; 4] =
-            std::array::from_fn(|i| s.corner_radius[i].unwrap_or(s.border_radius));
-        let (w, h) = (self.frame.width, self.frame.height);
+        let corners = s.corner_radius.to_array();
+        let mut r: [f32; 4] = std::array::from_fn(|i| corners[i].unwrap_or(s.border_radius).0);
+        let (w, h) = (self.frame.size.width.0, self.frame.size.height.0);
         let sums = [r[0] + r[1], r[1] + r[2], r[2] + r[3], r[3] + r[0]];
         let lens = [w, h, w, h];
         let f = sums
@@ -341,10 +278,14 @@ impl ViewState {
         if extra.is_none() && (t.ops().is_empty() || (!animated && t.is_identity())) {
             return None;
         }
-        let (w, h) = (self.frame.width, self.frame.height);
+        let (w, h) = (self.frame.size.width.0, self.frame.size.height.0);
         let o = self.style.transform_origin;
-        let (ox, oy) = (o.x.resolve(w), o.y.resolve(h));
-        let mut m = Mat4::new().translate_3d(ox, oy, o.z);
+        let at = |l: DefiniteLength, side: f32| {
+            l.to_points(AbsoluteLength::Points(Points(side)), REM_SIZE)
+                .0
+        };
+        let (ox, oy, oz) = (at(o.x, w), at(o.y, h), o.z.0);
+        let mut m = Mat4::new().translate_3d(ox, oy, oz);
         for (i, op) in t.ops().iter().enumerate() {
             let v = self.anim.transform[i].unwrap_or(op.value);
             m = match op.kind {
@@ -364,26 +305,33 @@ impl ViewState {
             };
         }
         if let Some(extra) = extra {
-            m = extra.apply(m, h);
+            m = crate::transition::apply_extra(extra, m, h);
         }
-        Some(m.translate_3d(-ox, -oy, -o.z))
+        Some(m.translate_3d(-ox, -oy, -oz))
     }
 
     /// Where a child at `frame` (with its `shift`) goes in this view's
     /// coordinates: its frame's origin, less the scroll offset, mirrored in
     /// a right-to-left list.
-    pub(crate) fn child_origin(&self, frame: Rect, shift: (f32, f32)) -> (f32, f32) {
-        let (sx, sy) = self.scroll.as_ref().map_or((0.0, 0.0), ScrollState::origin);
-        let mut x = frame.x - sx + shift.0;
+    pub(crate) fn child_origin(&self, frame: Bounds<Points>, shift: (f32, f32)) -> (f32, f32) {
+        let (sx, sy) = self.scroll.as_ref().map_or((0.0, 0.0), |s| {
+            let o = s.origin();
+            (o.x.0, o.y.0)
+        });
+        let mut x = frame.origin.x.0 - sx + shift.0;
         if self.scroll.as_ref().is_some_and(|s| s.mirrored) {
-            x = self.frame.width - x - frame.width;
+            x = self.frame.size.width.0 - x - frame.size.width.0;
         }
-        (x, frame.y - sy + shift.1)
+        (x, frame.origin.y.0 - sy + shift.1)
     }
 }
 
-/// Called when a view of the tree changed: the root's surface draws again.
-pub(crate) type Invalidate = Rc<dyn Fn()>;
+/// Called with the view of the tree that changed: the root's surface draws
+/// it again ([`crate::surface::Surface::invalidate_view`]).
+pub(crate) type Invalidate = Rc<dyn Fn(&NshView)>;
+
+/// A rectangle in the window's DIPs (points).
+pub(crate) type WindowRect = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 
 struct Node {
     state: RefCell<ViewState>,
@@ -391,6 +339,21 @@ struct Node {
     children: RefCell<Vec<NshView>>,
     /// Set on a surface's root only.
     invalidate: RefCell<Option<Invalidate>>,
+    /// It is on its surface's list of changed views.
+    queued: Cell<bool>,
+    /// Where the window's last frame painted it (not its children), clipped
+    /// to what was visible: the area to draw again when it changes.
+    painted: Cell<Option<WindowRect>>,
+}
+
+/// The smallest rectangle holding `a` and `b`.
+pub(crate) fn union(a: &WindowRect, b: &WindowRect) -> WindowRect {
+    WindowRect {
+        left: a.left.min(b.left),
+        top: a.top.min(b.top),
+        right: a.right.max(b.right),
+        bottom: a.bottom.max(b.bottom),
+    }
 }
 
 /// The view of one node (a cheap, reference-counted handle).
@@ -422,6 +385,8 @@ impl NshView {
             parent: RefCell::new(Weak::new()),
             children: RefCell::new(Vec::new()),
             invalidate: RefCell::new(None),
+            queued: Cell::new(false),
+            painted: Cell::new(None),
         }))
     }
 
@@ -457,9 +422,12 @@ impl NshView {
         *self.0.invalidate.borrow_mut() = Some(invalidate);
     }
 
-    /// Something it draws changed: its surface draws again (if it is in
-    /// one).
+    /// Something it or its subtree draws changed: its surface draws that
+    /// again (if it is in one).
     pub(crate) fn changed(&self) {
+        if self.0.queued.get() {
+            return;
+        }
         let mut node = self.0.clone();
         loop {
             let parent = node.parent.borrow().upgrade();
@@ -470,8 +438,34 @@ impl NshView {
         }
         let invalidate = node.invalidate.borrow().clone();
         if let Some(f) = invalidate {
-            f();
+            f(self);
         }
+    }
+
+    /// Whether it is on its surface's list of changed views; set by the
+    /// surface, which clears it when it draws.
+    pub(crate) fn set_queued(&self, queued: bool) {
+        self.0.queued.set(queued);
+    }
+
+    /// Records where the window's frame painted it.
+    pub(crate) fn set_painted(&self, rect: Option<WindowRect>) {
+        self.0.painted.set(rect);
+    }
+
+    /// Where the window's last frames painted it and its subtree, as one
+    /// rectangle (`None`: nowhere).
+    pub(crate) fn painted_subtree(&self) -> Option<WindowRect> {
+        let mut area = self.0.painted.get();
+        for child in self.0.children.borrow().iter() {
+            if let Some(b) = child.painted_subtree() {
+                area = Some(match area {
+                    Some(a) => union(&a, &b),
+                    None => b,
+                });
+            }
+        }
+        area
     }
 
     /// Its frame, transform or shift changed.
@@ -519,20 +513,25 @@ impl NshView {
             .unwrap_or(children.len());
         children.insert(at, self.clone());
         drop(children);
-        parent.changed();
+        // Where it draws now (its parent draws nothing new of its own).
+        self.changed();
     }
 
     /// Takes this view out of its parent.
     pub(crate) fn unparent(&self) {
+        // Where it was drawn is drawn again: queued while it can still
+        // reach its surface.
+        if self.parent_view().is_some() {
+            self.changed();
+        }
         let parent = self.0.parent.replace(Weak::new()).upgrade();
         if let Some(parent) = parent {
             parent.children.borrow_mut().retain(|c| c != self);
-            NshView(parent).changed();
         }
     }
 
     /// Hosts `item` at `rect` (or moves it there).
-    pub(crate) fn set_native(&self, item: &Rc<dyn Hosted>, rect: Rect) {
+    pub(crate) fn set_native(&self, item: &Rc<dyn Hosted>, rect: Bounds<Points>) {
         {
             let mut s = self.state_mut();
             match s.natives.iter_mut().find(|n| Rc::ptr_eq(&n.item, item)) {

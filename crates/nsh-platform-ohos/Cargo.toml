@@ -21,14 +21,13 @@ api-23 = ["ohos-arkui-binding/accessibility", "ohos-arkui-binding/api-23", "dep:
 api-26 = ["api-23", "ohos-arkui-binding/api-26"]
 
 [target.'cfg(target_env = "ohos")'.dependencies]
-nsh-core.workspace = true
+nsh-core = { workspace = true, features = ["svg"] }
 getrandom = { workspace = true, features = ["std"] }
 nsh-package.workspace = true
 nsh-dev = { workspace = true, features = ["client"], optional = true }
 url = { workspace = true, optional = true }
-nsh-animation.workspace = true
 nsh-engine = { workspace = true, features = ["js"] }
-nsh-ui-mobile.workspace = true
+nsh-base = { workspace = true, features = ["highlight"] }
 napi-ohos.workspace = true
 napi-derive-ohos.workspace = true
 ohos-arkui-binding = { workspace = true, features = ["image"] }

@@ -21,8 +21,8 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
-use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, ROOT_ID, Size};
-use nsh_engine::{Engine, EngineConfig, EngineControl, Environment, MountSink};
+use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, Points, ROOT_ID, Size};
+use nsh_engine::{AppError, Engine, EngineConfig, EngineControl, Environment, MountSink};
 use rustc_hash::FxHashMap;
 
 use crate::{
@@ -35,7 +35,7 @@ use crate::{
 /// What the engine thread sends the main thread.
 enum Message {
     Batch(MountBatch),
-    Error(String),
+    Error(AppError),
     Frame,
     HotUpdateFailed,
 }
@@ -75,8 +75,8 @@ impl MountSink for Sink {
         self.send(Message::Batch(batch));
     }
 
-    fn report_error(&self, message: &str) {
-        self.send(Message::Error(message.to_owned()));
+    fn report(&self, error: &AppError) {
+        self.send(Message::Error(error.clone()));
     }
 
     fn request_frame(&self) {
@@ -98,8 +98,8 @@ pub(crate) type ResizeHandler = Box<dyn Fn(f32, f32)>;
 /// A window shortcut: true if it took the key (down).
 pub(crate) type ShortcutHandler = Box<dyn Fn(&crate::input::KeyEvent) -> bool>;
 
-/// Called when the app reports a fatal error (development hosts show it).
-pub(crate) type ErrorHandler = Box<dyn Fn(&str)>;
+/// Called when the app reports an error (development hosts show it).
+pub(crate) type ErrorHandler = Box<dyn Fn(&AppError)>;
 
 /// A handler as kept: shared, so it is called with nothing borrowed (it may
 /// restart the app or set another handler).
@@ -143,6 +143,10 @@ pub(crate) struct Surface {
     pub(crate) input_pressed: Cell<u8>,
     /// The mouse is over the surface.
     pub(crate) input_hovered: Cell<bool>,
+    /// A field took the surface's focus. The view takes the window's at the
+    /// next paint, or the keys for the field go to whatever element of the
+    /// embedding app had it ([`crate::events::install`]).
+    pub(crate) window_focus_requested: Cell<bool>,
     /// The environment the engine was last told about.
     pub(crate) environment: Cell<Environment>,
     /// The app's appearance (`nsh.json`, `setColorScheme`): the color
@@ -153,16 +157,24 @@ pub(crate) struct Surface {
     /// Extra frame clients (transitions, glides, spinners): called on every
     /// frame until they return false ([`Surface::on_frame`]).
     frame_clients: RefCell<Vec<FrameClient>>,
+    /// The model of a test session's app (`nsh test --target gpui`).
+    #[cfg(feature = "dev")]
+    test_model: RefCell<Option<std::sync::Arc<nsh_testing::agent::Model>>>,
     /// Frame statistics, while they are logged ([`crate::stats`]).
     pub(crate) stats: RefCell<Option<crate::stats::FrameStats>>,
     epoch: std::time::Instant,
-    on_error: Handler<dyn Fn(&str)>,
+    on_error: Handler<dyn Fn(&AppError)>,
+    /// A dev session's error overlay: hears the errors besides `on_error`.
+    #[cfg(feature = "dev")]
+    on_dev_error: Handler<dyn Fn(&AppError)>,
     on_hot_update_failed: Handler<dyn Fn()>,
     /// Counts the apps stopped ([`Surface::stop`]): what an engine sent
     /// before is not applied to the next one.
     generation: Cell<u64>,
     /// Where `asset:/` image URIs resolve ([`crate::image::set_asset_base`]).
     pub(crate) asset_base: RefCell<Option<crate::image::AssetBase>>,
+    /// The disk cache of downloaded images ([`crate::image::set_disk_cache`]).
+    pub(crate) image_cache: RefCell<Option<nsh_core::image::DiskCache>>,
     /// What the running app may reach (checked for image redirects).
     pub(crate) access: RefCell<Arc<nsh_core::access::Access>>,
     /// Videos, web views and registered native components.
@@ -178,14 +190,17 @@ pub(crate) struct Surface {
     /// Keys the window takes before anything focused sees them (the
     /// standalone app's full screen, the dev host's reload).
     pub(crate) shortcuts: RefCell<Vec<ShortcutHandler>>,
-    /// How many batches were applied (scripts wait for the app to settle).
+    /// How many batches were applied.
     pub(crate) batches: Cell<u64>,
     /// The embedding app's theme ([`crate::AppView::set_theme`]): sent to
     /// every engine the surface starts, before its first frame.
-    pub(crate) host_theme: RefCell<Option<nsh_engine::Theme>>,
+    pub(crate) host_theme: RefCell<Option<nsh_base::Theme>>,
     /// The embedding app's appearance (dark or not), standing in for the
     /// window's ([`crate::AppView::set_appearance`]).
     pub(crate) host_dark: Cell<Option<bool>>,
+    /// The embedding app's locale and text size, standing in for the
+    /// system's ([`crate::AppView::set_locale`], `set_font_scale`).
+    pub(crate) host_environment: Cell<nsh_core::platform::HostEnvironment>,
 }
 
 impl Surface {
@@ -213,16 +228,22 @@ impl Surface {
             invalid: Cell::new(false),
             input_pressed: Cell::new(0),
             input_hovered: Cell::new(false),
+            window_focus_requested: Cell::new(false),
             environment: Cell::new(environment),
             appearance: Cell::default(),
             js_frame: Cell::new(false),
             frame_clients: RefCell::default(),
+            #[cfg(feature = "dev")]
+            test_model: RefCell::default(),
             stats: RefCell::new(None),
             epoch: std::time::Instant::now(),
             on_error: RefCell::new(None),
+            #[cfg(feature = "dev")]
+            on_dev_error: RefCell::new(None),
             on_hot_update_failed: RefCell::new(None),
             generation: Cell::new(0),
             asset_base: RefCell::new(None),
+            image_cache: RefCell::new(None),
             access: RefCell::new(Arc::default()),
             native: Default::default(),
             keymap: Default::default(),
@@ -233,6 +254,7 @@ impl Surface {
             chrome: Default::default(),
             host_theme: RefCell::new(None),
             host_dark: Cell::new(None),
+            host_environment: Cell::default(),
         });
         SURFACES.with(|s| s.borrow_mut().insert(key, Rc::downgrade(&surface)));
         let weak = Rc::downgrade(&surface);
@@ -257,7 +279,7 @@ impl Surface {
     /// The surface's size in points.
     pub(crate) fn size(&self) -> (f32, f32) {
         let s = self.root.state();
-        (s.frame.width, s.frame.height)
+        (s.frame.size.width.0, s.frame.size.height.0)
     }
 
     /// Seconds since the surface was made (the animation clock).
@@ -273,8 +295,13 @@ impl Surface {
             nsh_engine::App::Rust(_) => nsh_engine::Policy::default().access(),
         });
         let env = self.environment.get();
-        config.viewport = Size::new(env.window.0, env.window.1);
+        config.viewport = Size::new(env.window.width, env.window.height);
         config.environment = env;
+        // A test session's app: the test's storage, network and trace.
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.borrow() {
+            model.set_up_engine(&mut config);
+        }
         let (tx, rx) = crossbeam_channel::unbounded();
         let pending = Arc::new(AtomicBool::new(false));
         let sink = Sink {
@@ -295,12 +322,19 @@ impl Surface {
             move || GpuiTextEngine::new(text_system, family),
             sink,
             |control| {
-                if theme.is_some() {
-                    control.set_theme(theme);
+                if let Some(theme) = theme {
+                    control.set_tokens(Some(theme.into_tokens()));
                 }
             },
         ) {
             Ok(engine) => {
+                // The app's downloaded images go through its disk cache.
+                crate::image::set_disk_cache(self, engine.image_cache());
+                // The test moves its clock through the engine.
+                #[cfg(feature = "dev")]
+                if let Some(model) = &*self.test_model.borrow() {
+                    model.engine_started(engine.control());
+                }
                 *self.control.borrow_mut() = Some(engine.control());
                 *self.engine.borrow_mut() = Some(engine);
             }
@@ -350,14 +384,23 @@ impl Surface {
         *self.on_error.borrow_mut() = Some(Rc::from(f));
     }
 
+    /// Shows fatal app errors with `f` too, besides the handler of
+    /// [`Surface::set_error_handler`] (a dev session's overlay).
+    #[cfg(feature = "dev")]
+    pub(crate) fn set_dev_error_handler(&self, f: ErrorHandler) {
+        *self.on_dev_error.borrow_mut() = Some(Rc::from(f));
+    }
+
     /// Runs `f` when a hot update could not be applied in place.
     #[cfg(feature = "dev")]
     pub(crate) fn set_hot_update_failed(&self, f: impl Fn() + 'static) {
         *self.on_hot_update_failed.borrow_mut() = Some(Rc::new(f));
     }
 
-    /// Updates the environment and tells the engine.
-    pub(crate) fn set_environment(&self, environment: Environment) {
+    /// Updates the environment and tells the engine, with the embedding
+    /// app's settings over the system's.
+    pub(crate) fn set_environment(&self, mut environment: Environment) {
+        self.host_environment.get().apply(&mut environment);
         if self.environment.replace(environment) != environment {
             self.control(|c| c.set_environment(environment));
             crate::system::environment_applied(self);
@@ -370,18 +413,18 @@ impl Surface {
         let scale_changed = (self.scale.replace(scale) - scale).abs() > f32::EPSILON;
         {
             let mut s = self.root.state_mut();
-            if !scale_changed && s.frame.width == width && s.frame.height == height {
+            if !scale_changed && s.frame.size.width.0 == width && s.frame.size.height.0 == height {
                 return;
             }
-            s.frame.width = width;
-            s.frame.height = height;
+            s.frame.size.width.0 = width;
+            s.frame.size.height.0 = height;
         }
         let mut env = self.environment.get();
-        env.window = (width, height);
+        env.window = nsh_core::Size::new(nsh_core::Points(width), nsh_core::Points(height));
         env.pixel_ratio = scale;
         self.environment.set(env);
         self.control(|c| {
-            c.resize(Size::new(width, height));
+            c.resize(Size::new(Points(width), Points(height)));
             c.set_environment(env);
         });
         crate::navigation::surface_resized(self, width, height);
@@ -451,12 +494,22 @@ impl Surface {
                     applied = true;
                     self.batches.set(self.batches.get() + 1);
                 }
-                Message::Error(message) => {
-                    log::error!("{message}");
-                    crate::script::app_error();
+                Message::Error(error) => {
+                    log::error!("{error}");
+                    #[cfg(feature = "dev")]
+                    if let Some(model) = &*self.test_model.borrow() {
+                        model.error(error.to_string());
+                    }
+                    #[cfg(feature = "dev")]
+                    {
+                        let handler = self.on_dev_error.borrow().clone();
+                        if let Some(f) = handler {
+                            f(&error);
+                        }
+                    }
                     let handler = self.on_error.borrow().clone();
                     if let Some(f) = handler {
-                        f(&message);
+                        f(&error);
                     }
                 }
                 Message::Frame => self.js_frame.set(true),
@@ -488,7 +541,12 @@ impl Surface {
             }
         }
         self.mounter.borrow_mut().end_batch(self);
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.borrow() {
+            model.apply(batch);
+        }
         crate::access::batch_applied(self);
+        crate::selection_area::batch_applied(self);
     }
 
     /// Writes the animated values to the views and reports finished
@@ -499,6 +557,7 @@ impl Surface {
             anim.write(&self.mounter.borrow());
             std::mem::take(&mut anim.finished)
         };
+        crate::scroll::pin_animated_sticky(self);
         if !finished.is_empty() {
             self.control(|c| c.animations_finished(finished));
         }
@@ -509,6 +568,21 @@ impl Surface {
     pub(crate) fn on_frame(self: &Rc<Self>, f: impl FnMut(&Rc<Surface>, f64) -> bool + 'static) {
         self.frame_clients.borrow_mut().push(Box::new(f));
         self.ensure_ticking();
+    }
+
+    /// Whether a native animation runs: the graph's, or the platform's own
+    /// (scroll glides).
+    #[cfg(feature = "dev")]
+    pub(crate) fn animating(&self) -> bool {
+        self.anim.borrow().animating() || !self.frame_clients.borrow().is_empty()
+    }
+
+    /// Keeps the model `nsh test --target` steps see of the app
+    /// ([`nsh_testing::agent::Model`]): every batch applied and every error
+    /// go to it from now on.
+    #[cfg(feature = "dev")]
+    pub(crate) fn set_test_model(&self, model: Option<std::sync::Arc<nsh_testing::agent::Model>>) {
+        *self.test_model.borrow_mut() = model;
     }
 
     /// Something animates or JS wants a frame: the view keeps drawing
@@ -577,6 +651,10 @@ pub(crate) fn flush_all(cx: &mut gpui::App) {
 mod tests {
     use super::*;
 
+    fn error(text: &str) -> AppError {
+        AppError::new(nsh_engine::AppErrorKind::Uncaught, text)
+    }
+
     /// A surface draining `messages` as if an engine had sent them.
     fn sent(surface: &Surface, messages: Vec<Message>) {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -584,6 +662,35 @@ mod tests {
             tx.send(m).unwrap();
         }
         *surface.rx.borrow_mut() = Some(rx);
+    }
+
+    #[test]
+    fn the_hosts_locale_and_text_size_stand_in_for_the_systems() {
+        let surface = Surface::new(nsh_engine::Environment::default());
+        let zh = nsh_engine::Locale::parse("zh-Hans-CN");
+        surface
+            .host_environment
+            .set(nsh_core::platform::HostEnvironment {
+                locale: zh,
+                font_scale: Some(1.5),
+            });
+        // What the system reports goes under the host's settings.
+        surface.set_environment(nsh_engine::Environment {
+            font_scale: 1.25,
+            ..Default::default()
+        });
+        let env = surface.environment.get();
+        assert_eq!((Some(env.locale), env.font_scale), (zh, 1.5));
+        surface.host_environment.set(Default::default());
+        surface.set_environment(nsh_engine::Environment {
+            font_scale: 1.25,
+            ..Default::default()
+        });
+        let env = surface.environment.get();
+        assert_eq!(
+            (env.locale, env.font_scale),
+            (nsh_engine::Locale::EN_US, 1.25)
+        );
     }
 
     #[test]
@@ -600,7 +707,7 @@ mod tests {
         sent(
             &surface,
             vec![
-                Message::Error("boom".into()),
+                Message::Error(error("boom")),
                 Message::Batch(MountBatch::default()),
             ],
         );
@@ -617,12 +724,51 @@ mod tests {
         sent(
             &surface,
             vec![
-                Message::Error("first".into()),
+                Message::Error(error("first")),
                 Message::Batch(MountBatch::default()),
-                Message::Error("second".into()),
+                Message::Error(error("second")),
             ],
         );
         surface.drain();
         assert_eq!((errors.get(), surface.batches.get()), (2, 1));
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_dev_session_hears_errors_besides_the_embedding_apps_handler() {
+        let surface = Surface::new(nsh_engine::Environment::default());
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let host = heard.clone();
+        surface.set_error_handler(Box::new(move |m| {
+            host.borrow_mut().push(format!("host {m}"))
+        }));
+        let dev = heard.clone();
+        surface.set_dev_error_handler(Box::new(move |m| dev.borrow_mut().push(format!("dev {m}"))));
+        sent(&surface, vec![Message::Error(error("boom"))]);
+        surface.drain();
+        assert_eq!(*heard.borrow(), ["dev boom", "host boom"]);
+    }
+
+    #[test]
+    fn the_error_handler_hears_what_went_wrong_and_the_package() {
+        let surface = Surface::new(nsh_engine::Environment::default());
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let seen = heard.clone();
+        surface.set_error_handler(Box::new(move |e| seen.borrow_mut().push(e.clone())));
+        let package = std::sync::Arc::new(nsh_engine::PackageInfo {
+            id: "com.example.app".into(),
+            name: "App".into(),
+            version: "1.0.0".into(),
+            build: 7,
+            sha256: "0".repeat(64),
+        });
+        let stopped = AppError::new(nsh_engine::AppErrorKind::Stopped, "out of memory")
+            .with_package(Some(package));
+        sent(&surface, vec![Message::Error(stopped.clone())]);
+        surface.drain();
+        let heard = heard.borrow();
+        assert_eq!(*heard, [stopped]);
+        assert!(heard[0].is_fatal());
+        assert_eq!(heard[0].package.as_ref().map(|p| p.build), Some(7));
     }
 }

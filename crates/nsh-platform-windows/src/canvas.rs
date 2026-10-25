@@ -1,9 +1,16 @@
 //! Canvas views: a recorded [`Drawing`] replayed with Direct2D.
 //!
 //! The replay is recorded into an `ID2D1CommandList` when the drawing,
-//! one of its native values or an image it draws changes (and when the
+//! one of its animated values or an image it draws changes (and when the
 //! device is replaced); [`draw`] only plays the list back with the view's
-//! transform. Command lists are vector: redrawing the window is cheap and
+//! transform. A drawing whose animated values are read late is recorded
+//! as two lists: the operations before the first one reading a slot
+//! ([`nsh_core::canvas::first_animated`]), recorded once, and the rest,
+//! recorded again when a slot changes; the tail replays the head's state
+//! (transforms, styles, the path, clips) without painting it. A tail that
+//! would combine with what the head drew (a composite operation other than
+//! `source-over` in effect or set in it, a `clearRect`) is recorded whole
+//! with its head. Command lists are vector: redrawing the window is cheap and
 //! stays sharp at any scale, and effects (shadows, composite operations)
 //! are rendered at the resolution they are played back at.
 //!
@@ -33,20 +40,21 @@
 //! Text is laid out with DirectWrite (layouts cached per canvas) in the
 //! fonts the text engine measures with, so drawn widths match
 //! `measureText`; `strokeText` and conic-filled text use the glyphs'
-//! outlines. Images are loaded through [`crate::image::load`] when a
-//! drawing names them and kept per canvas (their frames make bitmaps per
+//! outlines. Images are loaded through [`crate::image::load_bitmap`] when
+//! a drawing names them and kept per canvas (their frames make bitmaps per
 //! device).
 
 use std::{cell::RefCell, f64::consts::TAU, rc::Rc, sync::Arc};
 
-use nsh_animation::AnimationValue;
 use nsh_core::{
-    Color,
+    Color, Corners, Points,
+    animation::AnimationValue,
     canvas::{
         CanvasFont, CanvasGradient, CanvasOp, CanvasTextAlign, CanvasTextBaseline, Composite,
         Drawing, FillRule, GradientShape, LineCap, LineJoin, Num, Paint, PathOp, arc_sweep,
         fit_radii,
     },
+    geometry::{Percentage, Radians, size},
 };
 use rustc_hash::FxHashMap;
 use windows::{
@@ -121,7 +129,7 @@ const TOLERANCE: f32 = 0.05;
 pub(crate) struct CanvasState {
     /// The drawing.
     drawing: Option<Arc<Drawing>>,
-    /// Native value slots (`AnimationProp::CanvasArg`).
+    /// Animated value slots (`AnimationProp::CanvasArg`).
     args: Vec<Option<AnimationValue>>,
     /// The images the drawing names, by URI: `None` while loading (or
     /// when they failed to load).
@@ -133,8 +141,15 @@ pub(crate) struct CanvasState {
 /// A canvas' recording and the device resources it draws with.
 #[derive(Default)]
 struct Cache {
-    /// The replay, once recorded (`None` inside when recording failed).
+    /// The replay, once recorded (`None` inside when recording failed):
+    /// the whole drawing, or the operations from `split` on.
     list: Option<Option<ID2D1CommandList>>,
+    /// The operations before `split`, recorded once per drawing (`None`
+    /// while the drawing is recorded whole).
+    head: Option<Option<ID2D1CommandList>>,
+    /// Where the drawing splits into the head and the animated tail
+    /// (`0`: recorded whole).
+    split: usize,
     /// The device generation `list` belongs to.
     generation: u64,
     /// DirectWrite layouts of `fillText` / `strokeText`.
@@ -144,8 +159,48 @@ struct Cache {
 impl CanvasState {
     /// Records again on the next draw.
     fn stale(&mut self) {
+        let cache = self.cache.get_mut();
+        cache.list = None;
+        cache.head = None;
+    }
+
+    /// An animated value changed: records the tail again on the next draw.
+    fn stale_tail(&mut self) {
         self.cache.get_mut().list = None;
     }
+}
+
+/// Where `drawing` splits into a head recorded once and a tail recorded
+/// when a slot changes (`0`: recorded whole).
+fn split(drawing: &Drawing) -> usize {
+    let ops = &drawing.ops;
+    let first = nsh_core::canvas::first_animated(ops);
+    // Nothing animated, or nothing before it to keep.
+    if first == 0 || first >= ops.len() {
+        return 0;
+    }
+    // The tail must not combine with what was drawn before it, which its
+    // list does not hold: no composite operation in effect where it starts
+    // or set in it, no `clearRect` in it. The head's own composite
+    // operations combine within its list.
+    let mut composite = Composite::SourceOver;
+    let mut saved = Vec::new();
+    for op in &ops[..first] {
+        match op {
+            CanvasOp::Save => saved.push(composite),
+            CanvasOp::Restore => composite = saved.pop().unwrap_or(composite),
+            CanvasOp::Composite(m) => composite = *m,
+            _ => {}
+        }
+    }
+    let combines = |op: &CanvasOp| {
+        matches!(op, CanvasOp::Composite(m) if *m != Composite::SourceOver)
+            || matches!(op, CanvasOp::ClearRect(_))
+    };
+    if composite != Composite::SourceOver || ops[first..].iter().any(combines) {
+        return 0;
+    }
+    first
 }
 
 /// Sets up a canvas view.
@@ -178,9 +233,9 @@ pub(crate) fn set(surface: &Rc<Surface>, view: &NshView, drawing: Arc<Drawing>) 
     for uri in load {
         let weak = Rc::downgrade(surface);
         let key = uri.clone();
-        crate::image::load(surface, &uri, move |result| {
+        crate::image::load_bitmap(surface, &uri, move |result| {
             let frame = match result {
-                Ok((frame, _)) => frame,
+                Ok(frame) => frame,
                 Err(e) => {
                     log::warn!("canvas: {e}");
                     return;
@@ -206,7 +261,7 @@ pub(crate) fn set(surface: &Rc<Surface>, view: &NshView, drawing: Arc<Drawing>) 
     view.changed();
 }
 
-/// Native value slot `k` changed: draws again if the value did.
+/// Animated value slot `k` changed: draws again if the value did.
 pub(crate) fn set_arg(view: &NshView, k: u16, value: AnimationValue) {
     {
         let mut state = view.state_mut();
@@ -221,20 +276,28 @@ pub(crate) fn set_arg(view: &NshView, k: u16, value: AnimationValue) {
             return;
         }
         c.args[k] = Some(value);
-        c.stale();
+        c.stale_tail();
     }
     view.changed();
 }
 
 /// Draws a canvas: records it first if needed.
 pub(crate) fn draw(cx: &mut DrawCx<'_>, state: &ViewState) {
+    let started = crate::fps::measuring().then(std::time::Instant::now);
+    draw_canvas(cx, state);
+    if let Some(started) = started {
+        crate::fps::drew_canvas(started.elapsed());
+    }
+}
+
+fn draw_canvas(cx: &mut DrawCx<'_>, state: &ViewState) {
     let Some(canvas) = state.canvas.as_ref() else {
         return;
     };
     let Some(drawing) = canvas.drawing.as_ref() else {
         return;
     };
-    let (w, h) = (state.frame.width, state.frame.height);
+    let (w, h) = (state.frame.size.width.0, state.frame.size.height.0);
     if drawing.ops.is_empty() || w <= 0.0 || h <= 0.0 {
         return;
     }
@@ -243,11 +306,32 @@ pub(crate) fn draw(cx: &mut DrawCx<'_>, state: &ViewState) {
     if cache.generation != generation {
         cache.generation = generation;
         cache.list = None;
+        cache.head = None;
+    }
+    let cache = &mut *cache;
+    if cache.head.is_none() {
+        cache.split = split(drawing);
+        let head = (cache.split > 0).then(|| {
+            record(
+                cx.gfx,
+                &drawing.ops[..cache.split],
+                0,
+                &canvas.args,
+                &canvas.images,
+                &mut cache.text,
+            )
+            .map_err(|e| log::warn!("canvas: not recorded: {e}"))
+            .ok()
+        });
+        cache.head = Some(head.flatten());
+        // A new head goes with a new tail.
+        cache.list = None;
     }
     if cache.list.is_none() {
         let recorded = record(
             cx.gfx,
-            drawing,
+            &drawing.ops,
+            cache.split,
             &canvas.args,
             &canvas.images,
             &mut cache.text,
@@ -257,7 +341,7 @@ pub(crate) fn draw(cx: &mut DrawCx<'_>, state: &ViewState) {
             .ok();
         cache.list = Some(list);
     }
-    if let Some(Some(list)) = &cache.list {
+    for list in [&cache.head, &cache.list].into_iter().flatten().flatten() {
         // SAFETY: a COM call between BeginDraw and EndDraw; the list is
         // closed and made on this device.
         unsafe {
@@ -287,10 +371,12 @@ thread_local! {
     static POOL: RefCell<Pool> = RefCell::new(Pool::default());
 }
 
-/// Replays `drawing` into a new command list.
+/// Replays `ops` into a new command list; the ones before `from` only set
+/// the state (they are painted by another list).
 fn record(
     gfx: &Gfx,
-    drawing: &Drawing,
+    ops: &[CanvasOp],
+    from: usize,
     args: &[Option<AnimationValue>],
     images: &FxHashMap<Arc<str>, Option<Rc<Frame>>>,
     text: &mut TextCache,
@@ -320,7 +406,10 @@ fn record(
     };
     let mut result = replay.begin_main(None);
     if result.is_ok() {
-        for op in &drawing.ops {
+        for (i, op) in ops.iter().enumerate() {
+            if i < from && op.paints() {
+                continue;
+            }
             if let Err(e) = replay.op(op) {
                 result = Err(e);
                 break;
@@ -380,7 +469,7 @@ struct State {
     cap: LineCap,
     join: LineJoin,
     miter: f64,
-    dash: Arc<[f32]>,
+    dash: Arc<[Points]>,
     dash_offset: f64,
     alpha: f64,
     composite: Composite,
@@ -578,10 +667,10 @@ impl<'a> Replay<'a> {
             }
             CanvasOp::Composite(m) => self.state.composite = *m,
             CanvasOp::ShadowColor(color) => self.state.shadow.0 = *color,
-            CanvasOp::ShadowBlur(b) => self.state.shadow.1 = *b as f64,
-            CanvasOp::ShadowOffset(x, y) => {
-                self.state.shadow.2 = *x as f64;
-                self.state.shadow.3 = *y as f64;
+            CanvasOp::ShadowBlur(b) => self.state.shadow.1 = b.0 as f64,
+            CanvasOp::ShadowOffset(offset) => {
+                self.state.shadow.2 = offset.x.0 as f64;
+                self.state.shadow.3 = offset.y.0 as f64;
             }
             CanvasOp::Font(f) => {
                 // The shorthand keeps the numeric variant, as in browsers.
@@ -599,19 +688,27 @@ impl<'a> Replay<'a> {
                 max_width,
             } => {
                 let mode = Mode::Fill(FillRule::NonZero);
-                self.text_op(text, self.n(*x), self.n(*y), *max_width, mode)?
+                let max_width = max_width.map(|m| m.0);
+                self.text_op(text, self.n(*x), self.n(*y), max_width, mode)?
             }
             CanvasOp::StrokeText {
                 text,
                 x,
                 y,
                 max_width,
-            } => self.text_op(text, self.n(*x), self.n(*y), *max_width, Mode::Stroke)?,
+            } => {
+                let max_width = max_width.map(|m| m.0);
+                self.text_op(text, self.n(*x), self.n(*y), max_width, Mode::Stroke)?
+            }
             CanvasOp::DrawImage {
                 image,
                 source,
                 dest,
-            } => self.image(&image.uri, *source, dest)?,
+            } => {
+                let source =
+                    source.map(|s| [s.origin.x.0, s.origin.y.0, s.size.width.0, s.size.height.0]);
+                self.image(&image.uri, source, dest)?
+            }
         }
         Ok(())
     }
@@ -650,7 +747,8 @@ impl<'a> Replay<'a> {
                     return;
                 }
                 let start = n(*start);
-                let sweep = arc_sweep(start as f32, n(*end) as f32, *ccw) as f64;
+                let sweep =
+                    arc_sweep(Radians(start as f32), Radians(n(*end) as f32), *ccw).0 as f64;
                 let unit = m.then(&Affine::translate(n(*x), n(*y)).then(&Affine::scale(r, r)));
                 path.arc(&unit, start, sweep);
             }
@@ -669,7 +767,8 @@ impl<'a> Replay<'a> {
                     return;
                 }
                 let start = n(*start);
-                let sweep = arc_sweep(start as f32, n(*end) as f32, *ccw) as f64;
+                let sweep =
+                    arc_sweep(Radians(start as f32), Radians(n(*end) as f32), *ccw).0 as f64;
                 let unit = m.then(
                     &Affine::translate(x, y)
                         .then(&Affine::rotate(rotation))
@@ -687,8 +786,23 @@ impl<'a> Replay<'a> {
             }
             PathOp::RoundRect(rect, radii) => {
                 let [x, y, w, h] = rect.map(n);
-                let [tl, tr, br, bl] =
-                    fit_radii(w as f32, h as f32, radii.map(|r| n(r) as f32)).map(f64::from);
+                let [tl, tr, br, bl] = radii.map(|r| Points(n(r) as f32));
+                let fit = fit_radii(
+                    size(Points(w as f32), Points(h as f32)),
+                    Corners {
+                        top_left: tl,
+                        top_right: tr,
+                        bottom_right: br,
+                        bottom_left: bl,
+                    },
+                );
+                let [tl, tr, br, bl] = [
+                    fit.top_left,
+                    fit.top_right,
+                    fit.bottom_right,
+                    fit.bottom_left,
+                ]
+                .map(|r| f64::from(r.0));
                 path.move_to(m.map((x + tl, y)));
                 self.arc_to(path, x + w, y, x + w, y + h, tr);
                 self.arc_to(path, x + w, y + h, x, y + h, br);
@@ -1243,7 +1357,8 @@ impl<'a> Replay<'a> {
             return Ok(None);
         }
         let brush: ID2D1Brush = match g.shape {
-            GradientShape::Linear([x0, y0, x1, y1]) => {
+            GradientShape::Linear { start, end } => {
+                let (x0, y0, x1, y1) = (start.x.0, start.y.0, end.x.0, end.y.0);
                 // Canvas paints nothing along a gradient of no length.
                 if x0 == x1 && y0 == y1 {
                     return Ok(None);
@@ -1263,7 +1378,20 @@ impl<'a> Replay<'a> {
                     .cast()?
                 }
             }
-            GradientShape::Radial(circles) => {
+            GradientShape::Radial {
+                start,
+                start_radius,
+                end,
+                end_radius,
+            } => {
+                let circles = [
+                    start.x.0,
+                    start.y.0,
+                    start_radius.0,
+                    end.x.0,
+                    end.y.0,
+                    end_radius.0,
+                ];
                 let Some(r) = radial(circles) else {
                     return Ok(None);
                 };
@@ -1290,7 +1418,7 @@ impl<'a> Replay<'a> {
                     .cast()?
                 }
             }
-            GradientShape::Conic(_) => return Ok(Some(Brush::Conic(g.clone()))),
+            GradientShape::Conic { .. } => return Ok(Some(Brush::Conic(g.clone()))),
         };
         Ok(Some(Brush::Plain(brush)))
     }
@@ -1304,10 +1432,14 @@ impl<'a> Replay<'a> {
         g: &CanvasGradient,
         alpha: f32,
     ) -> windows::core::Result<()> {
-        let GradientShape::Conic([angle, x, y]) = g.shape else {
+        let GradientShape::Conic {
+            start_angle,
+            center,
+        } = g.shape
+        else {
             return Ok(());
         };
-        let (angle, x, y) = (angle as f64, x as f64, y as f64);
+        let (angle, x, y) = (start_angle.0 as f64, center.x.0 as f64, center.y.0 as f64);
         // SAFETY: COM calls on live objects inside the recording context's
         // draw; the layer is popped and the antialiasing restored.
         unsafe {
@@ -1465,7 +1597,7 @@ impl<'a> Replay<'a> {
         let place = Affine::translate(x, y + down)
             .then(&Affine::scale(squeeze, 1.0))
             .then(&Affine::translate(dx, -ascent));
-        let conic = matches!(self.paint(mode), Paint::Gradient(g) if matches!(g.shape, GradientShape::Conic(_)));
+        let conic = matches!(self.paint(mode), Paint::Gradient(g) if matches!(g.shape, GradientShape::Conic { .. }));
         if matches!(mode, Mode::Fill(_)) && !conic {
             // Glyphs drawn as glyphs keep DirectWrite's rendering.
             let Some(to_layout) = place.invert() else {
@@ -1592,12 +1724,16 @@ unsafe fn stop_collection(
 /// Canvas gradient stops as Direct2D's: reversed (offset 1 - t) when
 /// `reversed`, then moved into `inner..1`; stops at one offset are kept
 /// apart by a hair so hard stops stay hard (in order).
-fn gradient_stops(stops: &[(f32, Color)], reversed: bool, inner: f64) -> Vec<D2D1_GRADIENT_STOP> {
+fn gradient_stops(
+    stops: &[(Percentage, Color)],
+    reversed: bool,
+    inner: f64,
+) -> Vec<D2D1_GRADIENT_STOP> {
     let inner = inner as f32;
     let mut out: Vec<(f32, Color)> = if reversed {
-        stops.iter().rev().map(|&(o, c)| (1.0 - o, c)).collect()
+        stops.iter().rev().map(|&(o, c)| (1.0 - o.0, c)).collect()
     } else {
-        stops.to_vec()
+        stops.iter().map(|&(o, c)| (o.0, c)).collect()
     };
     let mut last = f32::NEG_INFINITY;
     for (o, _) in &mut out {
@@ -1956,13 +2092,13 @@ fn line_join(join: LineJoin) -> D2D1_LINE_JOIN {
 /// Canvas dashes (points) as Direct2D's, which are in line widths, and
 /// the offset likewise; `None` for a solid line (no dashes, or all zero:
 /// canvas draws solid).
-fn dash_pattern(dash: &[f32], width: f64, offset: f64) -> Option<(Vec<f32>, f32)> {
-    if !dash.iter().any(|d| *d > 0.0) || width <= 0.0 {
+fn dash_pattern(dash: &[Points], width: f64, offset: f64) -> Option<(Vec<f32>, f32)> {
+    if !dash.iter().any(|d| d.0 > 0.0) || width <= 0.0 {
         return None;
     }
     let w = width as f32;
     Some((
-        dash.iter().map(|d| d / w).collect(),
+        dash.iter().map(|d| d.0 / w).collect(),
         (offset / width) as f32,
     ))
 }
@@ -2027,11 +2163,11 @@ fn destructive(c: Composite) -> bool {
 fn stop_color(g: &CanvasGradient, t: f32, after: bool) -> Color {
     let stops = &g.stops;
     let (first, last) = (stops[0], stops[stops.len() - 1]);
-    if t < first.0 || (t == first.0 && !after) {
+    if t < first.0.0 || (t == first.0.0 && !after) {
         return first.1;
     }
     for w in stops.windows(2) {
-        let ((o0, c0), (o1, c1)) = (w[0], w[1]);
+        let ((o0, c0), (o1, c1)) = ((w[0].0.0, w[0].1), (w[1].0.0, w[1].1));
         if t < o1 || (t == o1 && !after) {
             let f = if o1 > o0 { (t - o0) / (o1 - o0) } else { 1.0 };
             return lerp(c0, c1, f);
@@ -2057,7 +2193,7 @@ fn lerp(a: Color, b: Color, t: f32) -> Color {
 fn conic_steps(g: &CanvasGradient) -> Vec<f32> {
     let mut steps: Vec<f32> = (0..=CONIC_WEDGES)
         .map(|i| i as f32 / CONIC_WEDGES as f32)
-        .chain(g.stops.iter().map(|(o, _)| *o))
+        .chain(g.stops.iter().map(|(o, _)| o.0))
         .collect();
     steps.sort_by(f32::total_cmp);
     steps.dedup();
@@ -2099,7 +2235,7 @@ struct FontKey {
 impl FontKey {
     fn new(font: &CanvasFont) -> Self {
         FontKey {
-            size: font.size.to_bits(),
+            size: font.size.0.to_bits(),
             weight: font.weight,
             italic: font.italic,
             family: font.family.clone(),
@@ -2159,7 +2295,7 @@ fn make_layout(text: &str, font: &CanvasFont, family: &str) -> windows::core::Re
                 DWRITE_FONT_STYLE_NORMAL
             },
             DWRITE_FONT_STRETCH_NORMAL,
-            font.size.max(0.1),
+            font.size.0.max(0.1),
             &HSTRING::new(),
         )?;
         format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
@@ -2338,15 +2474,212 @@ mod tests {
     use super::*;
 
     fn gradient(stops: &[(f32, u32)]) -> CanvasGradient {
-        stops
-            .iter()
-            .fold(CanvasGradient::conic(0.0, 0.0, 0.0), |g, (o, c)| {
-                g.add_color_stop(*o, Color(*c))
-            })
+        stops.iter().fold(
+            CanvasGradient::conic(
+                Radians(0.0),
+                nsh_core::geometry::point(Points(0.0), Points(0.0)),
+            ),
+            |g, (o, c)| g.add_color_stop(Percentage(*o), Color(*c)),
+        )
     }
 
     fn close(a: Pt, b: Pt) -> bool {
         (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
+    }
+
+    /// What `lists` draw on a transparent 100 × 60 bitmap, as BGRA bytes.
+    fn pixels(gfx: &Gfx, lists: &[&ID2D1CommandList]) -> Vec<u8> {
+        use windows::Win32::Graphics::{
+            Direct2D::{
+                Common::{
+                    D2D_POINT_2U, D2D_RECT_U, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    D2D1_PIXEL_FORMAT,
+                },
+                D2D1_BITMAP_OPTIONS, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ,
+                D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_MAP_OPTIONS_READ,
+            },
+            Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+        };
+        let (w, h) = (100, 60);
+        let props = |options: D2D1_BITMAP_OPTIONS| D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: options,
+            colorContext: std::mem::ManuallyDrop::new(None),
+        };
+        let size = D2D_SIZE_U {
+            width: w,
+            height: h,
+        };
+        // SAFETY: COM calls on live objects; the mapped memory is copied
+        // before `Unmap`.
+        unsafe {
+            let target = gfx
+                .dc
+                .CreateBitmap(size, None, 0, &props(D2D1_BITMAP_OPTIONS_TARGET))
+                .unwrap();
+            gfx.dc.SetTarget(&target);
+            gfx.dc.BeginDraw();
+            gfx.dc.Clear(None);
+            for list in lists {
+                gfx.dc.DrawImage(
+                    *list,
+                    None,
+                    None,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    D2D1_COMPOSITE_MODE_SOURCE_OVER,
+                );
+            }
+            gfx.dc.EndDraw(None, None).unwrap();
+            gfx.dc.SetTarget(None);
+            let read = gfx
+                .dc
+                .CreateBitmap(
+                    size,
+                    None,
+                    0,
+                    &props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
+                )
+                .unwrap();
+            read.CopyFromBitmap(
+                Some(&D2D_POINT_2U { x: 0, y: 0 }),
+                &target,
+                Some(&D2D_RECT_U {
+                    left: 0,
+                    top: 0,
+                    right: w,
+                    bottom: h,
+                }),
+            )
+            .unwrap();
+            let mapped = read.Map(D2D1_MAP_OPTIONS_READ).unwrap();
+            let mut data = Vec::new();
+            for row in 0..h {
+                let start = mapped.bits.add((row * mapped.pitch) as usize);
+                data.extend_from_slice(std::slice::from_raw_parts(start, (w * 4) as usize));
+            }
+            read.Unmap().unwrap();
+            data
+        }
+    }
+
+    #[test]
+    fn a_split_drawing_draws_what_the_whole_one_does() {
+        let c = Num::Const;
+        let ops = vec![
+            CanvasOp::Save,
+            CanvasOp::Translate(c(10.0), c(5.0)),
+            CanvasOp::Path(PathOp::Rect([c(0.0), c(0.0), c(60.0), c(40.0)])),
+            CanvasOp::Clip(None, FillRule::NonZero),
+            CanvasOp::BeginPath,
+            CanvasOp::FillStyle(Paint::Color(Color(0xff0000ff))),
+            CanvasOp::FillRect([c(0.0), c(0.0), c(100.0), c(100.0)]),
+            // Erased within the head, as the sparklines fade.
+            CanvasOp::Composite(Composite::DestinationOut),
+            CanvasOp::FillRect([c(0.0), c(0.0), c(15.0), c(40.0)]),
+            CanvasOp::Composite(Composite::SourceOver),
+            // The current path and the clip are the head's, painted by the
+            // tail.
+            CanvasOp::Path(PathOp::Arc {
+                x: c(30.0),
+                y: c(20.0),
+                radius: c(12.0),
+                start: c(0.0),
+                end: c(TAU as f32),
+                ccw: false,
+            }),
+            CanvasOp::GlobalAlpha(Num::Slot(0)),
+            CanvasOp::FillStyle(Paint::Color(Color(0x0000ffff))),
+            CanvasOp::Fill(None, FillRule::NonZero),
+            CanvasOp::Restore,
+            CanvasOp::FillRect([c(0.0), c(0.0), c(8.0), c(8.0)]),
+        ];
+        let drawing = Drawing {
+            ops: ops.clone(),
+            ..Drawing::default()
+        };
+        let at = split(&drawing);
+        assert_eq!(at, 11);
+        let Ok(gfx) = gfx::get() else {
+            // No Direct3D device, not even WARP.
+            return;
+        };
+        let images = FxHashMap::default();
+        let mut text = TextCache::default();
+        for alpha in [0.5, 1.0] {
+            let args = [Some(AnimationValue::Number(alpha))];
+            let whole = record(&gfx, &ops, 0, &args, &images, &mut text).unwrap();
+            let head = record(&gfx, &ops[..at], 0, &args, &images, &mut text).unwrap();
+            let tail = record(&gfx, &ops, at, &args, &images, &mut text).unwrap();
+            let expected = pixels(&gfx, &[&whole]);
+            assert_eq!(pixels(&gfx, &[&head, &tail]), expected);
+            // The tail alone paints only the circle and the corner.
+            let alone = pixels(&gfx, &[&tail]);
+            let px = |data: &[u8], x: usize, y: usize| data[(y * 100 + x) * 4..][..4].to_vec();
+            assert_eq!(px(&alone, 12, 7), [0, 0, 0, 0]);
+            // Erased by the head.
+            assert_eq!(px(&expected, 22, 40), [0, 0, 0, 0]);
+            assert_eq!(px(&expected, 60, 40), [0, 0, 255, 255]);
+            assert_eq!(px(&alone, 40, 25)[3], (alpha * 255.0) as u8);
+        }
+    }
+
+    #[test]
+    fn tails_that_combine_with_the_head_record_whole() {
+        let c = Num::Const;
+        let rect = |x| CanvasOp::FillRect([x, c(0.0), c(10.0), c(10.0)]);
+        let at = |ops: Vec<CanvasOp>| {
+            split(&Drawing {
+                ops,
+                ..Drawing::default()
+            })
+        };
+        let multiply = CanvasOp::Composite(Composite::Multiply);
+        let over = CanvasOp::Composite(Composite::SourceOver);
+        // In effect where the tail starts.
+        assert_eq!(
+            at(vec![rect(c(0.0)), multiply.clone(), rect(Num::Slot(0))]),
+            0
+        );
+        // Set in the tail.
+        assert_eq!(
+            at(vec![rect(c(0.0)), rect(Num::Slot(0)), multiply.clone()]),
+            0
+        );
+        assert_eq!(
+            at(vec![
+                rect(c(0.0)),
+                rect(Num::Slot(0)),
+                CanvasOp::ClearRect([c(0.0); 4])
+            ]),
+            0
+        );
+        // Combined within the head, then back to source-over: the
+        // sparklines' fade.
+        assert_eq!(
+            at(vec![
+                rect(c(0.0)),
+                multiply.clone(),
+                rect(c(0.0)),
+                over,
+                rect(Num::Slot(0))
+            ]),
+            4
+        );
+        assert_eq!(
+            at(vec![
+                CanvasOp::Save,
+                multiply,
+                rect(c(0.0)),
+                CanvasOp::Restore,
+                rect(Num::Slot(0))
+            ]),
+            4
+        );
     }
 
     #[test]
@@ -2467,7 +2800,8 @@ mod tests {
     fn gradient_stops_convert() {
         let red = Color(0xff0000ff);
         let blue = Color(0x0000ffff);
-        let stops = [(0.0, red), (0.5, red), (0.5, blue), (1.0, blue)];
+        let stops =
+            [(0.0, red), (0.5, red), (0.5, blue), (1.0, blue)].map(|(o, c)| (Percentage(o), c));
         let s = gradient_stops(&stops, false, 0.0);
         assert_eq!(s.len(), 4);
         // Hard stops are kept apart, in order.
@@ -2475,7 +2809,11 @@ mod tests {
         assert_eq!(s[1].color.r, 1.0);
         assert_eq!(s[2].color.b, 1.0);
         // Reversed and moved into inner..1.
-        let s = gradient_stops(&[(0.0, red), (1.0, blue)], true, 0.5);
+        let s = gradient_stops(
+            &[(Percentage(0.0), red), (Percentage(1.0), blue)],
+            true,
+            0.5,
+        );
         assert_eq!(s[0].position, 0.5);
         assert_eq!(s[0].color.b, 1.0);
         assert_eq!(s[1].position, 1.0);
@@ -2485,9 +2823,9 @@ mod tests {
     #[test]
     fn dashes_are_in_line_widths() {
         assert_eq!(dash_pattern(&[], 2.0, 0.0), None);
-        assert_eq!(dash_pattern(&[0.0, 0.0], 2.0, 0.0), None);
+        assert_eq!(dash_pattern(&[Points(0.0), Points(0.0)], 2.0, 0.0), None);
         assert_eq!(
-            dash_pattern(&[4.0, 2.0], 2.0, 3.0),
+            dash_pattern(&[Points(4.0), Points(2.0)], 2.0, 3.0),
             Some((vec![2.0, 1.0], 1.5))
         );
     }

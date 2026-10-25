@@ -1,23 +1,37 @@
 //! Image loading: fetch (NSURLSession, reporting progress, or file) once
-//! per URI, downsample-decode with ImageIO on a background queue at each
+//! per URI (a source that carries its bytes, a `data:` URI or a blob, is not
+//! fetched: they are wrapped in an `NSData` without a copy), downsample-decode with ImageIO on a background queue at each
 //! requested pixel size, cache decoded images in an `NSCache` (purged under
 //! memory pressure), coalesce concurrent requests and cancel downloads
 //! nobody waits for. `Image.prefetch` / `getSize` keep the bytes they
-//! fetched for the views that show them next.
+//! fetched for the views that show them next. Remote images go through the
+//! surface's disk cache ([`nsh_core::image::DiskCache`]): it is read on a
+//! background queue, and a download starts (revalidating a stale copy)
+//! only when it holds no fresh one.
+//!
+//! SVG images (sniffed from their bytes) are drawn by [`nsh_core::svg`] at
+//! the requested pixel size instead, then blurred, filtered, tinted and
+//! cached as bitmaps; their size is their intrinsic size in points.
+//! Canvases draw bitmaps only.
 
 use dispatch2::{DispatchQueue, DispatchQueueGlobalPriority, GlobalQueueIdentifier};
-use nsh_core::NodeId;
+use nsh_core::{
+    ImageData, NodeId,
+    geometry::{Points, Size},
+    image::{CacheHeaders, DiskCache, Fetched, Lookup},
+};
 use objc2::{
     AnyThread, DefinedClass, Message, define_class, msg_send, rc::Retained, runtime::ProtocolObject,
 };
 use objc2_core_foundation::{
-    CFData, CFDictionary, CFNumber, CFString, CFType, CGFloat, kCFBooleanTrue,
+    CFData, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGFloat, kCFBooleanTrue,
 };
+use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSCache, NSData, NSDataReadingOptions, NSError, NSHTTPURLResponse, NSObject, NSObjectProtocol,
-    NSString, NSURL, NSURLRequest, NSURLResponse, NSURLSession, NSURLSessionDataDelegate,
-    NSURLSessionDataTask, NSURLSessionDelegate, NSURLSessionResponseDisposition, NSURLSessionTask,
-    NSURLSessionTaskDelegate,
+    NSCache, NSData, NSDataReadingOptions, NSError, NSHTTPURLResponse, NSMutableURLRequest,
+    NSObject, NSObjectProtocol, NSString, NSURL, NSURLRequest, NSURLResponse, NSURLSession,
+    NSURLSessionDataDelegate, NSURLSessionDataTask, NSURLSessionDelegate,
+    NSURLSessionResponseDisposition, NSURLSessionTask, NSURLSessionTaskDelegate,
 };
 use objc2_image_io::{
     CGImageSource, kCGImageSourceCreateThumbnailFromImageAlways,
@@ -32,12 +46,20 @@ const CACHE_BYTES: usize = 96 << 20;
 
 /// A decoded image handed from a background queue to the main thread,
 /// with the pixel size of its source (before downsampling: `onLoad`
-/// reports it, whatever size the view decodes at).
+/// reports it, whatever size the view decodes at; an SVG's is in whole
+/// points).
 #[derive(Clone)]
 pub(crate) struct DecodedImage {
     pub(crate) image: Retained<UIImage>,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    /// An SVG, which canvases do not draw.
+    pub(crate) vector: bool,
+}
+
+/// Why a canvas leaves out the SVG image `uri`.
+pub(crate) fn not_a_bitmap(uri: &str) -> String {
+    format!("{uri} is an SVG image: canvases draw bitmaps (PNG, JPEG, ...)")
 }
 
 define_class!(
@@ -95,6 +117,8 @@ impl nsh_engine::Assets for AssetReader {
 enum Source {
     Url(Retained<NSURL>),
     File(std::path::PathBuf),
+    /// A `data:` URI (base64), decoded off the main thread.
+    Data,
 }
 
 /// What the loader tells the mounter, on the main thread.
@@ -121,6 +145,13 @@ pub(crate) enum LoadEvent {
     Info {
         id: u32,
         result: Result<(u32, u32), String>,
+    },
+    /// The disk cache holds no fresh copy of `uri`: download it with
+    /// `headers` (a stale copy's validators), passed back to
+    /// [`ImageLoader::download`].
+    Download {
+        uri: String,
+        headers: Vec<(&'static str, String)>,
     },
 }
 
@@ -175,6 +206,8 @@ pub(crate) struct ImageLoader {
     notify: Notify,
     /// What the app may load, checked at every redirect.
     access: std::sync::Arc<nsh_engine::Access>,
+    /// The disk cache remote images go through.
+    disk: Option<DiskCache>,
 }
 
 impl ImageLoader {
@@ -200,7 +233,13 @@ impl ImageLoader {
             asset_base,
             notify,
             access,
+            disk: None,
         }
+    }
+
+    /// The disk cache remote images go through.
+    pub(crate) fn set_disk_cache(&mut self, disk: Option<DiskCache>) {
+        self.disk = disk;
     }
 
     /// Cache key: the same URI decoded at different sizes (or blurred or
@@ -222,11 +261,13 @@ impl ImageLoader {
 
     /// Requests `uri` for `view`, decoded to at most `max_pixels` on its
     /// longer side (0 = natural size); completions come as
-    /// [`LoadEvent::Decoded`].
+    /// [`LoadEvent::Decoded`]. `data` is its bytes, when the source carries
+    /// them (a `data:` URI, a blob): `uri` is then only the cache key.
     pub(crate) fn request(
         &mut self,
         view: NodeId,
         uri: &str,
+        data: Option<&ImageData>,
         max_pixels: u32,
         scale: f64,
         look: Look,
@@ -256,7 +297,10 @@ impl ImageLoader {
                 waiters: vec![view],
             },
         );
-        self.fetch(uri, Want::Decode(key));
+        match data {
+            Some(data) => self.serve(uri, &ns_data(data), Want::Decode(key)),
+            None => self.fetch(uri, Want::Decode(key)),
+        }
         Request::Pending
     }
 
@@ -288,10 +332,37 @@ impl ImageLoader {
             return;
         }
         let notify = self.notify.clone();
+        let remote = uri.starts_with("http://") || uri.starts_with("https://");
         let task = match self.resolve(uri) {
+            // The disk cache is read off the main thread; the download
+            // starts from there (`LoadEvent::Download`) unless it holds a
+            // fresh copy.
+            Some(Source::Url(_)) if remote && self.disk.is_some() => {
+                let cache = self.disk.clone().expect("a disk cache");
+                let uri = uri.to_owned();
+                DispatchQueue::global_queue(GlobalQueueIdentifier::Priority(
+                    DispatchQueueGlobalPriority::Default,
+                ))
+                .exec_async(move || {
+                    let event = match cache.lookup(&uri) {
+                        Lookup::Fresh(bytes) => LoadEvent::Bytes {
+                            uri,
+                            result: Ok(ns_data(&bytes)),
+                        },
+                        lookup => LoadEvent::Download {
+                            headers: lookup.request_headers(),
+                            uri,
+                        },
+                    };
+                    on_main(&notify, event);
+                });
+                None
+            }
             Some(Source::Url(url)) => Some(crate::image::download(
                 &url,
                 uri.to_owned(),
+                &[],
+                None,
                 notify,
                 self.access.clone(),
             )),
@@ -304,6 +375,18 @@ impl ImageLoader {
                     let result = std::fs::read(&path)
                         .map(|bytes| NSData::with_bytes(&bytes))
                         .map_err(|e| format!("{}: {e}", path.display()));
+                    on_main(&notify, LoadEvent::Bytes { uri, result });
+                });
+                None
+            }
+            Some(Source::Data) => {
+                let uri = uri.to_owned();
+                DispatchQueue::global_queue(GlobalQueueIdentifier::Priority(
+                    DispatchQueueGlobalPriority::Default,
+                ))
+                .exec_async(move || {
+                    let result = nsh_core::image::decode_data_uri(&uri)
+                        .map(|(_, bytes)| NSData::from_vec(bytes));
                     on_main(&notify, LoadEvent::Bytes { uri, result });
                 });
                 None
@@ -327,6 +410,31 @@ impl ImageLoader {
                 wants: vec![want],
             },
         );
+    }
+
+    /// Downloads `uri` through the disk cache, with `headers` (main thread),
+    /// unless nobody waits for it any more.
+    pub(crate) fn download(&mut self, uri: &str, headers: &[(&'static str, String)]) {
+        // Gone (nobody waits), or started by an earlier lookup of a request
+        // made again.
+        if self.downloads.get(uri).is_none_or(|d| d.task.is_some()) {
+            return;
+        }
+        let Some(url) = url(uri) else {
+            self.bytes_ready(uri, Err(format!("bad URL {uri}")));
+            return;
+        };
+        let task = crate::image::download(
+            &url,
+            uri.to_owned(),
+            headers,
+            self.disk.clone(),
+            self.notify.clone(),
+            self.access.clone(),
+        );
+        if let Some(download) = self.downloads.get_mut(uri) {
+            download.task = Some(task);
+        }
     }
 
     /// The bytes of a download arrived (main thread).
@@ -393,18 +501,22 @@ impl ImageLoader {
                 });
             }
             Want::Info(id) => {
-                // SAFETY: NSData is toll-free bridged with CFData; only the
-                // header is read.
-                let size = unsafe {
-                    let cf = &*(data as *const NSData as *const CFData);
-                    CGImageSource::with_data(cf, None).map(|source| source_size(&source))
-                };
-                let result = match size {
-                    Some((w, h)) if w > 0 && h > 0 => Ok((w, h)),
-                    _ => Err(format!("cannot read the size of {uri}")),
-                };
-                // The mounter is busy calling us: answer on the next turn.
-                on_main(&self.notify, LoadEvent::Info { id, result });
+                // An SVG's size takes parsing it: measured off the main
+                // thread, as decodes are.
+                let notify = self.notify.clone();
+                let what = uri.to_owned();
+                // SAFETY: NSData is immutable and thread-safe.
+                let data = unsafe { Shared::new(data.retain()) };
+                DispatchQueue::global_queue(GlobalQueueIdentifier::Priority(
+                    DispatchQueueGlobalPriority::Default,
+                ))
+                .exec_async(move || {
+                    // SAFETY: NSData is toll-free bridged with CFData.
+                    let cf = unsafe { &*(Retained::as_ptr(data.get()) as *const CFData) };
+                    let result =
+                        info_size(cf).ok_or_else(|| format!("cannot read the size of {what}"));
+                    on_main(&notify, LoadEvent::Info { id, result });
+                });
             }
         }
     }
@@ -486,8 +598,38 @@ impl ImageLoader {
         if uri.starts_with("http://") || uri.starts_with("https://") {
             return url(uri).map(Source::Url);
         }
+        if uri.starts_with("data:") {
+            return Some(Source::Data);
+        }
         let path = uri.strip_prefix("file://").unwrap_or(uri);
         path.starts_with('/').then(|| Source::File(path.into()))
+    }
+}
+
+/// `data`'s bytes as an `NSData`, not copied: the `NSData` keeps `data`
+/// alive until it is deallocated.
+fn ns_data(data: &ImageData) -> Retained<NSData> {
+    use std::ffi::c_void;
+
+    use block2::{DynBlock, RcBlock};
+    let keep = data.clone();
+    let bytes = keep.bytes();
+    let (ptr, len) = (bytes.as_ptr() as *mut c_void, bytes.len());
+    // Dropping the block (when the NSData goes) drops `keep`.
+    let dealloc = RcBlock::new(move |_: *mut c_void, _: usize| {
+        let _ = &keep;
+    });
+    let dealloc: &DynBlock<dyn Fn(*mut c_void, usize) + 'static> = &dealloc;
+    // SAFETY: an immutable NSData only reads the bytes, which the
+    // deallocator block keeps alive (`ImageData` is shared and immutable)
+    // for as long as the NSData lives.
+    unsafe {
+        msg_send![
+            NSData::alloc(),
+            initWithBytesNoCopy: ptr,
+            length: len,
+            deallocator: dealloc,
+        ]
     }
 }
 
@@ -542,6 +684,8 @@ struct DownloadIvars {
     uri: String,
     notify: Notify,
     access: std::sync::Arc<nsh_engine::Access>,
+    /// The disk cache it goes through.
+    cache: Option<DiskCache>,
     data: std::sync::Mutex<DownloadState>,
 }
 
@@ -550,6 +694,7 @@ struct DownloadState {
     bytes: Vec<u8>,
     total: u64,
     status: isize,
+    headers: CacheHeaders,
     reported: Option<std::time::Instant>,
 }
 
@@ -601,13 +746,26 @@ define_class!(
         ) {
             let ivars = self.ivars();
             let state = std::mem::take(&mut *ivars.data.lock().expect("download"));
-            let result = match error {
-                Some(e) => Err(e.localizedDescription().to_string()),
-                None if state.status >= 400 => Err(format!("HTTP {}", state.status)),
-                None if (300..400).contains(&state.status) => {
+            let result = match (&ivars.cache, error) {
+                // Delegates run on the session's queue, off the main
+                // thread: the cache's file IO is done here.
+                (Some(cache), error) => {
+                    let response = match error {
+                        Some(e) => Err(e.localizedDescription().to_string()),
+                        None => Ok(Fetched::new(
+                            state.status as u16,
+                            state.headers,
+                            state.bytes,
+                        )),
+                    };
+                    cache.complete(&ivars.uri, response).map(|b| ns_data(&b))
+                }
+                (None, Some(e)) => Err(e.localizedDescription().to_string()),
+                (None, None) if state.status >= 400 => Err(format!("HTTP {}", state.status)),
+                (None, None) if (300..400).contains(&state.status) => {
                     Err(format!("redirect refused (HTTP {})", state.status))
                 }
-                None => Ok(NSData::with_bytes(&state.bytes)),
+                (None, None) => Ok(NSData::from_vec(state.bytes)),
             };
             on_main(
                 &ivars.notify,
@@ -632,6 +790,9 @@ define_class!(
             state.total = response.expectedContentLength().max(0) as u64;
             if let Some(http) = response.downcast_ref::<NSHTTPURLResponse>() {
                 state.status = http.statusCode();
+                if self.ivars().cache.is_some() {
+                    state.headers = cache_headers(http);
+                }
             }
             drop(state);
             completion.call((NSURLSessionResponseDisposition::Allow,));
@@ -667,22 +828,57 @@ define_class!(
     }
 );
 
-/// Downloads `url`, reporting progress and then [`LoadEvent::Bytes`].
+/// The caching headers of `response`.
+fn cache_headers(response: &NSHTTPURLResponse) -> CacheHeaders {
+    let (keys, values) = response.allHeaderFields().to_vecs();
+    let pairs: Vec<(String, String)> = keys
+        .iter()
+        .zip(values.iter())
+        .filter_map(|(k, v)| {
+            let k = k.downcast_ref::<NSString>()?;
+            let v = v.downcast_ref::<NSString>()?;
+            Some((k.to_string(), v.to_string()))
+        })
+        .collect();
+    CacheHeaders::from_pairs(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+}
+
+/// Downloads `url` with `headers` (a revalidation's conditions), through
+/// `cache` when there is one, reporting progress and then
+/// [`LoadEvent::Bytes`].
 fn download(
     url: &NSURL,
     uri: String,
+    headers: &[(&'static str, String)],
+    cache: Option<DiskCache>,
     notify: Notify,
     access: std::sync::Arc<nsh_engine::Access>,
 ) -> Retained<NSURLSessionDataTask> {
+    let cached = cache.is_some();
     let delegate = ImageDownload::alloc().set_ivars(DownloadIvars {
         uri,
         notify,
         access,
+        cache,
         data: std::sync::Mutex::new(DownloadState::default()),
     });
     // SAFETY: NSObject's designated initializer.
     let delegate: Retained<ImageDownload> = unsafe { msg_send![super(delegate), init] };
-    let task = NSURLSession::sharedSession().dataTaskWithURL(url);
+    let request = NSMutableURLRequest::requestWithURL(url);
+    if cached {
+        // The disk cache answers for these: the shared URL cache must not
+        // serve a copy it never saw (nor hide a revalidation's 304).
+        request.setCachePolicy(
+            objc2_foundation::NSURLRequestCachePolicy::ReloadIgnoringLocalCacheData,
+        );
+    }
+    for (name, value) in headers {
+        request.setValue_forHTTPHeaderField(
+            Some(&NSString::from_str(value)),
+            &NSString::from_str(name),
+        );
+    }
+    let task = NSURLSession::sharedSession().dataTaskWithRequest(&request);
     // The task keeps its delegate until it completes.
     task.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     task.resume();
@@ -693,10 +889,107 @@ fn download(
 /// first ones).
 const MAX_FRAMES: usize = 600;
 
+/// The size `Image.getSize` reports: pixels, or an SVG's whole points.
+fn info_size(data: &CFData) -> Option<(u32, u32)> {
+    // SAFETY: the data is immutable while it is read.
+    let bytes = unsafe { data.as_bytes_unchecked() };
+    let size = if nsh_core::svg::sniff(bytes) {
+        nsh_core::svg::size(bytes)
+            .inspect_err(|e| log::warn!("{e}"))
+            .ok()
+            .map(svg_size)
+    } else {
+        // SAFETY: valid data; only the header is read.
+        unsafe { CGImageSource::with_data(data, None) }.map(|source| source_size(&source))
+    };
+    size.filter(|(w, h)| *w > 0 && *h > 0)
+}
+
+/// An SVG's intrinsic size in whole points, as `onLoad` and
+/// `Image.getSize` report it.
+fn svg_size(size: Size<Points>) -> (u32, u32) {
+    let reported = nsh_core::svg::reported_size(size);
+    (reported.width.0 as u32, reported.height.0 as u32)
+}
+
+/// Draws an SVG for a view `max_pixels` pixels on its longer side, with
+/// its shorter side that long, so it stays sharp in every resize mode
+/// (natural: at its intrinsic size in points at the screen scale), then
+/// blurs and filters it as [`decode`] does bitmaps. Thread-safe.
+fn decode_svg(bytes: &[u8], d: Decoding) -> Option<DecodedImage> {
+    let raster = match d.max_pixels {
+        0 => nsh_core::svg::rasterize_scaled(bytes, d.scale as f32),
+        n => nsh_core::svg::rasterize_covering(bytes, n),
+    }
+    .inspect_err(|e| log::warn!("{e}"))
+    .ok()?;
+    let image = rgba_image(&raster)?;
+    let image = match d.blur > 0.0 || d.matrix.is_some() {
+        true => crate::blur::filtered(&image, d.blur, d.matrix).unwrap_or(image),
+        false => image,
+    };
+    // `center` shows an image at its size in points, the raster's pixels
+    // over its scale: the SVG's intrinsic size, or as large as a bitmap
+    // decoded for the view when that is smaller.
+    let scale = (raster.width as f64 / raster.size.width.0 as f64).max(d.scale);
+    let (width, height) = svg_size(raster.size);
+    Some(DecodedImage {
+        image: UIImage::imageWithCGImage_scale_orientation(
+            &image,
+            scale as CGFloat,
+            UIImageOrientation::Up,
+        ),
+        width,
+        height,
+        vector: true,
+    })
+}
+
+/// A CGImage of premultiplied sRGB RGBA pixels.
+fn rgba_image(raster: &nsh_core::svg::Raster) -> Option<CFRetained<CGImage>> {
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGBitmapContextCreateImage, CGBitmapContextGetBytesPerRow,
+        CGBitmapContextGetData, CGColorSpace, CGImageAlphaInfo, CGImageByteOrderInfo,
+        kCGColorSpaceSRGB,
+    };
+    let (width, height) = (raster.width as usize, raster.height as usize);
+    // SAFETY: a constant of CoreGraphics.
+    let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))?;
+    // SAFETY: CoreGraphics allocates the pixels (null data) of an RGBA
+    // context of these dimensions; the rows are copied within
+    // `bytes_per_row * height` bytes while `context` lives.
+    unsafe {
+        let context = CGBitmapContextCreate(
+            std::ptr::null_mut(),
+            width,
+            height,
+            8,
+            width * 4,
+            Some(&space),
+            CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0,
+        )?;
+        let data = CGBitmapContextGetData(Some(&context)).cast::<u8>();
+        if data.is_null() {
+            return None;
+        }
+        let stride = CGBitmapContextGetBytesPerRow(Some(&context));
+        let pixels = std::slice::from_raw_parts_mut(data, stride * height);
+        for (row, src) in raster.pixels.chunks_exact(width * 4).enumerate() {
+            pixels[row * stride..row * stride + width * 4].copy_from_slice(src);
+        }
+        CGBitmapContextCreateImage(Some(&context))
+    }
+}
+
 /// Decodes (and downsamples, blurs) with ImageIO. Animated GIF / PNG /
 /// WebP images become an animated `UIImage` whose frames repeat for their
 /// delays. Thread-safe.
 fn decode(data: &CFData, d: Decoding) -> Option<DecodedImage> {
+    // SAFETY: the data is immutable while it is read.
+    let bytes = unsafe { data.as_bytes_unchecked() };
+    if nsh_core::svg::sniff(bytes) {
+        return decode_svg(bytes, d);
+    }
     let Decoding {
         max_pixels,
         scale,
@@ -737,6 +1030,7 @@ fn decode(data: &CFData, d: Decoding) -> Option<DecodedImage> {
             image,
             width,
             height,
+            vector: false,
         };
         let count = source.count().min(MAX_FRAMES);
         if count <= 1 {
@@ -753,7 +1047,7 @@ fn decode(data: &CFData, d: Decoding) -> Option<DecodedImage> {
 
 /// The pixel size of the first image, as displayed (EXIF orientations 5–8
 /// turn it a quarter).
-fn source_size(source: &CGImageSource) -> (u32, u32) {
+pub(crate) fn source_size(source: &CGImageSource) -> (u32, u32) {
     use objc2_image_io::{
         kCGImagePropertyOrientation, kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth,
     };
@@ -854,4 +1148,140 @@ fn animated(frames: Vec<(Retained<UIImage>, u32)>) -> Option<Retained<UIImage>> 
     }
     let list = objc2_foundation::NSArray::from_retained_slice(&sequence);
     UIImage::animatedImageWithImages_duration(&list, total as f64 / 100.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="#000"/></svg>"##;
+    const LOGO: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="24"><rect width="24" height="24" fill="#f00"/><rect x="24" width="24" height="24" fill="#00f"/></svg>"##;
+
+    fn decoding(max_pixels: u32, scale: f64) -> Decoding {
+        Decoding {
+            max_pixels,
+            scale,
+            blur: 0.0,
+            matrix: None,
+        }
+    }
+
+    fn cg(decoded: &DecodedImage) -> CFRetained<CGImage> {
+        // SAFETY: a plain property of an immutable image.
+        unsafe { decoded.image.CGImage() }.unwrap().into()
+    }
+
+    /// The pixel at (`x`, `y`) of `image` as premultiplied sRGB RGBA.
+    fn pixel(image: &CGImage, x: usize, y: usize) -> [u8; 4] {
+        use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+        use objc2_core_graphics::{
+            CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo,
+            kCGColorSpaceSRGB,
+        };
+        let (w, h) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
+        let mut pixels = vec![0u8; w * h * 4];
+        // SAFETY: `pixels` holds `w * 4 * h` bytes and outlives the context.
+        unsafe {
+            let space = CGColorSpace::with_name(Some(kCGColorSpaceSRGB)).unwrap();
+            let context = CGBitmapContextCreate(
+                pixels.as_mut_ptr().cast(),
+                w,
+                h,
+                8,
+                w * 4,
+                Some(&space),
+                CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0,
+            )
+            .unwrap();
+            CGContext::draw_image(
+                Some(&context),
+                CGRect::new(CGPoint::ZERO, CGSize::new(w as f64, h as f64)),
+                Some(image),
+            );
+        }
+        let i = (y * w + x) * 4;
+        pixels[i..i + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn svg_decodes_at_the_requested_size() {
+        let icon = decode(&CFData::from_bytes(ICON), decoding(54, 3.0)).unwrap();
+        assert_eq!(
+            (icon.width, icon.height),
+            (24, 24),
+            "intrinsic size in points"
+        );
+        let image = cg(&icon);
+        assert_eq!(
+            (CGImage::width(Some(&image)), CGImage::height(Some(&image))),
+            (54, 54)
+        );
+        // SAFETY: a plain property of an immutable image.
+        assert_eq!(unsafe { icon.image.scale() }, 3.0);
+        let logo = decode(&CFData::from_bytes(LOGO), decoding(144, 2.0)).unwrap();
+        assert!(logo.vector);
+        let image = cg(&logo);
+        assert_eq!(
+            (CGImage::width(Some(&image)), CGImage::height(Some(&image))),
+            (288, 144),
+            "the shorter side at the view's longer one: sharp when `cover` crops it"
+        );
+        // `center` shows it at its intrinsic size.
+        // SAFETY: a plain property of an immutable image.
+        let size = unsafe { logo.image.size() };
+        assert_eq!((size.width, size.height), (48.0, 24.0));
+        assert_eq!(pixel(&image, 10, 36), [255, 0, 0, 255]);
+        assert_eq!(pixel(&image, 270, 72), [0, 0, 255, 255]);
+        // Natural size: the intrinsic size at the screen scale.
+        let natural = decode(&CFData::from_bytes(LOGO), decoding(0, 2.0)).unwrap();
+        assert_eq!(CGImage::width(Some(&cg(&natural))), 96);
+        // SAFETY: a plain property of an immutable image.
+        let size = unsafe { natural.image.size() };
+        assert_eq!((size.width, size.height), (48.0, 24.0));
+        assert!(decode(&CFData::from_bytes(b"<svg><rect"), decoding(24, 1.0)).is_none());
+    }
+
+    #[test]
+    fn svg_info_reports_points() {
+        assert_eq!(info_size(&CFData::from_bytes(ICON)), Some((24, 24)));
+        assert_eq!(info_size(&CFData::from_bytes(LOGO)), Some((48, 24)));
+        assert_eq!(info_size(&CFData::from_bytes(b"<svg><rect")), None);
+        let odd = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10.5" height="1e30"/>"#;
+        assert_eq!(
+            info_size(&CFData::from_bytes(odd)),
+            Some((11, i32::MAX as u32))
+        );
+    }
+
+    #[test]
+    fn svg_tints_through_alpha() {
+        // `tintColor` shows a color through the image's alpha.
+        let icon = decode(&CFData::from_bytes(ICON), decoding(48, 2.0)).unwrap();
+        let image = cg(&icon);
+        assert_eq!(pixel(&image, 24, 24)[3], 255);
+        assert_eq!(pixel(&image, 1, 1)[3], 0);
+        let mut invert = [0.0f32; 20];
+        for (i, v) in [
+            (0, -1.0),
+            (4, 1.0),
+            (6, -1.0),
+            (9, 1.0),
+            (12, -1.0),
+            (14, 1.0),
+            (18, 1.0),
+        ] {
+            invert[i] = v;
+        }
+        let inverted = decode(
+            &CFData::from_bytes(ICON),
+            Decoding {
+                matrix: Some(invert),
+                ..decoding(48, 2.0)
+            },
+        )
+        .unwrap();
+        let image = cg(&inverted);
+        assert_eq!(pixel(&image, 24, 24), [255, 255, 255, 255]);
+        assert_eq!(pixel(&image, 1, 1)[3], 0);
+    }
 }

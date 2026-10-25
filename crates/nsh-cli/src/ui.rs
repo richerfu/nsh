@@ -14,7 +14,7 @@
 //!   comes: log lines with their levels and targets (`logger.rs`), the
 //!   tools' and hosts' own output.
 //!
-//! Everything goes to stderr: stdout is the commands' results (`nsh trace`'s
+//! Everything goes to stderr: stdout is the commands' results (`nsh test --trace`'s
 //! mount items, the signing commands' lines).
 
 use std::{
@@ -65,12 +65,10 @@ pub(crate) fn init(verbose: bool) {
     #[cfg(unix)]
     // SAFETY: a zeroed `sigaction` is a valid value (no flags, an empty
     // mask) before the fields are set; the handler only uses
-    // async-signal-safe calls (`write`, `signal`, `raise`, `getppid`) and
-    // atomics.
+    // async-signal-safe calls (`write`, `signal`, `raise`) and atomics.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = on_signal as *const () as libc::sighandler_t;
-        action.sa_flags = libc::SA_SIGINFO;
         libc::sigemptyset(&mut action.sa_mask);
         libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
         libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
@@ -98,7 +96,7 @@ static STOP_SIGNAL: AtomicI32 = AtomicI32::new(0);
 /// Until dropped, Ctrl-C (SIGINT) and SIGTERM ask the command to stop
 /// ([`stop_requested`]) instead of ending the process, so that it undoes
 /// what it set up outside it on its way out (`nsh run`'s `adb reverse`);
-/// a second one ends the process. [`crate::main_with`] then ends it as the
+/// a second one ends the process. [`crate::main`] then ends it as the
 /// signal would have.
 pub(crate) struct Stoppable(());
 
@@ -120,26 +118,6 @@ pub(crate) fn stop_requested() -> bool {
     STOP_SIGNAL.load(Ordering::SeqCst) != 0
 }
 
-/// Passes a requested stop on to `child` (a command line this one runs,
-/// which is [`Stoppable`] itself): it may not have had the signal, if it
-/// was sent to this process alone. Once it did, the one passed on is not
-/// taken as a second.
-#[cfg(unix)]
-pub(crate) fn pass_stop_on(child: &std::process::Child) {
-    let signal = STOP_SIGNAL.load(Ordering::SeqCst);
-    if signal != 0
-        && let Ok(pid) = libc::pid_t::try_from(child.id())
-    {
-        // SAFETY: a plain syscall on a child that has not been waited for.
-        unsafe { libc::kill(pid, signal) };
-    }
-}
-
-/// Windows delivers Ctrl-C to every process of the console, the child
-/// included: nothing to pass on.
-#[cfg(windows)]
-pub(crate) fn pass_stop_on(_child: &std::process::Child) {}
-
 /// After a requested stop: ends the process as the signal would have
 /// (the shell sees an interrupted command).
 pub(crate) fn exit_if_stopped() {
@@ -150,7 +128,7 @@ pub(crate) fn exit_if_stopped() {
 }
 
 /// Ends the process with `signal`'s default action.
-pub(crate) fn exit_by_signal(signal: libc::c_int) {
+fn exit_by_signal(signal: libc::c_int) {
     // SAFETY: back to the default action, then raise it.
     unsafe {
         libc::signal(signal, libc::SIG_DFL);
@@ -160,23 +138,15 @@ pub(crate) fn exit_by_signal(signal: libc::c_int) {
 
 /// Ctrl-C (or a stop): asks a [`Stoppable`] command to stop, else (or the
 /// second time) clears a spinner's line and ends the process as the signal
-/// would have. A stop the parent passes on ([`pass_stop_on`]) after this
-/// one had it is not a second.
+/// would have.
 #[cfg(unix)]
-extern "C" fn on_signal(signal: libc::c_int, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
-    if STOPPABLE.load(Ordering::SeqCst) > 0 {
-        if STOP_SIGNAL
+extern "C" fn on_signal(signal: libc::c_int) {
+    if STOPPABLE.load(Ordering::SeqCst) > 0
+        && STOP_SIGNAL
             .compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
-        {
-            return;
-        }
-        // SAFETY: the kernel passes a valid `siginfo_t` with SA_SIGINFO.
-        let sender = unsafe { info.as_ref() }.map_or(0, sender);
-        // SAFETY: `getppid` is async-signal-safe and cannot fail.
-        if sender != 0 && sender == unsafe { libc::getppid() } {
-            return;
-        }
+    {
+        return;
     }
     if SPINNER_DRAWN.load(Ordering::SeqCst) {
         let clear = b"\r\x1b[2K";
@@ -188,16 +158,6 @@ extern "C" fn on_signal(signal: libc::c_int, info: *mut libc::siginfo_t, _: *mut
         libc::signal(signal, libc::SIG_DFL);
         libc::raise(signal);
     }
-}
-
-/// The process that sent a signal (0: the kernel, the terminal's Ctrl-C).
-#[cfg(unix)]
-fn sender(info: &libc::siginfo_t) -> libc::pid_t {
-    #[cfg(target_os = "linux")]
-    // SAFETY: SIGINT and SIGTERM carry the sender's pid.
-    return unsafe { info.si_pid() };
-    #[cfg(not(target_os = "linux"))]
-    return info.si_pid;
 }
 
 /// The console's side of [`init`] and [`columns`] on Windows.
@@ -569,6 +529,70 @@ pub(crate) fn debug(message: impl Display) {
     }
 }
 
+/// Whether the command line may ask the user: stdin and stdout are a
+/// terminal (not a pipe, a CI job or an editor's task).
+pub(crate) fn interactive() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+/// `? question`, then the `options` (a name and what it is), numbered:
+/// the index of the one the user picks by number or name. Enter (or the
+/// end of input) picks the first; anything else asks again.
+pub(crate) fn choose(question: &str, options: &[(&str, &str)]) -> anyhow::Result<usize> {
+    let name_width = options
+        .iter()
+        .map(|(name, _)| width(name))
+        .max()
+        .unwrap_or(0);
+    print(&format!("{} {question}", cyan("?")));
+    for (i, (name, what)) in options.iter().enumerate() {
+        let pad = " ".repeat(name_width - width(name));
+        print(&format!(
+            "  {} {name}{pad}  {}",
+            dim(format!("{}.", i + 1)),
+            dim(what)
+        ));
+    }
+    let default = options.first().map_or("", |(name, _)| name);
+    let stdin = std::io::stdin();
+    loop {
+        eprint!(
+            "{} {}",
+            cyan("?"),
+            dim(format!("1-{}, or Enter for {default}: ", options.len()))
+        );
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if stdin
+            .lock()
+            .read_line(&mut line)
+            .context("read the answer")?
+            == 0
+        {
+            eprintln!();
+            return Ok(0);
+        }
+        let answer = line.trim();
+        if answer.is_empty() {
+            return Ok(0);
+        }
+        let picked = answer
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .filter(|&i| i < options.len())
+            .or_else(|| {
+                options
+                    .iter()
+                    .position(|(name, _)| name.eq_ignore_ascii_case(answer))
+            });
+        match picked {
+            Some(i) => return Ok(i),
+            None => warn(format!("{answer:?} is none of them")),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Steps
 
@@ -691,6 +715,20 @@ impl Display for Failure {
 
 impl std::error::Error for Failure {}
 
+/// `error` as one message: its chain, then the details of the
+/// [`Failure`] in it (a compiler's diagnostics), for reports that carry a
+/// message instead of printing it (a test's failure).
+pub(crate) fn with_details(error: &anyhow::Error) -> String {
+    let mut message = format!("{error:#}");
+    if let Some(failure) = error.chain().find_map(|e| e.downcast_ref::<Failure>())
+        && !failure.details.trim().is_empty()
+    {
+        message.push('\n');
+        message.push_str(failure.details.trim_end());
+    }
+    message
+}
+
 /// Prints `error`: `error <message>`, and the details of the
 /// [`Failure`] in it.
 pub(crate) fn report(error: &anyhow::Error) {
@@ -707,11 +745,20 @@ pub(crate) fn report(error: &anyhow::Error) {
 /// Verbose runs let the output through instead (and return none).
 pub(crate) fn capture(
     cmd: &mut Command,
-    mut on_line: impl FnMut(&str),
+    on_line: impl FnMut(&str),
 ) -> std::io::Result<(ExitStatus, String)> {
     if verbose() {
         return Ok((cmd.status()?, String::new()));
     }
+    capture_all(cmd, on_line)
+}
+
+/// [`capture`] for output the caller reads (`cargo test`'s results):
+/// verbose runs get it too, and show each line as it comes.
+pub(crate) fn capture_all(
+    cmd: &mut Command,
+    mut on_line: impl FnMut(&str),
+) -> std::io::Result<(ExitStatus, String)> {
     let (reader, writer) = std::io::pipe()?;
     cmd.stdin(Stdio::null())
         .stdout(writer.try_clone()?)
@@ -726,7 +773,11 @@ pub(crate) fn capture(
     let mut line = Vec::new();
     while reader.read_until(b'\n', &mut line)? > 0 {
         let text = String::from_utf8_lossy(&line);
-        on_line(text.trim_end_matches(['\n', '\r']));
+        let text_line = text.trim_end_matches(['\n', '\r']);
+        if verbose() {
+            plain(text_line);
+        }
+        on_line(text_line);
         output.push_str(&text);
         line.clear();
     }
@@ -737,7 +788,14 @@ pub(crate) fn capture(
 /// shows the crate it compiles, the output is shown only if it fails, and
 /// warnings are counted (`-v` shows them).
 pub(crate) fn cargo(cmd: &mut Command, what: &str) -> anyhow::Result<()> {
-    let step = Step::start(format!("building {what}"));
+    cargo_as(cmd, ["building", "built"], what)
+}
+
+/// [`cargo`] for another cargo command (`cargo check`): `doing` names the
+/// step while it runs and once it ends (`["checking", "checked"]`).
+pub(crate) fn cargo_as(cmd: &mut Command, doing: [&str; 2], what: &str) -> anyhow::Result<()> {
+    let [doing, done] = doing;
+    let step = Step::start(format!("{doing} {what}"));
     if !verbose() {
         cmd.env("CARGO_TERM_COLOR", if color() { "always" } else { "never" });
     }
@@ -752,14 +810,14 @@ pub(crate) fn cargo(cmd: &mut Command, what: &str) -> anyhow::Result<()> {
     })
     .context("run cargo")?;
     if !status.success() {
-        return Err(failure(format!("building {what} failed"), output));
+        return Err(failure(format!("{doing} {what} failed"), output));
     }
     let note = match warnings {
         0 => None,
         1 => Some("1 warning: -v shows it".to_owned()),
         n => Some(format!("{n} warnings: -v shows them")),
     };
-    step.done_with(format!("built {what}"), note.as_deref());
+    step.done_with(format!("{done} {what}"), note.as_deref());
     Ok(())
 }
 
@@ -827,6 +885,16 @@ pub(crate) fn quiet(cmd: &mut Command) -> std::io::Result<(std::process::Child, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_failures_carry_the_compilers_diagnostics() {
+        let error = failure("building App.tsx failed", "  x `nsh` has no export `If`\n");
+        assert_eq!(
+            with_details(&error),
+            "building App.tsx failed\n  x `nsh` has no export `If`"
+        );
+        assert_eq!(with_details(&anyhow::anyhow!("no entry")), "no entry");
+    }
 
     #[test]
     fn links_and_colors_strip_to_their_text() {

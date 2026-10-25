@@ -56,12 +56,12 @@ impl Image {
                 blur,
                 color,
             } => (
-                offset_x * scale,
-                offset_y * scale,
-                super::geometry::blur_sigma(blur, scale),
+                offset_x.0 * scale,
+                offset_y.0 * scale,
+                super::geometry::blur_sigma(blur.0, scale),
                 Some(color),
             ),
-            Effect::Blur(radius) => (0.0, 0.0, super::geometry::blur_sigma(radius, scale), None),
+            Effect::Blur(radius) => (0.0, 0.0, super::geometry::blur_sigma(radius.0, scale), None),
             _ => (0.0, 0.0, 0.0, None),
         };
         let pad = (sigma * 3.0).ceil();

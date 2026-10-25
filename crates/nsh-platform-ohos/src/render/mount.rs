@@ -3,12 +3,15 @@
 
 use std::{collections::VecDeque, rc::Rc, sync::Arc};
 
-use nsh_core::{Command, MountBatch, MountItem, NodeId, Rect, Size, ViewKind};
+use nsh_core::{Command, MountBatch, MountItem, NodeId, ViewKind};
 use nsh_engine::EngineControl;
 use ohos_arkui_binding::component::attribute::ArkUICommonAttribute;
 
 use crate::{
-    render::node::{Error, Node, Result},
+    render::{
+        geometry::{Rect, Size},
+        node::{Error, Node, Result},
+    },
     text::typography::RasterText,
 };
 
@@ -638,7 +641,8 @@ impl Mounter {
                         self.delete(id)?;
                     }
                     MountItem::Frame { id, frame } => {
-                        self.node(id)?.animated_frame(frame, layout.as_ref())?
+                        self.node(id)?
+                            .animated_frame(frame.into(), layout.as_ref())?
                     }
                     MountItem::LayoutAnimation(_) => {}
                     MountItem::ViewStyle { id, style } => self.node(id)?.style(&style)?,
@@ -656,7 +660,7 @@ impl Mounter {
                             .0
                             .downcast_ref::<RasterText>()
                             .ok_or(Error::Unsupported("foreign text layout"))?;
-                        self.node(id)?.text(raster, content, layout.clone())?;
+                        self.node(id)?.text(raster, content.into(), layout.clone())?;
                         self.node(id)?
                             .set_events(self.node(id)?.interaction.mask())?;
                         self.node(id)?
@@ -713,13 +717,13 @@ impl Mounter {
                     }
                     MountItem::InputContent { id, content } => {
                         if let Some(input) = self.node(id)?.input.borrow().as_ref() {
-                            input.content(content)?;
+                            input.content(content.into())?;
                         }
                     }
                     MountItem::ScrollConfig {
                         id,
                         horizontal,
-                        shows_indicator,
+                        scrollbar_visible,
                         scroll_value,
                         keyboard_dismiss,
                         mirrored,
@@ -727,7 +731,7 @@ impl Mounter {
                         if let Some(scroll) = self.node(id)?.scroll.borrow().as_ref() {
                             scroll.config(
                                 horizontal,
-                                shows_indicator,
+                                scrollbar_visible,
                                 scroll_value,
                                 keyboard_dismiss,
                                 mirrored,
@@ -736,7 +740,7 @@ impl Mounter {
                     }
                     MountItem::ScrollContent { id, size } => {
                         if let Some(scroll) = self.node(id)?.scroll.borrow().as_ref() {
-                            scroll.size(size)?;
+                            scroll.size(size.into())?;
                         }
                     }
                     MountItem::StickyCells { id, cells } => {
@@ -763,7 +767,7 @@ impl Mounter {
                     }
                     MountItem::ScrollBy { id, dx, dy } => {
                         if let Some(scroll) = self.node(id)?.scroll.borrow().as_ref() {
-                            scroll.by(dx, dy)?;
+                            scroll.by(dx.0, dy.0)?;
                         }
                     }
                     MountItem::Command { id, command } => match command {
@@ -863,12 +867,16 @@ impl Mounter {
                             animated,
                         } => {
                             if let Some(scroll) = self.node(id)?.scroll.borrow().as_ref() {
-                                scroll.zoom_to(scale, center, animated)?;
+                                scroll.zoom_to(
+                                    scale,
+                                    center.map(|p| (p.x.0, p.y.0)),
+                                    animated,
+                                )?;
                             }
                         }
                         Command::ScrollTo { x, y, animated } => {
                             if let Some(scroll) = self.node(id)?.scroll.borrow().as_ref() {
-                                scroll.to(x, y, animated)?;
+                                scroll.to(x.0, y.0, animated)?;
                             }
                         }
                         command @ Command::Seek(_) => {
@@ -899,7 +907,7 @@ impl Mounter {
                     }
                     MountItem::Overflow { id, extent } => {
                         let node = self.node(id)?;
-                        node.overflow.set(extent);
+                        node.overflow.set(extent.map(Rect::from));
                         node.native.borrow().set_bool_attribute(ohos_arkui_binding::types::attribute::ArkUINodeAttributeType::Clip, node.clips_children())?;
                         node.interaction.hit_region(node)?;
                         node.invalidate_scene();
@@ -990,7 +998,7 @@ impl Mounter {
             width: size.width,
             height: size.height,
         })?;
-        self.control.resize(size);
+        self.control.resize(size.into());
         Ok(())
     }
 

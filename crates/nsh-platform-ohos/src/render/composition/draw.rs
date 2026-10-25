@@ -1,10 +1,13 @@
 //! Worker-owned native paint planes, ordered backdrop roots and group effects.
 use std::sync::Arc;
 
-use nsh_core::{BlendMode, Matrix as Transform, Size, ViewStyle};
+use nsh_core::{BlendMode, Matrix as Transform, ViewStyle};
 use ohos_drawing_binding::{Bitmap, BitmapFormat, Brush, Canvas, ClipOperation, Matrix};
 
-use crate::render::composition::{filter::Image, geometry::Bounds, worker::Key};
+use crate::render::{
+    composition::{filter::Image, geometry::Bounds, worker::Key},
+    geometry::Size,
+};
 
 pub(crate) struct PaintNode {
     pub(crate) source: Option<Key>,

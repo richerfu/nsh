@@ -1,7 +1,7 @@
 //! Partial redraws: the area of a drawing that changes when some of its
-//! native values do.
+//! animated values do.
 //!
-//! An animation of a canvas's native values redraws the canvas on every
+//! An animation of a canvas's animated values redraws the canvas on every
 //! frame, but usually moves only a small part of it (a pulsing dot on a
 //! chart). [`DamageScan::damage`] replays the operations for their
 //! geometry only (the transform with `save` / `restore`, the current path's
@@ -26,16 +26,16 @@ use super::{
     CanvasOp, CanvasTextAlign, Composite, LineCap, LineJoin, Num, Paint, PathOp,
     hit::{IDENTITY, Matrix, apply, invert, mul, norm},
 };
-use crate::geometry::Rect;
+use crate::geometry::{self as geo, Points};
 
-/// What changes when native values do ([`DamageScan::damage`]).
+/// What changes when animated values do ([`DamageScan::damage`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Damage {
     /// Nothing that is drawn.
     None,
     /// This area, in view coordinates (anti-aliasing included, edges on
     /// whole points).
-    Rect(Rect),
+    Rect(geo::Bounds<Points>),
     /// Unknown: the whole canvas.
     All,
 }
@@ -46,16 +46,7 @@ impl Damage {
         match (self, other) {
             (Damage::All, _) | (_, Damage::All) => Damage::All,
             (Damage::None, d) | (d, Damage::None) => d,
-            (Damage::Rect(a), Damage::Rect(b)) => {
-                let x = a.x.min(b.x);
-                let y = a.y.min(b.y);
-                Damage::Rect(Rect {
-                    x,
-                    y,
-                    width: (a.x + a.width).max(b.x + b.width) - x,
-                    height: (a.y + a.height).max(b.y + b.height) - y,
-                })
-            }
+            (Damage::Rect(a), Damage::Rect(b)) => Damage::Rect(a.union(&b)),
         }
     }
 }
@@ -263,7 +254,7 @@ impl PathBounds {
                     return;
                 }
                 let (s, e) = (n(*start), n(*end));
-                let sweep = super::arc_sweep(s, e, *ccw);
+                let sweep = super::sweep(s, e, *ccw);
                 self.ellipse(m, [x, y], r, s + sweep, |t| {
                     [x + r * t.cos(), y + r * t.sin()]
                 });
@@ -279,7 +270,7 @@ impl PathBounds {
                     return;
                 }
                 let (s, e) = (n(*start), n(*end));
-                let sweep = super::arc_sweep(s, e, *ccw);
+                let sweep = super::sweep(s, e, *ccw);
                 let (sr, cr) = rotation.sin_cos();
                 self.ellipse(m, [x, y], rx.max(ry), s + sweep, |t| {
                     let (ex, ey) = (rx * t.cos(), ry * t.sin());
@@ -374,7 +365,7 @@ pub struct DamageScan {
 }
 
 impl DamageScan {
-    /// The area that the operations of `ops` reading a native value slot
+    /// The area that the operations of `ops` reading an animated value slot
     /// for which `changed` is true paint, with slot values `value`.
     ///
     /// Scanned with the values before a change and after it, the union of
@@ -523,15 +514,15 @@ impl DamageScan {
                     None
                 }
                 CanvasOp::ShadowBlur(b) => {
-                    state.shadow.0 = *b;
+                    state.shadow.0 = b.0;
                     None
                 }
-                CanvasOp::ShadowOffset(x, y) => {
-                    (state.shadow.1, state.shadow.2) = (*x, *y);
+                CanvasOp::ShadowOffset(offset) => {
+                    (state.shadow.1, state.shadow.2) = (offset.x.0, offset.y.0);
                     None
                 }
                 CanvasOp::Font(f) => {
-                    state.font_size = f.size;
+                    state.font_size = f.size.0;
                     None
                 }
                 CanvasOp::TextAlign(a) => {
@@ -561,7 +552,7 @@ impl DamageScan {
                             state.stroke_dep || state.line_width_dep || state.dash_dep
                         };
                     d.then(|| {
-                        let b = text_bounds(&state, text, n(*x), n(*y), *max_width);
+                        let b = text_bounds(&state, text, n(*x), n(*y), max_width.map(|m| m.0));
                         if fill {
                             b
                         } else {
@@ -608,13 +599,87 @@ impl DamageScan {
         }
         let area = area.inflate(AA);
         let (x, y) = (area.min[0].floor(), area.min[1].floor());
-        Damage::Rect(Rect {
+        Damage::Rect(geo::rect(
             x,
             y,
-            width: area.max[0].ceil() - x,
-            height: area.max[1].ceil() - y,
-        })
+            area.max[0].ceil() - x,
+            area.max[1].ceil() - y,
+        ))
     }
+}
+
+/// The index of the first operation of `ops` that reads an animated value
+/// slot (`ops.len()` when none does). What the operations before it paint
+/// is the same whatever the slots hold: a platform may keep those pixels
+/// and, when slots change, replay only the painting from there on (the
+/// operations before it still set the state: transforms, styles, paths,
+/// clips).
+pub fn first_animated(ops: &[CanvasOp]) -> usize {
+    let dep = |v: &Num| matches!(v, Num::Slot(_));
+    let paint = |p: &Paint| matches!(p, Paint::Slot(_));
+    let path = |p: &Option<super::Path>| {
+        p.as_deref()
+            .is_some_and(|ops| ops.iter().any(|op| path_op_dep(op, &dep)))
+    };
+    ops.iter()
+        .position(|op| match op {
+            CanvasOp::Translate(x, y) | CanvasOp::Scale(x, y) => dep(x) || dep(y),
+            CanvasOp::Rotate(v)
+            | CanvasOp::LineWidth(v)
+            | CanvasOp::LineDashOffset(v)
+            | CanvasOp::GlobalAlpha(v) => dep(v),
+            CanvasOp::Transform(v) | CanvasOp::SetTransform(v) => v.iter().any(dep),
+            CanvasOp::Path(op) => path_op_dep(op, &dep),
+            CanvasOp::Fill(p, _) | CanvasOp::Stroke(p) | CanvasOp::Clip(p, _) => path(p),
+            CanvasOp::FillRect(r) | CanvasOp::StrokeRect(r) | CanvasOp::ClearRect(r) => {
+                r.iter().any(dep)
+            }
+            CanvasOp::FillStyle(p) | CanvasOp::StrokeStyle(p) => paint(p),
+            CanvasOp::FillText { x, y, .. } | CanvasOp::StrokeText { x, y, .. } => dep(x) || dep(y),
+            CanvasOp::DrawImage { dest, .. } => dest.iter().any(dep),
+            CanvasOp::Save
+            | CanvasOp::Restore
+            | CanvasOp::BeginPath
+            | CanvasOp::LineCap(_)
+            | CanvasOp::LineJoin(_)
+            | CanvasOp::MiterLimit(_)
+            | CanvasOp::LineDash(_)
+            | CanvasOp::Composite(_)
+            | CanvasOp::ShadowColor(_)
+            | CanvasOp::ShadowBlur(_)
+            | CanvasOp::ShadowOffset(_)
+            | CanvasOp::Font(_)
+            | CanvasOp::FontVariantNumeric(_)
+            | CanvasOp::TextAlign(_)
+            | CanvasOp::TextBaseline(_) => false,
+        })
+        .unwrap_or(ops.len())
+}
+
+/// Whether the current path the operations of `ops` before `split` build
+/// matters from `split` on: a clip by it before `split` keeps it, and so
+/// does an operation from `split` on that uses it before a `beginPath`
+/// starts anew. A platform replaying only from [`first_animated`] on skips
+/// the path operations before it when it does not.
+pub fn prefix_path_needed(ops: &[CanvasOp], split: usize) -> bool {
+    let split = split.min(ops.len());
+    if ops[..split]
+        .iter()
+        .any(|op| matches!(op, CanvasOp::Clip(None, _)))
+    {
+        return true;
+    }
+    ops[split..]
+        .iter()
+        .find_map(|op| match op {
+            CanvasOp::BeginPath => Some(false),
+            CanvasOp::Path(_)
+            | CanvasOp::Fill(None, _)
+            | CanvasOp::Stroke(None)
+            | CanvasOp::Clip(None, _) => Some(true),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// Whether `op` reads a changed value.
@@ -720,12 +785,7 @@ mod tests {
     }
 
     fn r(x: f32, y: f32, width: f32, height: f32) -> Damage {
-        Damage::Rect(Rect {
-            x,
-            y,
-            width,
-            height,
-        })
+        Damage::Rect(geo::rect(x, y, width, height))
     }
 
     fn arc(x: f32, y: f32, radius: Num) -> CanvasOp {
@@ -757,6 +817,14 @@ mod tests {
             arc(100.0, 50.0, c(3.0)),
             CanvasOp::Fill(None, FillRule::NonZero),
         ]
+    }
+
+    #[test]
+    fn the_animated_part_starts_at_the_first_slot_read() {
+        // The static line, then the alpha read from slot 1.
+        assert_eq!(first_animated(&pulse()), 5);
+        assert_eq!(first_animated(&pulse()[..5]), 5);
+        assert_eq!(first_animated(&[]), 0);
     }
 
     #[test]
@@ -805,8 +873,11 @@ mod tests {
         };
         // Rotated a quarter turn: x in -10..0, y in 10..20 (give or take
         // rounding).
-        assert!((-13.0..=-12.0).contains(&rect.x) && rect.x + rect.width >= 2.0);
-        assert_eq!((rect.y, rect.height), (8.0, 14.0));
+        assert!(
+            (-13.0..=-12.0).contains(&rect.origin.x.0)
+                && rect.origin.x.0 + rect.size.width.0 >= 2.0
+        );
+        assert_eq!((rect.origin.y.0, rect.size.height.0), (8.0, 14.0));
     }
 
     #[test]
@@ -815,8 +886,11 @@ mod tests {
             CanvasOp::LineWidth(c(4.0)),
             CanvasOp::LineJoin(LineJoin::Round),
             CanvasOp::ShadowColor(Color(0x000000ff)),
-            CanvasOp::ShadowBlur(3.0),
-            CanvasOp::ShadowOffset(10.0, 0.0),
+            CanvasOp::ShadowBlur(crate::geometry::px(3.0)),
+            CanvasOp::ShadowOffset(crate::geometry::point(
+                crate::geometry::px(10.0),
+                crate::geometry::px(0.0),
+            )),
             CanvasOp::StrokeRect([S0, c(0.0), c(10.0), c(10.0)]),
         ];
         // The stroke: 2 past the box; its shadow 10 right, 6 wider.
@@ -829,7 +903,7 @@ mod tests {
         assert_eq!(scan(&ops, 0.0, 0.0), r(-22.0, -22.0, 54.0, 54.0));
         // A transparent shadow casts nothing.
         let ops = vec![
-            CanvasOp::ShadowBlur(30.0),
+            CanvasOp::ShadowBlur(crate::geometry::px(30.0)),
             CanvasOp::FillRect([S0, c(0.0), c(10.0), c(10.0)]),
         ];
         assert_eq!(scan(&ops, 0.0, 0.0), r(-2.0, -2.0, 14.0, 14.0));

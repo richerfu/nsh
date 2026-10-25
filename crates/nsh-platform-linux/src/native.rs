@@ -42,8 +42,8 @@ use std::{
 
 use gtk4::{self as gtk, gio, glib, prelude::*};
 use nsh_core::{
-    Command, EventKind, EventPayload, JsonValue, NativeProps, NodeId, PayloadValue, Rect,
-    ResizeMode, Size, VideoProps, ViewKind,
+    Bounds, Command, EventKind, EventPayload, JsonValue, NativeProps, NodeId, PayloadValue, Points,
+    ResizeMode, Size, VideoProps, ViewKind, geometry::Point,
 };
 use nsh_engine::EngineControl;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -122,7 +122,7 @@ impl ComponentContext {
     /// dimension open.
     pub fn set_size(&self, width: f32, height: f32) {
         self.control
-            .set_component_size(self.id, Size::new(width, height));
+            .set_component_size(self.id, Size::new(Points(width), Points(height)));
     }
 }
 
@@ -153,8 +153,14 @@ impl std::fmt::Debug for Components {
 }
 
 impl Components {
-    /// Registers `factory` under `name` (replacing an earlier one).
+    /// Registers `factory` under `name` (replacing an earlier one). Names
+    /// under `nsh/` are NSH's own: registering one logs a warning and
+    /// changes nothing.
     pub fn register(&self, name: &str, factory: ComponentFactory) {
+        if nsh_core::platform::is_reserved_component(name) {
+            log::warn!("native component `{name}` is not registered: names under `nsh/` are NSH's");
+            return;
+        }
         self.factories.borrow_mut().insert(name.into(), factory);
         self.missing.borrow_mut().remove(name);
     }
@@ -414,7 +420,7 @@ pub(crate) fn page_of(_widget: &gtk::Widget) -> Option<gtk::Widget> {
 }
 
 /// The CSS class of a web view whose page does not scroll
-/// (`scrollEnabled: false`): wheels over it go to the scroll views around
+/// (`scrollable: false`): wheels over it go to the scroll views around
 /// it (`crate::input`).
 pub(crate) const UNSCROLLABLE: &str = "nsh-unscrollable";
 
@@ -448,8 +454,8 @@ fn fill_sized(view: &NshView, widget: &gtk::Widget) {
 
 fn host(view: &NshView, widget: &gtk::Widget, sized: bool) {
     let frame = view.state().frame;
-    let has_size = |rect: Rect| rect.width >= 1.0 && rect.height >= 1.0;
-    let rect = bounds(frame.width, frame.height);
+    let has_size = |rect: Bounds<Points>| rect.size.width.0 >= 1.0 && rect.size.height.0 >= 1.0;
+    let rect = bounds(frame.size.width.0, frame.size.height.0);
     view.set_native(widget, rect);
     // After `set_native`: parenting makes a widget child visible.
     if sized {
@@ -462,7 +468,7 @@ fn host(view: &NshView, widget: &gtk::Widget, sized: bool) {
     view.on_resize(move |_, _| {
         if let Some(view) = weak.upgrade() {
             let mut s = view.state_mut();
-            let rect = bounds(s.frame.width, s.frame.height);
+            let rect = bounds(s.frame.size.width.0, s.frame.size.height.0);
             for native in &mut s.natives {
                 native.rect = rect;
             }
@@ -474,12 +480,16 @@ fn host(view: &NshView, widget: &gtk::Widget, sized: bool) {
     });
 }
 
-fn bounds(width: f32, height: f32) -> Rect {
-    Rect {
-        x: 0.0,
-        y: 0.0,
-        width,
-        height,
+fn bounds(width: f32, height: f32) -> Bounds<Points> {
+    Bounds {
+        origin: Point {
+            x: Points(0.0),
+            y: Points(0.0),
+        },
+        size: Size {
+            width: Points(width),
+            height: Points(height),
+        },
     }
 }
 
@@ -617,7 +627,9 @@ impl VideoHost {
                 picture.set_content_fit(match p.resize_mode {
                     ResizeMode::Cover => gtk::ContentFit::Cover,
                     ResizeMode::Stretch => gtk::ContentFit::Fill,
-                    ResizeMode::Center => gtk::ContentFit::ScaleDown,
+                    // GTK draws no picture at its natural size in a box of
+                    // another: `center` shrinks it to fit, as `scale-down`.
+                    ResizeMode::Center | ResizeMode::ScaleDown => gtk::ContentFit::ScaleDown,
                     ResizeMode::Contain => gtk::ContentFit::Contain,
                 });
             } else if let Some(video) = widget.downcast_ref::<gtk::Video>() {

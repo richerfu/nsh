@@ -12,6 +12,7 @@ import android.util.SparseLongArray;
 import android.view.View;
 import android.view.animation.AccelerateDecelerateInterpolator;
 import android.view.animation.AccelerateInterpolator;
+import android.view.animation.AnimationUtils;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.LinearInterpolator;
 import android.view.ViewConfiguration;
@@ -64,10 +65,9 @@ final class Mounter {
     boolean rtl;
     /** The app's appearance (`nsh_core::platform::Appearance`): 0 the system's, 1 light, 2 dark. */
     int appearance;
-    /** The status bar the app asked for last (style, hidden, background), applied again when the appearance changes. */
+    /** The status bar the app asked for last (style, hidden), applied again when the appearance changes. */
     private int barStyle = -1;
     private boolean barHidden;
-    private Integer barBackground;
 
     /** Dark appearance as shown: the app's, else the system's. */
     boolean night() {
@@ -78,7 +78,7 @@ final class Mounter {
 
     /** A screen's options (`encode.rs` `screen_config`). */
     static final class ScreenOptions {
-        String title;
+        String title, backTitle;
         boolean shown = true, transparent, backVisible = true, gesture = true, preventBack;
         int tint, background, titleColor, animation, left = -1, right = -1, titleView = -1;
         float headerHeight;
@@ -96,11 +96,12 @@ final class Mounter {
 
     /** One part of a layout animation (`encode.rs` `layout_transition`). */
     private static final class Transition {
-        int curve; // 0 linear, 1 ease in, 2 ease out, 3 ease in-out, 4 spring
+        int curve; // 0 linear, 1 ease in, 2 ease out, 3 ease in-out, 4 spring, 5 the keyboard's
         float damping;
         int property; // 0 opacity, 1 scale
         long duration, delay;
 
+        /** The curve's interpolator; the keyboard's (5) is {@link Mounter#interpolator}'s. */
         TimeInterpolator interpolator() {
             switch (curve) {
                 case 0: return new LinearInterpolator();
@@ -122,17 +123,37 @@ final class Mounter {
     final Images images;
     final SparseArray<View> views = new SparseArray<>();
     private final SparseArray<Dynamic> statics = new SparseArray<>();
+    /** The events each view listens to: kinds below 64 here, ... */
     private final SparseLongArray events = new SparseLongArray();
+    /** ... and kinds 64 and up (`kind - 64`) here. */
+    private final SparseLongArray eventsHigh = new SparseLongArray();
     /** Views listening to touches: the touch trackers run while there are any. */
     int touchListeners;
     /** One per root view (the surface, modals). */
     final java.util.ArrayList<TouchTracker> touchTrackers = new java.util.ArrayList<>();
     /** The text with a selection (one at a time, as in TextView). */
     TextBox selectedText;
+    /** The selection area with a selection (one per surface, a text's or an area's). */
+    SelectionArea selectedArea;
+    /** Selection areas (`ViewProps.selection_area`), by view. */
+    private final SparseArray<SelectionArea> selectionAreas = new SparseArray<>();
 
     /** A finger went down at the screen point: a selection elsewhere ends. */
     void touchDown(float rawX, float rawY) {
         if (selectedText != null && !selectedText.selectionContains(rawX, rawY)) selectedText.clearSelection();
+        if (selectedArea != null && !selectedArea.selectionContains(rawX, rawY)) selectedArea.clear();
+    }
+
+    /** The outermost selection area {@code text} is in (an area inside another is part of it), or null. */
+    SelectionArea selectionAreaOf(TextBox text) {
+        if (selectionAreas.size() == 0) return null;
+        SelectionArea outer = null;
+        for (Object v = text; v instanceof View; v = ((View) v).getParent()) {
+            if (!(v instanceof Node)) continue;
+            SelectionArea area = selectionAreas.get(((Node) v).nodeId());
+            if (area != null && area.view == v) outer = area;
+        }
+        return outer;
     }
     /** Scroll views a JS responder keeps from scrolling. */
     private final java.util.ArrayList<ScrollBox> blockedScrolls = new java.util.ArrayList<>();
@@ -172,7 +193,25 @@ final class Mounter {
         this.context = host.getContext();
         this.density = host.getResources().getDisplayMetrics().density;
         this.images = images;
+        components.put(TabBarComponent.NAME, c -> new TabBarComponent(context, c, this::night));
         images.redirects = (base, location) -> Native.mediaRedirect(handle(), base, location);
+        images.inline = uri -> {
+            long handle = handle();
+            return handle == 0 ? null : Native.imageBytes(handle, uri);
+        };
+        images.disk = new Images.DiskCache() {
+            @Override
+            public Object lookup(String url) {
+                long handle = handle();
+                return handle == 0 ? null : Native.imageCacheLookup(handle, url);
+            }
+
+            @Override
+            public byte[] complete(String url, int status, String[] headers, byte[] body) {
+                long handle = handle();
+                return handle == 0 ? null : Native.imageCacheComplete(handle, url, status, headers, body);
+            }
+        };
         root = new Box(context, this, 1);
         views.put(1, root);
     }
@@ -222,12 +261,17 @@ final class Mounter {
                         linkData[i * 3 + 1] = b.getInt();
                         linkData[i * 3 + 2] = b.getInt();
                         linkEvents[i] = (b.getInt() & 0xffffffffL) | ((long) b.getInt() << 32);
+                        // Kinds 64 and up: spans take presses and hover only,
+                        // all below 64.
+                        b.getInt();
+                        b.getInt();
                     }
-                    boolean selectable = b.getInt() != 0;
+                    // `selectable`: 1 asked for, 0 refused, 2 unset (`encode.rs`).
+                    int selectable = b.getInt();
                     Integer selectionColor = optColor(b);
                     if (v instanceof TextBox) {
                         TextBox t = (TextBox) v;
-                        t.setSelectable(selectable, selectionColor);
+                        t.setSelectable(selectable == 1, selectable == 0, selectionColor);
                         t.setLayout((Layout) layout, x * density, y * density, w * density, h * density);
                         t.setLinks(linkData, linkEvents);
                         if (links > 0 && t.press == null) t.press = new Pressable(t, this, t.id);
@@ -238,10 +282,14 @@ final class Mounter {
                 case EVENTS: {
                     int id = b.getInt();
                     long mask = (b.getInt() & 0xffffffffL) | ((long) b.getInt() << 32);
+                    long high = (b.getInt() & 0xffffffffL) | ((long) b.getInt() << 32);
+                    if (high != 0) eventsHigh.put(id, high);
+                    else eventsHigh.delete(id);
                     long touch = 1L << Native.TOUCH;
                     if ((events.get(id) & touch) != (mask & touch)) touchListeners += (mask & touch) != 0 ? 1 : -1;
                     events.put(id, mask);
                     View v = views.get(id);
+                    if (v != null) updateHover(id, v);
                     if (v instanceof Box) {
                         ((Box) v).events = mask;
                         v.setClickable((mask & (1L << Native.PRESS)) != 0);
@@ -264,7 +312,19 @@ final class Mounter {
                     int id = b.getInt(), uri = b.getInt(), mode = b.getInt();
                     String placeholder = optString(b, objects);
                     float blur = b.getFloat(), fade = b.getFloat();
+                    int xFlags = b.getInt();
+                    float x = b.getFloat();
+                    int yFlags = b.getInt();
+                    float y = b.getFloat();
                     image(id, uri >= 0 ? (String) objects[uri] : null, mode, placeholder, px(blur), fade < 0 ? -1 : Math.round(fade));
+                    View iv = views.get(id);
+                    if (iv instanceof ImageBox) {
+                        ImageBox image = (ImageBox) iv;
+                        // Lengths in pixels; fractions stay fractions of the free space.
+                        image.positionX = (xFlags & 2) != 0 ? x : x * density;
+                        image.positionY = (yFlags & 2) != 0 ? y : y * density;
+                        image.positionFlags = (xFlags & 3) | ((yFlags & 3) << 2);
+                    }
                     break;
                 }
                 case SCROLL_CONFIG: {
@@ -305,7 +365,16 @@ final class Mounter {
                 }
                 case APPEARANCE: {
                     appearance = b.getInt();
-                    if (barStyle == 0) SystemUi.statusBar(context, barStyle, barHidden, barBackground, night());
+                    for (int i = 0; i < views.size(); i++) {
+                        View v = views.valueAt(i);
+                        if (v instanceof ComponentBox && ((ComponentBox) v).component instanceof TabBarComponent) {
+                            ((TabBarComponent) ((ComponentBox) v).component).appearanceChanged();
+                        }
+                    }
+                    if (barStyle == 0) {
+                        SystemUi.statusBar(context, barStyle, barHidden, night());
+                        for (ModalHost m : shownModals) m.statusBar(barStyle, barHidden, night());
+                    }
                     break;
                 }
                 case LAYOUT_DIRECTION: {
@@ -406,13 +475,11 @@ final class Mounter {
                     ModalHost modal = modals.get(b.getInt());
                     int animation = b.getInt();
                     b.getInt(); // presentation: Android modals cover the window
-                    boolean transparent = b.getInt() != 0;
                     boolean translucent = b.getInt() != 0;
-                    boolean dismissible = b.getInt() != 0;
+                    boolean closeOnEscape = b.getInt() != 0;
                     if (modal != null) {
                         modal.animation = animation;
-                        modal.dismissible = dismissible;
-                        modal.transparent = transparent;
+                        modal.closeOnEscape = closeOnEscape;
                         modal.setStatusBarTranslucent(translucent);
                     }
                     break;
@@ -467,6 +534,41 @@ final class Mounter {
         created.clear();
         finishNavigation();
         outputs(Native.afterBatch(handle(), seq));
+    }
+
+    // --- The keyboard's motion --------------------------------------------------
+
+    /** How the software keyboard last moved: what curve 5 follows (`LayoutCurve::Keyboard`). */
+    private TimeInterpolator keyboardInterpolator = new AccelerateDecelerateInterpolator();
+    private long keyboardDuration = 250;
+    /** When it started to move ({@link AnimationUtils#currentAnimationTimeMillis}). */
+    private long keyboardStart = Long.MIN_VALUE;
+
+    /** The keyboard starts to move, along {@code interpolator} for {@code duration} ms. */
+    void keyboardMotion(TimeInterpolator interpolator, long duration) {
+        keyboardInterpolator = interpolator != null ? interpolator : new AccelerateDecelerateInterpolator();
+        keyboardDuration = duration;
+        keyboardStart = AnimationUtils.currentAnimationTimeMillis();
+    }
+
+    private TimeInterpolator interpolator(Transition t) {
+        return t.curve == 5 ? keyboardInterpolator : t.interpolator();
+    }
+
+    /**
+     * Starts {@code a}; on the keyboard's curve, as if it had started when
+     * the keyboard did, so that it keeps pace with the keyboard however late
+     * the batch came (the engine thread answers the insets a frame or more
+     * after the system dispatched them).
+     */
+    private void start(ValueAnimator a, Transition t) {
+        a.start();
+        if (t.curve == 5) keyboardAligned(a);
+    }
+
+    private void keyboardAligned(ValueAnimator a) {
+        long elapsed = AnimationUtils.currentAnimationTimeMillis() - keyboardStart - a.getStartDelay();
+        if (elapsed > 0 && elapsed < a.getDuration()) a.setCurrentPlayTime(elapsed);
     }
 
     private static Transition transition(ByteBuffer b) {
@@ -533,9 +635,25 @@ final class Mounter {
         if (layoutAnimation != null) created.add(id);
     }
 
-    /** The components the app registered ({@link NshView#registerComponent}). */
+    /**
+     * The components the app registered ({@link NshView#registerComponent}),
+     * and NSH's own (named under {@code nsh/}), which the app cannot replace.
+     */
     final java.util.Map<String, NshComponent.Factory> components = new java.util.HashMap<>();
     private final java.util.Set<String> missingComponents = new java.util.HashSet<>();
+
+    /**
+     * The app stopped (the view was destroyed, or another app replaced it):
+     * its native components hear {@link NshComponent#destroy} now, since no
+     * {@code DELETE} follows for them. Those already deleted are not told
+     * again.
+     */
+    void destroyComponents() {
+        for (int i = 0; i < views.size(); i++) {
+            View v = views.valueAt(i);
+            if (v instanceof ComponentBox) ((ComponentBox) v).destroy();
+        }
+    }
 
     /** Makes registered component {@code name} in box {@code id}. */
     private void component(int id, String name) {
@@ -607,7 +725,7 @@ final class Mounter {
         ValueAnimator a = ValueAnimator.ofFloat(0, 1);
         a.setDuration(t.duration);
         a.setStartDelay(t.delay);
-        a.setInterpolator(t.interpolator());
+        a.setInterpolator(interpolator(t));
         float alpha = v.getAlpha(), sx = v.getScaleX(), sy = v.getScaleY();
         a.addUpdateListener(x -> {
             float f = 1 - (float) x.getAnimatedValue();
@@ -637,7 +755,7 @@ final class Mounter {
             }
         });
         layoutAnimators.put(id, a);
-        a.start();
+        start(a, t);
     }
 
     /** Fades or grows in the views a layout animation created. */
@@ -656,7 +774,7 @@ final class Mounter {
             ValueAnimator a = ValueAnimator.ofFloat(0, 1);
             a.setDuration(t.duration);
             a.setStartDelay(t.delay);
-            a.setInterpolator(t.interpolator());
+            a.setInterpolator(interpolator(t));
             a.addUpdateListener(x -> {
                 float f = (float) x.getAnimatedValue();
                 if (t.property == 1) {
@@ -666,7 +784,7 @@ final class Mounter {
                     v.setAlpha(alpha * f);
                 }
             });
-            a.start();
+            start(a, t);
         }
     }
 
@@ -682,6 +800,11 @@ final class Mounter {
         }
         View v = views.get(id);
         if (v instanceof StackBox) stacks.remove(v);
+        SelectionArea area = selectionAreas.get(id);
+        if (area != null) {
+            area.clear();
+            selectionAreas.remove(id);
+        }
         screenOptions.remove(id);
         Animator running = layoutAnimators.get(id);
         if (running != null) running.cancel();
@@ -699,6 +822,7 @@ final class Mounter {
         mirrors.delete(id);
         if ((events.get(id) & (1L << Native.TOUCH)) != 0) touchListeners--;
         events.delete(id);
+        eventsHigh.delete(id);
         slops.remove(id);
         a11y.remove(id);
     }
@@ -739,7 +863,7 @@ final class Mounter {
             ValueAnimator a = ValueAnimator.ofFloat(0, 1);
             a.setDuration(t.duration);
             a.setStartDelay(t.delay);
-            a.setInterpolator(t.interpolator());
+            a.setInterpolator(interpolator(t));
             a.addUpdateListener(x2 -> {
                 float k = (float) x2.getAnimatedValue();
                 f.left = Math.round(from[0] + (to[0] - from[0]) * k);
@@ -750,7 +874,7 @@ final class Mounter {
             });
             if (running != null) running.cancel();
             layoutAnimators.put(id, a);
-            a.start();
+            start(a, t);
         } else {
             f.left = to[0];
             f.top = to[1];
@@ -1013,20 +1137,51 @@ final class Mounter {
         trackedStates.put(id, states);
         View v = views.get(id);
         if (v == null) return;
-        if ((states & STATE_HOVERED) != 0) {
-            v.setOnHoverListener((view, e) -> {
-                int action = e.getActionMasked();
-                if (action == android.view.MotionEvent.ACTION_HOVER_ENTER) reportState(id, STATE_HOVERED, true);
-                else if (action == android.view.MotionEvent.ACTION_HOVER_EXIT) reportState(id, STATE_HOVERED, false);
-                return false;
-            });
-        } else {
+        updateHover(id, v);
+    }
+
+    private static final long HOVER_EVENTS =
+            (1L << Native.HOVER_IN) | (1L << Native.HOVER_OUT) | (1L << Native.HOVER_MOVE);
+
+    /**
+     * Mice and styluses hovering `v`: its `hover:` state and its hover events
+     * (moves come with no button down).
+     */
+    private void updateHover(int id, View v) {
+        if ((trackedStates.get(id) & STATE_HOVERED) == 0 && (events.get(id) & HOVER_EVENTS) == 0) {
             v.setOnHoverListener(null);
+            return;
         }
-        if ((states & STATE_PRESSED) != 0 && !v.isClickable()) {
-            // Presses reach views that report them.
-            v.setClickable(true);
-        }
+        v.setOnHoverListener((view, e) -> {
+            int action = e.getActionMasked();
+            if (action == android.view.MotionEvent.ACTION_HOVER_ENTER) {
+                reportState(id, STATE_HOVERED, true);
+                if (wants(id, Native.HOVER_IN)) event(id, Native.HOVER_IN);
+            } else if (action == android.view.MotionEvent.ACTION_HOVER_EXIT) {
+                reportState(id, STATE_HOVERED, false);
+                if (wants(id, Native.HOVER_OUT)) event(id, Native.HOVER_OUT);
+                return false;
+            }
+            if (wants(id, Native.HOVER_MOVE)) hoverMove(id, view, e);
+            return false;
+        });
+    }
+
+    /** `onHoverMove`: where the pointer is in `v` and in its root view (dp). */
+    private void hoverMove(int id, View v, android.view.MotionEvent e) {
+        // The surface, or the window of the modal the view is in.
+        View root = v.getRootView() == host.getRootView() ? host : v.getRootView();
+        int[] at = new int[2], rootAt = new int[2];
+        v.getLocationOnScreen(at);
+        root.getLocationOnScreen(rootAt);
+        int meta = e.getMetaState(), modifiers = 0;
+        if ((meta & android.view.KeyEvent.META_CTRL_ON) != 0) modifiers |= 1;
+        if ((meta & android.view.KeyEvent.META_ALT_ON) != 0) modifiers |= 2;
+        if ((meta & android.view.KeyEvent.META_SHIFT_ON) != 0) modifiers |= 4;
+        if ((meta & android.view.KeyEvent.META_META_ON) != 0) modifiers |= 8;
+        float d = density;
+        Native.hover(handle(), id, e.getX() / d, e.getY() / d,
+                (e.getX() + at[0] - rootAt[0]) / d, (e.getY() + at[1] - rootAt[1]) / d, modifiers);
     }
 
     /** An interaction state of `id` changed: tells the core if it reads it. */
@@ -1108,9 +1263,8 @@ final class Mounter {
         v.setCameraDistance(density * density * distance * (float) Math.sqrt(5));
     }
 
-    /** Press feedback of a view: `activeOpacity`, `delayLongPress`, `android_ripple`. */
+    /** Press feedback of a view: `delayLongPress`, `android_ripple`. */
     static final class Feedback {
-        float activeOpacity = Float.NaN;
         int longPressDelay = -1;
         android.graphics.drawable.RippleDrawable ripple;
         boolean rippleForeground;
@@ -1124,10 +1278,14 @@ final class Mounter {
         return f != null && f.longPressDelay >= 0 ? f.longPressDelay : ViewConfiguration.getLongPressTimeout();
     }
 
-    /** Whether presses on {@code id} show feedback (so the view takes them). */
+    /**
+     * Whether presses on {@code id} show feedback. A view that also handles
+     * presses shows it itself; for one that does not, the root's
+     * `TouchTracker` does, and the view stays unclickable.
+     */
     boolean hasPressFeedback(int id) {
         Feedback f = feedback.get(id);
-        return tracksPress(id) || f != null && (!Float.isNaN(f.activeOpacity) || f.ripple != null);
+        return tracksPress(id) || f != null && f.ripple != null;
     }
 
     /** Shows (or ends) the press feedback of view {@code id}, pressed at ({@code x}, {@code y}). */
@@ -1135,9 +1293,6 @@ final class Mounter {
         reportState(id, STATE_PRESSED, pressed);
         Feedback f = feedback.get(id);
         if (f == null) return;
-        if (!Float.isNaN(f.activeOpacity)) {
-            v.animate().alpha(pressed ? baseOpacity(id) * f.activeOpacity : baseOpacity(id)).setDuration(pressed ? 100 : 250).start();
-        }
         if (f.ripple != null) {
             if (pressed) f.ripple.setHotspot(x, y);
             f.ripple.setState(pressed
@@ -1201,12 +1356,6 @@ final class Mounter {
         return 0x1f000000;
     }
 
-    /** The opacity a view returns to after a press (`activeOpacity`). */
-    float baseOpacity(int id) {
-        Dynamic d = statics.get(id);
-        return d != null ? d.opacity : 1;
-    }
-
     boolean hasHitSlop() {
         return slops.size() > 0;
     }
@@ -1220,7 +1369,6 @@ final class Mounter {
         View v = views.get(id);
         int pointerEvents = b.getInt();
         float[] slop = {b.getFloat() * density, b.getFloat() * density, b.getFloat() * density, b.getFloat() * density};
-        float activeOpacity = b.getFloat();
         A11y a = new A11y(this, id);
         a.accessible = b.getInt();
         a.label = string(objects, b.getInt());
@@ -1257,18 +1405,20 @@ final class Mounter {
         } else {
             panActivations.remove(id);
         }
+        boolean selectionArea = b.getInt() != 0;
         if (v == null) return;
+        SelectionArea area = selectionAreas.get(id);
+        if (selectionArea && (area == null || area.view != v)) {
+            if (area != null) area.clear();
+            selectionAreas.put(id, new SelectionArea(this, v));
+        } else if (!selectionArea && area != null) {
+            area.clear();
+            selectionAreas.remove(id);
+        }
         Feedback f = feedback.get(id);
         if (f == null) feedback.put(id, f = new Feedback());
-        f.activeOpacity = activeOpacity;
         f.longPressDelay = longPressDelay >= 0 ? Math.round(longPressDelay) : -1;
         setRipple(v, f, ripple, rippleColor, rippleRadius);
-        // Feedback alone makes text and images take presses.
-        if (hasPressFeedback(id)) {
-            if (v instanceof TextBox && ((TextBox) v).press == null) ((TextBox) v).press = new Pressable(v, this, id);
-            if (v instanceof ImageBox && ((ImageBox) v).press == null) ((ImageBox) v).press = new Pressable(v, this, id);
-            if (v instanceof TextBox || v instanceof ImageBox) v.setClickable(true);
-        }
         if (slop[0] != 0 || slop[1] != 0 || slop[2] != 0 || slop[3] != 0) slops.put(id, slop);
         else slops.remove(id);
         if (v instanceof Box) {
@@ -1285,25 +1435,46 @@ final class Mounter {
     }
 
     /** Applies `[animating, (view, prop, value)*]` from the animator. */
-    /** A canvas's drawing; loads the images it draws. */
+    /** A canvas's drawing; loads the images it draws (bitmaps: an SVG is an image that failed to load). */
     private void drawing(CanvasBox canvas, int[] code, Object[] objects) {
         for (String uri : canvas.setDrawing(code, objects)) {
             if (canvas.images.containsKey(uri)) continue;
             // At their natural size: the drawing may scale them anyway.
             Images.Image cached = images.request(uri, 0, 0, (image, error) -> {
-                if (image != null) {
+                if (image != null && !image.vector) {
                     canvas.images.put(uri, image);
                     canvas.invalidate();
                 } else {
-                    android.util.Log.w("nsh", "canvas image failed: " + error);
+                    android.util.Log.w("nsh", "canvas image failed: " + (image != null ? notABitmap(uri) : error));
                 }
             });
-            if (cached != null) canvas.images.put(uri, cached);
+            if (cached != null && cached.vector) android.util.Log.w("nsh", "canvas image failed: " + notABitmap(uri));
+            else if (cached != null) canvas.images.put(uri, cached);
         }
     }
 
-    /** Canvas native value slot `n` arrives as property `CANVAS_ARG + n` (`animation.rs`). */
+    private static String notABitmap(String uri) {
+        return uri + " is an SVG image: canvases draw bitmaps (PNG, JPEG, ...)";
+    }
+
+    /** Canvas animated value slot `n` arrives as property `CANVAS_ARG + n` (`animation.rs`). */
     private static final int CANVAS_ARG = 1000;
+
+    /** How much further each sticky cell sticks (px; an animated `StickyCell::offset`). */
+    private final java.util.HashMap<Integer, Float> stickyOffsets = new java.util.HashMap<>();
+    /** The scroll view that pins each sticky cell. */
+    final java.util.HashMap<Integer, ScrollBox> stickyHosts = new java.util.HashMap<>();
+
+    /** How much further sticky cell `id` sticks (px). */
+    float stickyOffset(int id) {
+        Float offset = stickyOffsets.get(id);
+        return offset == null ? 0 : offset;
+    }
+
+    /** Sticky cell `id` sticks no animated value further in (until an output says so). */
+    void forgetStickyOffset(int id) {
+        stickyOffsets.remove(id);
+    }
 
     void outputs(float[] out) {
         if (out == null || out.length == 0) return;
@@ -1371,6 +1542,14 @@ final class Mounter {
                         decor.shadowRadius = radius;
                         v.invalidate();
                     }
+                    break;
+                }
+                case 15: {
+                    // A sticky cell sticks further in: its scroll view pins it again.
+                    int id = Float.floatToRawIntBits(out[i]);
+                    Float old = stickyOffsets.put(id, value * density);
+                    ScrollBox s = stickyHosts.get(id);
+                    if (s != null && (old == null || old != value * density)) s.pinSticky();
                     break;
                 }
                 default: break;
@@ -1448,6 +1627,7 @@ final class Mounter {
         o.right = b.getInt();
         o.titleView = b.getInt();
         o.headerHeight = b.getFloat();
+        o.backTitle = string(objects, b.getInt());
         screenOptions.put(id, o);
         dirtyScreens.add(id);
         int stack = hosts.get(id, -1);
@@ -1475,10 +1655,13 @@ final class Mounter {
             ScreenOptions o = screenOptions.get(id);
             if (!(v instanceof StackBox.ScreenBox) || o == null) continue;
             View stack = views.get(hosts.get(id, -1));
-            boolean canGoBack = stack instanceof StackBox && ((StackBox) stack).screens.indexOf(id) > 0;
+            int index = stack instanceof StackBox ? ((StackBox) stack).screens.indexOf(id) : -1;
+            boolean canGoBack = index > 0;
+            // The up arrow is named after the screen it leads back to.
+            ScreenOptions below = canGoBack ? screenOptions.get(((StackBox) stack).screens.get(index - 1)) : null;
             ((StackBox.ScreenBox) v).configure(this, o.title, o.shown, o.transparent, o.tint, o.background,
                     o.titleColor, o.backVisible, o.gesture, o.preventBack, o.animation, o.left, o.right, o.titleView,
-                    o.headerHeight, canGoBack);
+                    o.headerHeight, canGoBack, below != null ? below.backTitle : null);
             reportScreenInsets(id, o);
         }
         dirtyScreens.clear();
@@ -1489,6 +1672,7 @@ final class Mounter {
                 modal.show();
                 shownModals.remove(modal);
                 shownModals.add(modal);
+                if (barStyle >= 0) modal.statusBar(barStyle, barHidden, night());
             } else {
                 modal.dismiss();
                 shownModals.remove(modal);
@@ -1498,7 +1682,7 @@ final class Mounter {
         updateBack();
     }
 
-    /** A screen's insets below its header, for `useSafeAreaInsets()`. */
+    /** A screen's insets below its header, for `safeAreaInsets()`. */
     private void reportScreenInsets(int id, ScreenOptions o) {
         float top = o.shown && !o.transparent ? 0 : host.safeTop();
         insets(id, top, host.safeRight(), host.safeBottom(), host.safeLeft());
@@ -1517,7 +1701,7 @@ final class Mounter {
 
     /**
      * Whether the back button means something to the app now. Decided from
-     * what is mounted (modals, stacks, `preventBack`, a `BackHandler`), never
+     * what is mounted (modals, stacks, `popOnBack`, a `BackHandler`), never
      * by asking JS: the system asks synchronously.
      */
     boolean wantsBack() {
@@ -1542,7 +1726,7 @@ final class Mounter {
         return null;
     }
 
-    /** A modal closed itself (`dismissible`): the back button no longer goes to it. */
+    /** A modal closed itself (`closeOnEscape`): the back button no longer goes to it. */
     void modalClosed(ModalHost modal) {
         shownModals.remove(modal);
         updateBack();
@@ -1620,7 +1804,7 @@ final class Mounter {
             Images.Image cached = images.request(image.uri, maxPx, image.blurPx, image.callback);
             if (cached != null) {
                 image.requestedPx = 0;
-                image.setImage(cached.content, 0);
+                image.setImage(cached, 0);
                 image.imageShown = true;
                 loaded(image, cached);
             } else if (wants(image.id, Native.LOAD_START)) {
@@ -1633,7 +1817,7 @@ final class Mounter {
             Images.Image cached = images.request(image.placeholderUri, maxPx, 0, image.placeholderCallback);
             if (cached != null) {
                 image.placeholderPx = 0;
-                image.setImage(cached.content, 0);
+                image.setImage(cached, 0);
             }
         }
     }
@@ -1653,7 +1837,7 @@ final class Mounter {
         if (views.get(id) != image) return;
         if (result != null) {
             // React Native fades in images on Android (300 ms by default).
-            image.setImage(result.content, image.fadeMs < 0 ? 300 : image.fadeMs);
+            image.setImage(result, image.fadeMs < 0 ? 300 : image.fadeMs);
             image.imageShown = true;
             loaded(image, result);
         } else {
@@ -1666,10 +1850,10 @@ final class Mounter {
     private void placeholderDone(ImageBox image, Images.Image result) {
         image.placeholderPx = 0;
         if (views.get(image.id) != image || image.imageShown || result == null) return;
-        image.setImage(result.content, 0);
+        image.setImage(result, 0);
     }
 
-    /** `onLoad` reports the source's size in pixels, as on iOS. */
+    /** `onLoad` reports the source's size in pixels (an SVG's: in points), as on iOS. */
     private void loaded(ImageBox image, Images.Image result) {
         if (wants(image.id, Native.LOAD)) event(image.id, Native.LOAD, null, 0, result.width, result.height);
         if (wants(image.id, Native.LOAD_END)) event(image.id, Native.LOAD_END);
@@ -1699,7 +1883,9 @@ final class Mounter {
         String autofill = optString(b, objects);
         boolean inputRtl = b.getInt() != 0;
         boolean caretHidden = b.getInt() != 0;
+        boolean pasteInserts = b.getInt() != 0;
         if (!(v instanceof InputBox)) return;
+        ((InputBox) v).pasteInserts = pasteInserts;
         ((InputBox) v).edit.setCursorVisible(!caretHidden);
         ((InputBox) v).setAutofill(autofill);
         ((InputBox) v).edit.setLayoutDirection(inputRtl ? View.LAYOUT_DIRECTION_RTL : View.LAYOUT_DIRECTION_LTR);
@@ -1753,11 +1939,10 @@ final class Mounter {
                 int style = b.getInt();
                 boolean hidden = b.getInt() != 0;
                 b.getInt(); // animated: the system animates bar changes
-                Integer background = optColor(b);
                 barStyle = style;
                 barHidden = hidden;
-                barBackground = background;
-                SystemUi.statusBar(context, style, hidden, background, night());
+                SystemUi.statusBar(context, style, hidden, night());
+                for (ModalHost m : shownModals) m.statusBar(style, hidden, night());
                 break;
             }
             case 12: {
@@ -1818,6 +2003,24 @@ final class Mounter {
             }
             case 22: {
                 SystemUi.setClipboard(context, (String) objects[b.getInt()]);
+                break;
+            }
+            case 25: {
+                Picker.Request request = new Picker.Request();
+                request.id = b.getInt();
+                request.limit = b.getInt();
+                request.maxDimension = b.getInt();
+                request.quality = b.getFloat();
+                request.current = b.getInt() != 0;
+                request.view = host;
+                Picker.show(context, request);
+                break;
+            }
+            case 26: {
+                int request = b.getInt();
+                String url = (String) objects[b.getInt()];
+                boolean opened = SystemUi.openUrl(context, url);
+                eventMap(1, Native.OPEN_URL, new String[] {"id", "opened"}, new Object[] {(double) request, opened});
                 break;
             }
             case 23: {
@@ -1900,8 +2103,10 @@ final class Mounter {
                 int mode = b.getInt();
                 boolean controls = b.getInt() != 0;
                 float interval = b.getFloat();
+                int audioSession = b.getInt();
                 if (v instanceof VideoBox) {
-                    ((VideoBox) v).configure(source, paused, muted, volume, rate, repeat, mode, controls, interval);
+                    ((VideoBox) v).configure(source, paused, muted, volume, rate, repeat, mode, controls, interval,
+                            audioSession);
                 }
                 break;
             }
@@ -1951,7 +2156,14 @@ final class Mounter {
         int margin = px(12);
         ScrollBox scroll = scrollAround(focused);
         if (scroll != null) {
-            scroll.reveal(focused, margin);
+            // With the keyboard: along its curve, from when it started.
+            ValueAnimator a = ValueAnimator.ofFloat(0, 1);
+            a.setDuration(keyboardDuration);
+            a.setInterpolator(keyboardInterpolator);
+            if (scroll.reveal(focused, margin, a)) {
+                a.start();
+                keyboardAligned(a);
+            }
         } else {
             Rect r = new Rect(0, -margin, focused.getWidth(), focused.getHeight() + margin);
             focused.requestRectangleOnScreen(r, false);
@@ -1970,7 +2182,14 @@ final class Mounter {
     // --- Events --------------------------------------------------------------
 
     boolean wants(int id, int kind) {
+        if (kind >= 64) return (eventsHigh.get(id) & (1L << (kind - 64))) != 0;
         return (events.get(id) & (1L << kind)) != 0;
+    }
+
+    /** Press callbacks claim a touch; visual feedback alone only observes it. */
+    boolean handlesPress(int id) {
+        return wants(id, Native.PRESS) || wants(id, Native.LONG_PRESS)
+                || wants(id, Native.PRESS_IN) || wants(id, Native.PRESS_OUT);
     }
 
     boolean hasPan(int id) {
@@ -2024,7 +2243,16 @@ final class Mounter {
         Native.event(handle(), id, kind, null, 0, 0, 0);
     }
 
+    /** `RequestClose` with what the user did (`cancel`, `swipe`). */
+    void requestClose(int id, String reason) {
+        eventMap(id, Native.REQUEST_CLOSE, new String[] {"reason"}, new Object[] {reason});
+    }
+
     /** An event with an object payload. */
+    void paste(int id, String text, byte[][] images, String[] uris) {
+        Native.paste(handle(), id, text, images, uris);
+    }
+
     void eventMap(int id, int kind, String[] keys, Object[] values) {
         Native.eventMap(handle(), id, kind, keys, values);
     }
@@ -2041,11 +2269,18 @@ final class Mounter {
         outputs(Native.scroll(handle(), id, x, y, applied));
     }
 
+    /** Scroll view {@code id} came to rest: snapping animated values settle. */
+    void scrollEnded(int id) {
+        outputs(Native.scrollEnded(handle(), id));
+    }
+
     void pan(int id, int state, float tx, float ty, float vx, float vy) {
+        if (state == 0) for (TouchTracker t : touchTrackers) t.cancelFeedback();
         outputs(Native.pan(handle(), id, state, tx, ty, vx, vy));
     }
 
     void transformGesture(int id, boolean rotation, int state, float amount, float velocity) {
+        if (state == 0) for (TouchTracker t : touchTrackers) t.cancelFeedback();
         outputs(Native.transformGesture(handle(), id, rotation, state, amount, velocity));
     }
 }

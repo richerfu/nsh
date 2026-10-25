@@ -40,6 +40,11 @@
   // A Rust app (`nsh.json` "root"): the runtime mounts its root; there are
   // no bundles. A change to its Rust code makes another runtime (above).
   const RUST = {{rust}};
+  // The runtime's wasm-bindgen glue (an app's crates that call JS through it).
+  const GLUE = {{glue}};
+  // The page's host (`nsh.json` `web.host`): its `createHost(player)` runs
+  // once the player exists, before the first bundle, as on a packaged page.
+  const HOST = {{host}};
   const status = document.getElementById("status");
   const problem = document.getElementById("problem");
   const decoder = new TextDecoder();
@@ -86,13 +91,25 @@
     return data;
   }
 
+  let host;
   const player = await createPlayer(document.getElementById("app"), {
     wasm: "./nsh.wasm",
+    glue: GLUE ?? undefined,
+    host: HOST ? { call: (name, args) => host.call(name, args) } : undefined,
     assetBase: "/assets/",
     readAsset,
     onLog: (level, message) => send({ type: "log", level: levels[level] ?? "info", target: "js", message }),
   });
   window.player = player;
+  if (HOST) {
+    try {
+      host = await (await import(HOST)).createHost(player);
+      if (typeof host?.call !== "function") throw new Error("createHost(player) returned no call(name, args)");
+    } catch (err) {
+      showProblem("nsh.json web.host", String(err?.stack ?? err));
+      host = { call: () => Promise.reject(new Error("nsh.json web.host did not load")) };
+    }
+  }
 
   function device() {
     const ua = navigator.userAgent;
@@ -120,7 +137,7 @@
         if (running?.session === session && running.version === message.version) return;
         running = { session, version: message.version };
         problem.hidden = true;
-        player.run(text(frames[0]), { capabilities: message.capabilities ?? "", sourceMap: text(frames[1]) });
+        player.run(text(frames[0]), { capabilities: message.capabilities ?? "", sourceMap: text(frames[1]), appId: message.app_id ?? "", limits: message.limits ?? null });
         return;
       }
     }
@@ -145,7 +162,7 @@
         return;
       }
       // No bytecode version: this host runs JS source.
-      send({ type: "hello", protocol: PROTOCOL, bytecode_version: "", device: device(), platform: "web", ui_sets: UI_SETS });
+      send({ type: "hello", protocol: PROTOCOL, bytecode_version: "", device: device(), platform: "web", ui_sets: UI_SETS, tests: player.takesTests });
     };
     socket.onmessage = (event) => {
       if (typeof event.data !== "string") {
@@ -162,11 +179,32 @@
       switch (message.type) {
         case "hello":
           session = message.session ?? 0;
+          // A test session (`nsh test --target web`): the model of the app
+          // starts before its first bundle.
+          if (message.test) player.testStart();
           showStatus("");
-          if (RUST && !running) {
+          // A test session's Rust app starts when the server says so,
+          // after what the test sets it up with.
+          if (RUST && !running && !message.test) {
             running = { session, version: 0 };
             player.runRust();
           }
+          break;
+        case "test_setup":
+          player.onTestSend = send;
+          player.testSetup(message.storage, message.trace, message.environment);
+          break;
+        case "fetch":
+          player.testFetchReply(message.id, message.reply);
+          break;
+        case "step":
+          send({ type: "step_done", id: message.id, outcome: player.testStep(message.step) });
+          break;
+        case "root":
+          // The app is this runtime's own Rust root (a test session's).
+          running = { session, version: 0 };
+          showStatus("");
+          player.runRust();
           break;
         case "building":
           showStatus("Building…");

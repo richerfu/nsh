@@ -5,7 +5,7 @@ use std::{
 };
 
 use nsh_core::{
-    AutoCapitalize, EventKind, EventPayload, InputConfig, KeyboardType, PayloadValue, Rect,
+    AutoCapitalize, EventKind, EventPayload, InputConfig, KeyboardType, PayloadValue,
     ReturnKeyType, SubmitBehavior, TextAlign,
 };
 use ohos_arkui_binding::{
@@ -18,7 +18,10 @@ pub(crate) use crate::interop::sdk::EditorEvent;
 use crate::{
     input::editor_state::{self, State},
     interop::sdk::{EditorAccessibility, EditorCommand, EditorRoute, EditorSettings},
-    render::node::{Error, Node, Result, callback},
+    render::{
+        geometry::Rect,
+        node::{Error, Node, Result, callback},
+    },
     text::typography::argb,
 };
 
@@ -236,7 +239,7 @@ impl Input {
             width: self.content.get().width as f64,
             height: self.content.get().height as f64,
             placeholder: config.placeholder.clone(),
-            font_size: config.style.font_size as f64,
+            font_size: config.style.font_size.0 as f64,
             font_weight: config.style.font_weight as u32,
             font_family: config
                 .style

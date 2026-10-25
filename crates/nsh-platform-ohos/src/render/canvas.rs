@@ -9,9 +9,9 @@ use std::{
     },
 };
 
-use nsh_animation::AnimationValue;
 use nsh_core::{
     Color, FontVariant,
+    animation::AnimationValue,
     canvas::{
         self, CanvasFont, CanvasOp as Op, CanvasTextAlign, CanvasTextBaseline, Composite, Drawing,
         FillRule, Num, Paint, PathOp,
@@ -437,13 +437,13 @@ impl Replay<'_> {
                 Op::LineCap(c) => self.state.cap = *c,
                 Op::LineJoin(j) => self.state.join = *j,
                 Op::MiterLimit(v) => self.state.miter = *v,
-                Op::LineDash(v) => self.state.dash = v.clone(),
+                Op::LineDash(v) => self.state.dash = v.iter().map(|p| p.0).collect(),
                 Op::LineDashOffset(v) => self.state.dash_offset = self.num(*v),
                 Op::GlobalAlpha(v) => self.state.alpha = self.num(*v).clamp(0.0, 1.0),
                 Op::Composite(c) => self.state.composite = *c,
                 Op::ShadowColor(c) => self.state.shadow = *c,
-                Op::ShadowBlur(v) => self.state.blur = *v,
-                Op::ShadowOffset(x, y) => self.state.offset = (*x, *y),
+                Op::ShadowBlur(v) => self.state.blur = v.0,
+                Op::ShadowOffset(p) => self.state.offset = (p.x.0, p.y.0),
                 Op::Font(f) => self.state.font = f.clone(),
                 Op::FontVariantNumeric(v) => self.state.numeric = *v,
                 Op::TextAlign(v) => self.state.align = *v,
@@ -463,7 +463,7 @@ impl Replay<'_> {
                     text,
                     self.num(*x),
                     self.num(*y),
-                    *max_width,
+                    max_width.map(|w| w.0),
                     matches!(op, Op::StrokeText { .. }),
                 ),
                 Op::DrawImage {
@@ -479,19 +479,26 @@ impl Replay<'_> {
                     {
                         let [x, y, w, h] = dest.map(|n| self.num(n));
                         let w = if w.is_nan() {
-                            source.map_or(bitmap.width() as f32, |s| s[2])
+                            source.map_or(bitmap.width() as f32, |s| s.size.width.0)
                         } else {
                             w
                         };
                         let h = if h.is_nan() {
-                            source.map_or(bitmap.height() as f32, |s| s[3])
+                            source.map_or(bitmap.height() as f32, |s| s.size.height.0)
                         } else {
                             h
                         };
                         self.matrix();
                         let brush = self.brush(&Paint::Color(Color(0xffffffff)));
                         self.canvas.attach_brush(&brush);
-                        let source = source.map(|[x, y, w, h]| Rect::new(x, y, x + w, y + h));
+                        let source = source.map(|s| {
+                            Rect::new(
+                                s.origin.x.0,
+                                s.origin.y.0,
+                                s.origin.x.0 + s.size.width.0,
+                                s.origin.y.0 + s.size.height.0,
+                            )
+                        });
                         self.canvas.draw_bitmap_rect(
                             bitmap,
                             source.as_ref(),
@@ -557,30 +564,42 @@ impl Replay<'_> {
             return None;
         };
         let colors: Vec<_> = g.stops.iter().map(|(_, c)| argb(*c)).collect();
-        let positions: Vec<_> = g.stops.iter().map(|(p, _)| *p).collect();
+        let positions: Vec<_> = g.stops.iter().map(|(p, _)| p.0).collect();
         match g.shape {
-            canvas::GradientShape::Linear([x0, y0, x1, y1]) => ShaderEffect::linear_gradient(
-                (x0, y0),
-                (x1, y1),
+            canvas::GradientShape::Linear { start, end } => ShaderEffect::linear_gradient(
+                (start.x.0, start.y.0),
+                (end.x.0, end.y.0),
                 &colors,
                 &positions,
                 TileMode::Clamp,
             ),
-            canvas::GradientShape::Radial([x0, y0, r0, x1, y1, r1]) => {
-                ShaderEffect::two_point_conical_gradient(
-                    (x0, y0),
-                    r0,
-                    (x1, y1),
-                    r1,
+            canvas::GradientShape::Radial {
+                start,
+                start_radius,
+                end,
+                end_radius,
+            } => ShaderEffect::two_point_conical_gradient(
+                (start.x.0, start.y.0),
+                start_radius.0,
+                (end.x.0, end.y.0),
+                end_radius.0,
+                &colors,
+                &positions,
+                TileMode::Clamp,
+                None,
+            ),
+            canvas::GradientShape::Conic {
+                start_angle,
+                center,
+            } => {
+                let stops: Vec<_> = g.stops.iter().map(|(p, c)| (p.0, *c)).collect();
+                let (colors, positions) = sweep_stops(&stops, start_angle.0);
+                ShaderEffect::conic_gradient(
+                    (center.x.0, center.y.0),
                     &colors,
                     &positions,
                     TileMode::Clamp,
-                    None,
                 )
-            }
-            canvas::GradientShape::Conic([angle, x, y]) => {
-                let (colors, positions) = sweep_stops(&g.stops, angle);
-                ShaderEffect::conic_gradient((x, y), &colors, &positions, TileMode::Clamp)
             }
         }
     }
@@ -650,7 +669,7 @@ impl Replay<'_> {
             ohos_drawing_binding::TextDirection::Ltr
         });
         let mut text_style = TextStyle::new();
-        text_style.set_font_size(font.size as f64);
+        text_style.set_font_size(font.size.0 as f64);
         text_style.set_font_style(FontStyle::new(
             FontWeight::from_css(font.weight),
             FontWidth::Normal,
@@ -698,7 +717,7 @@ impl Replay<'_> {
         };
         let ascent = paragraph
             .line_metrics(0)
-            .map_or(font.size * 0.8, |m| m.ascender as f32);
+            .map_or(font.size.0 * 0.8, |m| m.ascender as f32);
         let dy = match self.state.baseline {
             CanvasTextBaseline::Alphabetic => ascent,
             CanvasTextBaseline::Top => 0.0,
@@ -854,7 +873,12 @@ impl Geometry {
                 m,
                 [n(*x), n(*y), n(*radius), n(*radius), 0.0],
                 n(*start),
-                canvas::arc_sweep(n(*start), n(*end), *ccw),
+                canvas::arc_sweep(
+                    nsh_core::geometry::Radians(n(*start)),
+                    nsh_core::geometry::Radians(n(*end)),
+                    *ccw,
+                )
+                .0,
             ),
             PathOp::Ellipse {
                 geometry,
@@ -865,7 +889,12 @@ impl Geometry {
                 m,
                 geometry.map(n),
                 n(*start),
-                canvas::arc_sweep(n(*start), n(*end), *ccw),
+                canvas::arc_sweep(
+                    nsh_core::geometry::Radians(n(*start)),
+                    nsh_core::geometry::Radians(n(*end)),
+                    *ccw,
+                )
+                .0,
             ),
             PathOp::ArcTo(v) => self.arc_to(m, v.map(n)),
             PathOp::Rect(v) => self.rect(v.map(n), m),
@@ -881,7 +910,12 @@ impl Geometry {
                     r.swap(1, 2);
                 }
                 let [x, y, w, h] = [x.min(x + w), y.min(y + h), w.abs(), h.abs()];
-                let [tl, tr, br, bl] = canvas::fit_radii(w, h, r);
+                let [tl, tr, br, bl] = canvas::fit_radii(
+                    nsh_core::Size::new(nsh_core::Points(w), nsh_core::Points(h)),
+                    nsh_core::Corners::from(r.map(nsh_core::Points)),
+                )
+                .to_array()
+                .map(|p| p.0);
                 self.move_to(m.point(x + tl, y));
                 self.arc_to(m, [x + w, y, x + w, y + h, tr]);
                 self.arc_to(m, [x + w, y + h, x, y + h, br]);

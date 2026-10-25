@@ -20,7 +20,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
-use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, ROOT_ID, Size};
+use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, Points, ROOT_ID, Size};
 use nsh_engine::{Engine, EngineConfig, EngineControl, Environment, MountSink};
 use rustc_hash::FxHashMap;
 use windows::Win32::Foundation::{HWND, RECT};
@@ -131,18 +131,35 @@ pub(crate) struct Surface {
     pub(crate) target_scale: Cell<f32>,
     /// A paint is requested.
     invalid: Cell<bool>,
+    /// The next frame draws the whole window ([`Surface::invalidate`]).
+    full_damage: Cell<bool>,
+    /// Views that changed since the last frame
+    /// ([`Surface::invalidate_view`]).
+    dirty: RefCell<Vec<NshView>>,
     /// The environment the engine was last told about.
     pub(crate) environment: Cell<Environment>,
     /// The app's appearance (`nsh.json`, `setColorScheme`): the color
     /// scheme is the system's resolved with it ([`crate::system`]).
     pub(crate) appearance: Cell<nsh_core::platform::Appearance>,
+    /// The embedding app's locale and text size, standing in for the
+    /// system's ([`crate::AppView::set_locale`], `set_font_scale`).
+    pub(crate) host_environment: Cell<nsh_core::platform::HostEnvironment>,
+    /// The embedding app's theme overrides
+    /// ([`crate::AppView::set_theme_overrides`]): sent to every engine the
+    /// surface starts, before its first frame.
+    pub(crate) host_tokens: RefCell<Option<nsh_engine::Tokens>>,
     /// JS asked for a display frame.
     js_frame: Cell<bool>,
+    /// The performance monitor, while it measures ([`crate::fps`]).
+    fps: RefCell<Option<Rc<crate::fps::Fps>>>,
     /// Paces animation frames while something animates.
     ticker: RefCell<Option<crate::window::Ticker>>,
     /// Extra frame clients (transitions, glides, spinners): called on every
     /// frame until they return false ([`Surface::on_frame`]).
     frame_clients: RefCell<Vec<FrameClient>>,
+    /// The model of a test session's app (`nsh test --target windows`).
+    #[cfg(feature = "dev")]
+    test_model: RefCell<Option<std::sync::Arc<nsh_testing::agent::Model>>>,
     /// The time of the current frame (seconds since the surface was made).
     now: Cell<f64>,
     epoch: std::time::Instant,
@@ -150,12 +167,14 @@ pub(crate) struct Surface {
     on_hot_update_failed: RefCell<Option<Box<dyn Fn()>>>,
     /// Where `asset:/` image URIs resolve ([`crate::image::set_asset_base`]).
     pub(crate) asset_base: RefCell<Option<crate::image::AssetBase>>,
+    /// The disk cache of downloaded images ([`crate::image::set_disk_cache`]).
+    pub(crate) image_cache: RefCell<Option<nsh_core::image::DiskCache>>,
     /// Videos, web views and registered native components.
     pub(crate) native: crate::native::NativeState,
     /// The app's keyboard shortcuts ([`crate::keymap`]).
     pub(crate) keymap: crate::keymap::KeymapState,
     /// Hosted items drawn by the last frame ([`Hosted::placed`]).
-    placed: RefCell<Vec<Rc<dyn Hosted>>>,
+    placed: RefCell<Vec<(Rc<dyn Hosted>, RECT)>>,
     /// The window's composition while it has web views (each holds it).
     composition: RefCell<Weak<crate::compose::Composition>>,
     /// Composed items (web views) drawn by the last frame.
@@ -192,18 +211,27 @@ impl Surface {
             scale: Cell::new(1.0),
             pixels: Cell::new((0, 0)),
             swap: RefCell::new(None),
+            fps: RefCell::new(None),
             target_scale: Cell::new(0.0),
             invalid: Cell::new(false),
+            // The first frame draws everything.
+            full_damage: Cell::new(true),
+            dirty: RefCell::default(),
             environment: Cell::new(environment),
             appearance: Cell::default(),
+            host_environment: Cell::default(),
+            host_tokens: RefCell::new(None),
             js_frame: Cell::new(false),
             ticker: RefCell::new(None),
             frame_clients: RefCell::default(),
+            #[cfg(feature = "dev")]
+            test_model: RefCell::default(),
             now: Cell::new(0.0),
             epoch: std::time::Instant::now(),
             on_error: RefCell::new(None),
             on_hot_update_failed: RefCell::new(None),
             asset_base: RefCell::new(None),
+            image_cache: RefCell::new(None),
             native: Default::default(),
             keymap: Default::default(),
             placed: RefCell::default(),
@@ -215,9 +243,9 @@ impl Surface {
         });
         SURFACES.with(|s| s.borrow_mut().insert(key, Rc::downgrade(&surface)));
         let weak = Rc::downgrade(&surface);
-        root.set_invalidate(Rc::new(move || {
+        root.set_invalidate(Rc::new(move |view| {
             if let Some(surface) = weak.upgrade() {
-                surface.invalidate();
+                surface.invalidate_view(view);
             }
         }));
         surface
@@ -257,7 +285,7 @@ impl Surface {
     /// The surface's size in points.
     pub(crate) fn size(&self) -> (f32, f32) {
         let s = self.root.state();
-        (s.frame.width, s.frame.height)
+        (s.frame.size.width.0, s.frame.size.height.0)
     }
 
     /// The current frame's time (seconds, the animation clock).
@@ -270,12 +298,35 @@ impl Surface {
         self.epoch.elapsed().as_secs_f64()
     }
 
+    /// Measures the surface's frames and commits from now on; one
+    /// `nsh::perf` line a second ([`crate::fps`]). The ticker then runs on
+    /// every refresh.
+    pub(crate) fn enable_fps(self: &Rc<Self>) {
+        if self.fps.borrow().is_some() {
+            return;
+        }
+        let fps = Rc::new(crate::fps::Fps::new());
+        self.control(|c| c.set_perf_monitor(Some(fps.monitor.clone())));
+        *self.fps.borrow_mut() = Some(fps);
+        self.ensure_ticking();
+    }
+
+    /// The performance monitor, while one measures.
+    pub(crate) fn fps(&self) -> Option<Rc<crate::fps::Fps>> {
+        self.fps.borrow().clone()
+    }
+
     /// Starts `config`'s app, replacing what ran.
     pub(crate) fn start(self: &Rc<Self>, mut config: EngineConfig) {
         self.stop();
         let env = self.environment.get();
-        config.viewport = Size::new(env.window.0, env.window.1);
+        config.viewport = env.window;
         config.environment = env;
+        // A test session's app: the test's storage, network and trace.
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.borrow() {
+            model.set_up_engine(&mut config);
+        }
         let (tx, rx) = crossbeam_channel::unbounded();
         let pending = Arc::new(AtomicBool::new(false));
         let sink = Sink {
@@ -286,8 +337,25 @@ impl Surface {
         *self.rx.borrow_mut() = Some(rx);
         *self.pending.borrow_mut() = pending;
         let family = crate::text::ui_family();
-        match Engine::start(config, move || DWriteTextEngine::new(family), sink) {
+        // The embedding app's theme overrides are in the first frame.
+        let tokens = self.host_tokens.borrow().clone();
+        let setup = |control: &EngineControl| {
+            if tokens.is_some() {
+                control.set_tokens(tokens);
+            }
+        };
+        match Engine::start_with(config, move || DWriteTextEngine::new(family), sink, setup) {
             Ok(engine) => {
+                // The app's downloaded images go through its disk cache.
+                crate::image::set_disk_cache(self, engine.image_cache());
+                // The test moves its clock through the engine.
+                #[cfg(feature = "dev")]
+                if let Some(model) = &*self.test_model.borrow() {
+                    model.engine_started(engine.control());
+                }
+                if let Some(fps) = &*self.fps.borrow() {
+                    engine.control().set_perf_monitor(Some(fps.monitor.clone()));
+                }
                 *self.control.borrow_mut() = Some(engine.control());
                 *self.engine.borrow_mut() = Some(engine);
             }
@@ -343,7 +411,9 @@ impl Surface {
     }
 
     /// Updates the environment and tells the engine.
-    pub(crate) fn set_environment(&self, environment: Environment) {
+    pub(crate) fn set_environment(&self, mut environment: Environment) {
+        // The embedding app's settings over the system's.
+        self.host_environment.get().apply(&mut environment);
         if self.environment.replace(environment) != environment {
             self.control(|c| c.set_environment(environment));
             crate::system::environment_applied(self);
@@ -358,18 +428,18 @@ impl Surface {
         let height = pixels.1 as f32 / scale;
         {
             let mut s = self.root.state_mut();
-            if !scale_changed && s.frame.width == width && s.frame.height == height {
+            if !scale_changed && s.frame.size.width.0 == width && s.frame.size.height.0 == height {
                 return;
             }
-            s.frame.width = width;
-            s.frame.height = height;
+            s.frame.size.width.0 = width;
+            s.frame.size.height.0 = height;
         }
         let mut env = self.environment.get();
-        env.window = (width, height);
+        env.window = Size::new(Points(width), Points(height));
         env.pixel_ratio = scale;
         self.environment.set(env);
         self.control(|c| {
-            c.resize(Size::new(width, height));
+            c.resize(Size::new(Points(width), Points(height)));
             c.set_environment(env);
         });
         crate::navigation::surface_resized(self, width, height);
@@ -380,12 +450,60 @@ impl Surface {
         self.invalidate();
     }
 
-    /// Asks for the window to be drawn again (once, however often asked
-    /// before it is).
+    /// Asks for the whole window to be drawn again (once, however often
+    /// asked before it is).
     pub(crate) fn invalidate(&self) {
+        self.full_damage.set(true);
+        self.request_paint();
+    }
+
+    /// Asks for `view` and its subtree to be drawn again: where it was
+    /// drawn and where it draws now ([`Surface::take_damage`]).
+    pub(crate) fn invalidate_view(&self, view: &NshView) {
+        if !self.full_damage.get() {
+            view.set_queued(true);
+            self.dirty.borrow_mut().push(view.clone());
+        }
+        self.request_paint();
+    }
+
+    fn request_paint(&self) {
         if !self.invalid.replace(true) {
             crate::window::invalidate(self.hwnd());
         }
+    }
+
+    /// What changed since the last frame, in the window's DIPs: where the
+    /// changed views were painted and where they draw now. `None`: the
+    /// whole window (asked for, or a change whose area is not known).
+    pub(crate) fn take_damage(&self) -> Option<Vec<crate::view::WindowRect>> {
+        let dirty = std::mem::take(&mut *self.dirty.borrow_mut());
+        for view in &dirty {
+            view.set_queued(false);
+        }
+        if self.full_damage.replace(false) {
+            return None;
+        }
+        let mut rects = Vec::with_capacity(dirty.len() * 2);
+        for view in &dirty {
+            if let Some(old) = view.painted_subtree() {
+                rects.push(old);
+            }
+            let Some(world) = view.to_root() else {
+                // Out of the tree: only where it was.
+                continue;
+            };
+            if !world.is_affine() {
+                return None;
+            }
+            // Hosted items may draw outside their rectangles.
+            rects.push(
+                crate::render::drawn_area(view)
+                    .map(|area| crate::compose::map_bounds(&world.to_3x2(), &area))?,
+            );
+        }
+        // Asked to draw with nothing changed (the system's `WM_PAINT`).
+        (!rects.is_empty()).then_some(rects)
     }
 
     /// Draws the window (`WM_PAINT`).
@@ -395,19 +513,38 @@ impl Surface {
     }
 
     /// Hosted items drawn by the frame just shown, with their window
-    /// rectangles: tells them, and the ones no longer drawn.
-    pub(crate) fn items_placed(&self, drawn: Vec<(Rc<dyn Hosted>, RECT)>) {
+    /// rectangles: tells them, and the ones no longer drawn. `redrawn`: the
+    /// areas (pixels) a partial frame drew; items it did not reach outside
+    /// them stay where they were.
+    pub(crate) fn items_placed(
+        &self,
+        drawn: Vec<(Rc<dyn Hosted>, RECT)>,
+        redrawn: Option<&[RECT]>,
+    ) {
         let mut placed = self.placed.borrow_mut();
-        for old in placed.iter() {
-            if !drawn.iter().any(|(item, _)| Rc::ptr_eq(item, old)) {
+        let mut next: Vec<(Rc<dyn Hosted>, RECT)> = Vec::with_capacity(drawn.len());
+        for (item, rect) in drawn {
+            // A partial frame draws its areas one by one.
+            if !next.iter().any(|(i, _)| Rc::ptr_eq(i, &item)) {
+                next.push((item, rect));
+            }
+        }
+        for (old, rect) in placed.iter() {
+            if next.iter().any(|(item, _)| Rc::ptr_eq(item, old)) {
+                continue;
+            }
+            let untouched =
+                redrawn.is_some_and(|areas| !areas.iter().any(|a| crate::render::overlap(a, rect)));
+            if untouched {
+                next.push((old.clone(), *rect));
+            } else {
                 old.placed(None);
             }
         }
-        placed.clear();
-        for (item, rect) in drawn {
-            item.placed(Some(rect));
-            placed.push(item);
+        for (item, rect) in &next {
+            item.placed(Some(*rect));
         }
+        *placed = next;
     }
 
     /// The window's composition, if it has web views.
@@ -466,6 +603,11 @@ impl Surface {
 
     /// Applies what the engine sent (`WM_NSH_WAKE`).
     pub(crate) fn drain(self: &Rc<Self>) {
+        let started = self
+            .fps
+            .borrow()
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         self.pending.borrow().store(false, Ordering::Release);
         let messages: Vec<Message> = match &*self.rx.borrow() {
             Some(rx) => rx.try_iter().collect(),
@@ -480,6 +622,10 @@ impl Surface {
                 }
                 Message::Error(message) => {
                     log::error!("{message}");
+                    #[cfg(feature = "dev")]
+                    if let Some(model) = &*self.test_model.borrow() {
+                        model.error(message.to_string());
+                    }
                     if let Some(f) = &*self.on_error.borrow() {
                         f(&message);
                     }
@@ -496,6 +642,9 @@ impl Surface {
             self.write_animations();
         }
         self.ensure_ticking();
+        if let (Some(started), Some(fps)) = (started, self.fps()) {
+            fps.drained(started.elapsed(), applied);
+        }
     }
 
     fn apply(self: &Rc<Self>, batch: &MountBatch) {
@@ -510,6 +659,10 @@ impl Surface {
             }
         }
         self.mounter.borrow_mut().end_batch(self);
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.borrow() {
+            model.apply(batch);
+        }
         crate::access::batch_applied(self);
     }
 
@@ -521,6 +674,7 @@ impl Surface {
             anim.write(&self.mounter.borrow());
             std::mem::take(&mut anim.finished)
         };
+        crate::scroll::pin_animated_sticky(self);
         if !finished.is_empty() {
             self.control(|c| c.animations_finished(finished));
         }
@@ -533,8 +687,24 @@ impl Surface {
         self.ensure_ticking();
     }
 
+    /// Whether a native animation runs: the graph's, or the platform's own
+    /// (transitions, scroll glides).
+    #[cfg(feature = "dev")]
+    pub(crate) fn animating(&self) -> bool {
+        self.anim.borrow().animating() || !self.frame_clients.borrow().is_empty()
+    }
+
+    /// Keeps the model `nsh test --target` steps see of the app
+    /// ([`nsh_testing::agent::Model`]): every batch applied and every error
+    /// go to it from now on.
+    #[cfg(feature = "dev")]
+    pub(crate) fn set_test_model(&self, model: Option<std::sync::Arc<nsh_testing::agent::Model>>) {
+        *self.test_model.borrow_mut() = model;
+    }
+
     fn wants_frames(&self) -> bool {
-        self.js_frame.get()
+        self.fps.borrow().is_some()
+            || self.js_frame.get()
             || self.anim.borrow().animating()
             || !self.frame_clients.borrow().is_empty()
     }
@@ -553,6 +723,14 @@ impl Surface {
 
     /// One frame of the ticker (`WM_NSH_TICK`).
     pub(crate) fn tick(self: &Rc<Self>) {
+        let started = self
+            .fps
+            .borrow()
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        let moved = self.anim.borrow().animating()
+            || self.js_frame.get()
+            || !self.frame_clients.borrow().is_empty();
         let now = self.clock();
         self.now.set(now);
         if self.anim.borrow().animating() {
@@ -574,6 +752,9 @@ impl Surface {
             } else {
                 t.pause();
             }
+        }
+        if let (Some(started), Some(fps)) = (started, self.fps()) {
+            fps.ticked(started.elapsed(), moved);
         }
     }
 }

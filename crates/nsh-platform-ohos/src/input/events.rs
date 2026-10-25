@@ -56,10 +56,14 @@ impl Interaction {
             && let Some(extent) = owner.overflow.get()
         {
             let frame = owner.frame.get();
-            slop.left = slop.left.max(-extent.x);
-            slop.top = slop.top.max(-extent.y);
-            slop.right = slop.right.max(extent.x + extent.width - frame.width);
-            slop.bottom = slop.bottom.max(extent.y + extent.height - frame.height);
+            slop.left = slop.left.max(nsh_core::Points(-extent.x));
+            slop.top = slop.top.max(nsh_core::Points(-extent.y));
+            slop.right = slop
+                .right
+                .max(nsh_core::Points(extent.x + extent.width - frame.width));
+            slop.bottom = slop
+                .bottom
+                .max(nsh_core::Points(extent.y + extent.height - frame.height));
         }
         if slop == nsh_core::EdgeInsets::default() {
             if self.expanded_hit_region.replace(false) {
@@ -71,15 +75,15 @@ impl Interaction {
             owner.native.borrow().set_attribute(
                 A::ResponseRegion,
                 vec![
-                    -slop.left,
-                    -slop.top,
+                    -slop.left.0,
+                    -slop.top.0,
                     if f.width > 0.0 {
-                        (f.width + slop.left + slop.right) / f.width
+                        (f.width + slop.left.0 + slop.right.0) / f.width
                     } else {
                         1.0
                     },
                     if f.height > 0.0 {
-                        (f.height + slop.top + slop.bottom) / f.height
+                        (f.height + slop.top.0 + slop.bottom.0) / f.height
                     } else {
                         1.0
                     },
@@ -142,10 +146,9 @@ impl Interaction {
                 || owner.kind == nsh_core::ViewKind::Modal
                 || owner.selectable()
                 || click
-                || events.contains(EventKind::PressIn)
-                || events.contains(EventKind::PressOut)
-                || self.tracked.get() & state::PRESSED != 0
-                || self.props.borrow().active_opacity.is_some());
+                || events.contains(EventKind::PressDown)
+                || events.contains(EventKind::PressUp)
+                || self.tracked.get() & state::PRESSED != 0);
         if self.touch_registered.replace(touch) != touch {
             if touch {
                 let weak = Rc::downgrade(owner);
@@ -164,13 +167,13 @@ impl Interaction {
                                     owner.interaction.long_fired.set(false);
                                     if owner.press_feedback_allowed() {
                                         owner.interaction.state(&owner, state::PRESSED, true)?;
-                                        owner.emit(EventKind::PressIn, EventPayload::None);
+                                        owner.emit(EventKind::PressDown, EventPayload::None);
                                     }
                                 }
                                 UIInputAction::Up | UIInputAction::Cancel => {
                                     owner.interaction.state(&owner, state::PRESSED, false)?;
                                     if owner.press_feedback_allowed() {
-                                        owner.emit(EventKind::PressOut, EventPayload::None);
+                                        owner.emit(EventKind::PressUp, EventPayload::None);
                                     }
                                 }
                                 _ => {}
@@ -434,16 +437,18 @@ impl Interaction {
                                             EventKind::PanEnd
                                         },
                                         EventPayload::Pan {
-                                            translation_x: pan.offset_x / owner.scale,
-                                            translation_y: pan.offset_y / owner.scale,
+                                            translation: nsh_core::Point::new(
+                                                nsh_core::Points(pan.offset_x / owner.scale),
+                                                nsh_core::Points(pan.offset_y / owner.scale),
+                                            ),
                                             velocity_x: pan.velocity_x / owner.scale,
                                             velocity_y: pan.velocity_y / owner.scale,
-                                            value_x: values
-                                                .pan_x
-                                                .map(|id| owner.animator.value(id)),
-                                            value_y: values
-                                                .pan_y
-                                                .map(|id| owner.animator.value(id)),
+                                            value_x: values.pan_x.map(|id| {
+                                                nsh_core::Points(owner.animator.value(id))
+                                            }),
+                                            value_y: values.pan_y.map(|id| {
+                                                nsh_core::Points(owner.animator.value(id))
+                                            }),
                                         },
                                     );
                                 }
@@ -538,15 +543,10 @@ impl Interaction {
         self.apply_opacity(owner)
     }
     fn apply_opacity(&self, owner: &Node) -> Result<()> {
-        let pressed = if self.states.get() & state::PRESSED != 0 {
-            self.props.borrow().active_opacity.unwrap_or(1.0)
-        } else {
-            1.0
-        };
         owner
             .visual_node()
             .borrow()
-            .opacity(self.opacity.get().unwrap_or(1.0) * pressed)?;
+            .opacity(self.opacity.get().unwrap_or(1.0))?;
         Ok(())
     }
 }

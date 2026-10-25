@@ -2,9 +2,9 @@
 //! app bundle and its assets. Needs no Rust; iOS packaging uses Xcode's
 //! command line tools (`codesign`, and `actool` for icons), macOS packaging
 //! `codesign` and `sips`, Linux packaging `tar`; Windows packaging needs
-//! nothing (`windows.rs`), nor does the web's (`web.rs`). GPUI packages are
-//! made as the native backend's of the machine they are made on, with the
-//! GPUI release runner.
+//! nothing (`windows.rs`), nor does the web's (`web.rs`). Each desktop OS
+//! packages with its native backend's runner; GPUI is the backend for
+//! embedding in GPUI apps and has no package of its own.
 
 use std::{
     fs,
@@ -40,15 +40,17 @@ pub(crate) enum PackageTarget {
     /// The web: a static site (`index.html` and files named by their
     /// content) for any web server or CDN.
     Web,
-    /// GPUI, for this machine's OS: packaged as `linux`, `macos` or
-    /// `windows` are, with the GPUI release runner.
+    /// Packages made with the GPUI runner, which is gone: GPUI is the
+    /// backend for embedding in GPUI apps. Refused with the OS's own target
+    /// to use instead ([`PackageTarget::desktop`]).
+    #[value(hide = true)]
     Gpui,
 }
 
 impl PackageTarget {
-    /// The desktop package `nsh package --target gpui` makes on this
-    /// machine, by its OS (`None` off macOS, Windows and Linux).
-    fn gpui_layout() -> Option<PackageTarget> {
+    /// This machine's desktop target (`None` off macOS, Windows and
+    /// Linux): where `--target gpui` points.
+    fn desktop() -> Option<PackageTarget> {
         if cfg!(target_os = "macos") {
             Some(PackageTarget::Macos)
         } else if cfg!(windows) {
@@ -75,6 +77,8 @@ pub(crate) struct AppConfig {
     pub(crate) build: Option<u32>,
     /// App icon: a square PNG, ideally 1024×1024, relative to `nsh.json`.
     pub(crate) icon: Option<PathBuf>,
+    /// The lowest runtime that runs a signed package (`nsh publish`).
+    pub(crate) min_runtime: Option<String>,
     /// Read and checked by the bundler.
     #[serde(default, rename = "tailwind")]
     _tailwind: Option<serde::de::IgnoredAny>,
@@ -85,15 +89,41 @@ pub(crate) struct AppConfig {
     /// the bundler, which hands it to the runtime); packages also start in
     /// it (the launch screen, the window's theme).
     pub(crate) appearance: Option<String>,
+    /// `"statusBar"`: the status bar's default (checked by the bundler,
+    /// which hands it to the runtime); iOS packages also show it from the
+    /// launch screen on (Info.plist).
+    pub(crate) status_bar: Option<serde_json::Value>,
     /// Read and checked by the bundler.
     #[serde(default, rename = "theme")]
     _theme: Option<serde::de::IgnoredAny>,
+    /// Read and checked by the bundler.
+    #[serde(default, rename = "resolve")]
+    _resolve: Option<serde::de::IgnoredAny>,
     /// The app's Rust crate: its builds are the app's own (`rust_app.rs`).
     #[serde(default, rename = "rust")]
     _rust: Option<serde::de::IgnoredAny>,
     /// A Rust app's root component in its crate (`rust_app::RootConfig`).
     #[serde(default, rename = "root")]
     _root: Option<serde::de::IgnoredAny>,
+    /// What the web's packages add to the page (`web.rs`).
+    #[serde(default)]
+    pub(crate) web: WebConfig,
+}
+
+/// `nsh.json` `"web"`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct WebConfig {
+    /// The page's host: a JS module, relative to `nsh.json`, whose
+    /// `createHost(player)` returns what `nsh/host` calls reach
+    /// (`createPlayer`'s `host`).
+    pub(crate) host: Option<PathBuf>,
+    /// The hosts the page's host module reaches (patterns, as
+    /// `capabilities.network.hosts`): the page's `connect-src` allows them
+    /// too, while the app's own requests stay checked against its
+    /// `capabilities`.
+    #[serde(default)]
+    pub(crate) connect: Vec<String>,
 }
 
 /// Options of `nsh package`.
@@ -124,7 +154,26 @@ pub(crate) fn read_config(entry: &Path) -> anyhow::Result<AppConfig> {
     let mut config: AppConfig =
         serde_json::from_str(&text).with_context(|| format!("invalid {}", path.display()))?;
     config.icon = config.icon.map(|icon| dir.join(icon));
+    config.web.host = config.web.host.map(|host| dir.join(host));
     Ok(config)
+}
+
+/// `nsh.json` `web.host` (`read_config` made it absolute), canonical: the
+/// file must be inside the app's directory, symbolic links resolved, as the
+/// page ships it as it is.
+pub(crate) fn web_host_module(entry: &Path, host: &Path) -> anyhow::Result<PathBuf> {
+    let dir = dunce::canonicalize(entry.parent().unwrap_or(Path::new(".")))
+        .with_context(|| format!("the app's directory of {}", entry.display()))?;
+    let module = dunce::canonicalize(host)
+        .with_context(|| format!("nsh.json web.host {}", host.display()))?;
+    if !module.starts_with(&dir) {
+        bail!(
+            "nsh.json web.host {} must be inside the app's directory {}",
+            host.display(),
+            dir.display()
+        );
+    }
+    Ok(module)
 }
 
 /// The app's display name and id: from the config, else the entry's
@@ -148,10 +197,50 @@ pub(crate) fn name_and_id(entry: &Path, config: &AppConfig) -> (String, String) 
     (name, id)
 }
 
+/// The app's id (`nsh.json` `"id"`, else made up from its name as
+/// [`name_and_id`] does): it travels with the bundle (`app.json`, the dev
+/// server's messages) and names where the app keeps its data.
+pub(crate) fn app_id(entry: &Path) -> anyhow::Result<String> {
+    let entry = dunce::canonicalize(entry)?;
+    let config = read_config(&entry).unwrap_or_default();
+    Ok(name_and_id(&entry, &config).1)
+}
+
+/// [`name_and_id`] for a release (`nsh package`, `nsh publish`): the id
+/// must be the app's own, written in `nsh.json`, since it also names where
+/// the app keeps its data (`nsh/storage`) and two apps with one id share it.
+pub(crate) fn release_name_and_id(
+    entry: &Path,
+    config: &AppConfig,
+) -> anyhow::Result<(String, String)> {
+    let Some(id) = &config.id else {
+        bail!(
+            "nsh.json needs an `id` for a release, in reverse-DNS form (`com.yourcompany.app`): it names the app and where it keeps its data, so no other app may use it"
+        );
+    };
+    if id.starts_with("com.example.") {
+        ui::warn(format!(
+            "app id `{id}` is a placeholder: give the app an id under a domain you own before releasing it, as apps with one id share their data"
+        ));
+    }
+    Ok(name_and_id(entry, config))
+}
+
 pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
+    if options.target == PackageTarget::Gpui {
+        let instead = PackageTarget::desktop()
+            .and_then(|t| clap::ValueEnum::to_possible_value(&t))
+            .map_or("macos, windows or linux".to_owned(), |v| {
+                v.get_name().to_owned()
+            });
+        bail!(
+            "GPUI is the backend for embedding in GPUI and GPUI Kit apps (`AppView`), not for packages: \
+             package this app with --target {instead}"
+        );
+    }
     let entry = dunce::canonicalize(options.entry)?;
     let config = &options.config;
-    let (name, id) = name_and_id(&entry, config);
+    let (name, id) = release_name_and_id(&entry, config)?;
     let executable: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     let executable = if executable.is_empty() {
         "App".to_owned()
@@ -173,19 +262,7 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
         ui::done(format!("built {} {}", ui::path(&entry), built.summary("")));
         built
     };
-    // GPUI apps are packaged as this OS's native ones, with another runner.
-    let (target, runner) = match options.target {
-        PackageTarget::Gpui => (
-            PackageTarget::gpui_layout()
-                .context("GPUI apps are packaged on macOS, Windows or Linux")?,
-            Platform::Gpui,
-        ),
-        PackageTarget::Linux => (PackageTarget::Linux, Platform::Linux),
-        PackageTarget::Macos => (PackageTarget::Macos, Platform::MacOs),
-        PackageTarget::Windows => (PackageTarget::Windows, Platform::Windows),
-        other => (other, Platform::IphoneOs),
-    };
-    let platform = match target {
+    let platform = match options.target {
         PackageTarget::Ios => Platform::IphoneOs,
         PackageTarget::IosSimulator => Platform::IphoneSimulator,
         PackageTarget::Android => {
@@ -196,7 +273,6 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
                 name: &name,
                 id: &id,
                 executable: &executable,
-                runner,
             };
             return package_linux(&options, config, &app, &built);
         }
@@ -205,17 +281,16 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
                 name: &name,
                 id: &id,
                 executable: &executable,
-                runner,
             };
             return package_macos(&options, config, &app, &built);
         }
         PackageTarget::Windows => {
-            return crate::windows::package(&options, config, &name, &id, runner, &built);
+            return crate::windows::package(&options, config, &name, &id, &built);
         }
         PackageTarget::Web => {
             return crate::web::package(&options, config, &name, &id, &built);
         }
-        PackageTarget::Gpui => unreachable!("packaged as this OS's apps are"),
+        PackageTarget::Gpui => unreachable!("refused above"),
     };
     let runner = runtime::file(platform, true)?;
 
@@ -235,6 +310,11 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
     if let Some(json) = built.capabilities_json() {
         fs::write(resources.join("capabilities.json"), json)?;
     }
+    // The app's id, which names where it keeps its data (`Bundle::read`).
+    fs::write(
+        resources.join("app.json"),
+        serde_json::json!({ "id": id }).to_string(),
+    )?;
     for asset in &built.assets {
         let dest = resources.join("assets").join(&asset.path);
         if let Some(dir) = dest.parent() {
@@ -307,14 +387,12 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A desktop app to package: its name, id, executable file name and
-/// release runner (the native backend's or GPUI's).
+/// A desktop app to package: its name, id and executable file name.
 #[derive(Clone, Copy)]
 struct App<'a> {
     name: &'a str,
     id: &'a str,
     executable: &'a str,
-    runner: Platform,
 }
 
 /// An APK with the release runtime: `AppActivity` runs `assets/nsh/bundle.nshc`.
@@ -337,6 +415,11 @@ fn package_android(
     if let Some(json) = built.capabilities_json() {
         assets.push(("nsh/capabilities.json".to_owned(), json.into_bytes()));
     }
+    // The app's id, which names where it keeps its data.
+    assets.push((
+        "nsh/app.json".to_owned(),
+        serde_json::json!({ "id": id }).to_string().into_bytes(),
+    ));
     for asset in &built.assets {
         let bytes = fs::read(&asset.source).with_context(|| format!("read {}", asset.path))?;
         assets.push((format!("nsh/assets/{}", asset.path), bytes));
@@ -414,9 +497,8 @@ fn package_linux(
         name,
         id,
         executable,
-        runner,
     } = *app;
-    let runner = runtime::file(runner, true)?;
+    let runner = runtime::file(Platform::Linux, true)?;
     let dir = options.out.join(name);
     let step = ui::Step::start(format!("packaging {}", ui::path(&dir)));
     if dir.exists() {
@@ -505,9 +587,8 @@ fn package_macos(
         name,
         id,
         executable,
-        runner,
     } = *app;
-    let runner = runtime::file(runner, true)?;
+    let runner = runtime::file(Platform::MacOs, true)?;
     let app = options.out.join(format!("{name}.app"));
     let step = ui::Step::start(format!("packaging {}", ui::path(&app)));
     if app.exists() {
@@ -722,12 +803,34 @@ fn info_plist(
         Value::Dictionary(Default::default()),
     );
     d.insert("UIApplicationSupportsMultipleScenes".into(), false.into());
+    // ProMotion iPhones run display links above 60 Hz only with this:
+    // animations move at the rate scrolling does.
+    d.insert("CADisableMinimumFrameDurationOnPhone".into(), true.into());
     // The app's own appearance, from the launch screen on.
     match config.appearance.as_deref() {
         Some("light") => d.insert("UIUserInterfaceStyle".into(), s("Light")),
         Some("dark") => d.insert("UIUserInterfaceStyle".into(), s("Dark")),
         _ => None,
     };
+    // The status bar's default, for the launch screen (pages and dialogs
+    // decide it afterwards, as view controllers).
+    if let Some(setting) = config
+        .status_bar
+        .as_ref()
+        .and_then(|v| nsh_core::StatusBarSetting::from_json(v).ok())
+    {
+        if let Some(style) = setting.style {
+            let style = match style {
+                nsh_core::StatusBarStyle::Default => "UIStatusBarStyleDefault",
+                nsh_core::StatusBarStyle::Light => "UIStatusBarStyleLightContent",
+                nsh_core::StatusBarStyle::Dark => "UIStatusBarStyleDarkContent",
+            };
+            d.insert("UIStatusBarStyle".into(), s(style));
+        }
+        if let Some(hidden) = setting.hidden {
+            d.insert("UIStatusBarHidden".into(), hidden.into());
+        }
+    }
     d.insert(
         "UISupportedInterfaceOrientations".into(),
         Value::Array(vec![
@@ -833,7 +936,7 @@ fn entitlements(profile: &Path, id: &str) -> anyhow::Result<plist::Value> {
         bail!("cannot read provisioning profile {}", profile.display());
     }
     let profile = plist::Value::from_reader_xml(output.stdout.as_slice())?;
-    let entitlements = profile
+    let mut entitlements = profile
         .as_dictionary()
         .and_then(|d| d.get("Entitlements"))
         .cloned()
@@ -842,11 +945,30 @@ fn entitlements(profile: &Path, id: &str) -> anyhow::Result<plist::Value> {
         .as_dictionary()
         .and_then(|d| d.get("application-identifier"))
         .and_then(|v| v.as_string())
-        .unwrap_or_default();
-    if !profile_allows(app_id, id) {
+        .unwrap_or_default()
+        .to_owned();
+    if !profile_allows(&app_id, id) {
         bail!("the provisioning profile is for {app_id}, not {id}");
     }
+    // A wildcard profile (`TEAMID.*`) signs the app as `TEAMID.<id>`, as
+    // Xcode does: devices refuse an app signed with the wildcard itself.
+    if let Some(dictionary) = entitlements.as_dictionary_mut() {
+        dictionary.insert(
+            "application-identifier".to_owned(),
+            plist::Value::String(signed_app_id(&app_id, id)),
+        );
+    }
     Ok(entitlements)
+}
+
+/// The `application-identifier` an app with bundle id `id` is signed with
+/// under a profile's (`TEAMID.com.example.app` or a wildcard such as
+/// `TEAMID.*`), which covers it.
+fn signed_app_id(app_id: &str, id: &str) -> String {
+    match app_id.split_once('.') {
+        Some((team, pattern)) if pattern.ends_with('*') => format!("{team}.{id}"),
+        _ => app_id.to_owned(),
+    }
 }
 
 /// Whether a profile's `application-identifier` (`TEAMID.com.example.app`,
@@ -895,6 +1017,74 @@ fn make_ipa(app: &Path, ipa: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_release_needs_the_apps_own_id() {
+        let entry = Path::new("apps/Orders/App.tsx");
+        let config = |id: Option<&str>| AppConfig {
+            id: id.map(str::to_owned),
+            ..AppConfig::default()
+        };
+        // Development makes one up from the name.
+        assert_eq!(
+            name_and_id(entry, &config(None)),
+            ("Orders".to_owned(), "com.example.orders".to_owned())
+        );
+        // A release asks for it.
+        let error = release_name_and_id(entry, &config(None))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("nsh.json needs an `id`"), "{error}");
+        // The placeholder is only warned about.
+        assert_eq!(
+            release_name_and_id(entry, &config(Some("com.example.orders")))
+                .unwrap()
+                .1,
+            "com.example.orders"
+        );
+        assert_eq!(
+            release_name_and_id(entry, &config(Some("com.acme.orders"))).unwrap(),
+            ("Orders".to_owned(), "com.acme.orders".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_web_host_module_stays_in_the_app_directory() {
+        let root = std::env::temp_dir().join(format!("nsh-web-host-{}", std::process::id()));
+        let app = root.join("app");
+        fs::create_dir_all(app.join("web")).unwrap();
+        fs::write(app.join("web/host.js"), "").unwrap();
+        fs::write(root.join("outside.js"), "").unwrap();
+        let entry = app.join("App.tsx");
+        let config = |host: &str| {
+            fs::write(
+                app.join("nsh.json"),
+                serde_json::json!({ "web": { "host": host } }).to_string(),
+            )
+            .unwrap();
+            read_config(&entry).unwrap().web.host.unwrap()
+        };
+        let inside = web_host_module(&entry, &config("web/host.js")).unwrap();
+        assert_eq!(
+            inside,
+            dunce::canonicalize(app.join("web/host.js")).unwrap()
+        );
+        assert!(web_host_module(&entry, &config("./web/../web/host.js")).is_ok());
+        let outside = root.join("outside.js");
+        let refused = [config("../outside.js"), config(outside.to_str().unwrap())];
+        #[cfg(unix)]
+        let refused = {
+            std::os::unix::fs::symlink(&outside, app.join("link.js")).unwrap();
+            let mut refused = refused.to_vec();
+            refused.push(config("link.js"));
+            refused
+        };
+        for host in refused {
+            let error = web_host_module(&entry, &host).unwrap_err().to_string();
+            assert!(error.contains("inside the app's directory"), "{error}");
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     /// App icons are drawn at 1024 pixels, which `sips` alone cannot
     /// convert.
     #[cfg(target_os = "macos")]
@@ -930,13 +1120,36 @@ mod tests {
     }
 
     #[test]
-    fn gpui_packages_are_laid_out_as_this_oss_apps() {
+    fn wildcard_profiles_sign_the_bundle_id() {
+        assert_eq!(
+            signed_app_id("ABCDE12345.*", "com.example.app"),
+            "ABCDE12345.com.example.app"
+        );
+        assert_eq!(
+            signed_app_id("ABCDE12345.com.example.*", "com.example.app"),
+            "ABCDE12345.com.example.app"
+        );
+        assert_eq!(
+            signed_app_id("ABCDE12345.com.example.app", "com.example.app"),
+            "ABCDE12345.com.example.app"
+        );
+    }
+
+    #[test]
+    fn gpui_points_to_this_oss_target() {
         use clap::ValueEnum as _;
 
         use super::PackageTarget;
+        // Still parsed, so the refusal can say what to use instead.
         assert_eq!(
             PackageTarget::from_str("gpui", false).unwrap(),
             PackageTarget::Gpui
+        );
+        assert!(
+            PackageTarget::Gpui
+                .to_possible_value()
+                .unwrap()
+                .is_hide_set()
         );
         let expected = if cfg!(target_os = "macos") {
             Some(PackageTarget::Macos)
@@ -947,7 +1160,7 @@ mod tests {
         } else {
             None
         };
-        assert_eq!(PackageTarget::gpui_layout(), expected);
+        assert_eq!(PackageTarget::desktop(), expected);
     }
 
     #[test]

@@ -2,7 +2,6 @@
 
 use std::rc::Rc;
 
-use nsh_core::Size;
 use ohos_arkui_binding::{
     component::{
         attribute::{ArkUICommonAttribute, ArkUIEvent},
@@ -15,7 +14,10 @@ use ohos_arkui_binding::{
     },
 };
 
-use crate::render::node::{NativeNode, Result};
+use crate::render::{
+    geometry::Size,
+    node::{NativeNode, Result},
+};
 
 #[derive(Default)]
 pub(super) struct Refresh {

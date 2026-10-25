@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use nsh_core::{ApproxTextEngine, MountBatch, Size};
+use nsh_core::{ApproxTextEngine, MountBatch, Size, geometry::px};
 use nsh_engine::{Bundle, Engine, EngineConfig, MountSink};
 
 /// Records the errors reported.
@@ -26,15 +26,26 @@ impl MountSink for Sink {
 fn stop_spinning(code: &str) -> (Duration, Vec<String>) {
     let config = EngineConfig {
         app: nsh_engine::App::Js(Bundle::source(code.to_owned())),
-        viewport: Size::new(390.0, 844.0),
+        viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
         network: None,
+        websocket: None,
+        filesystem: None,
         assets: None,
         environment: Default::default(),
-        header_heights: (44.0, 96.0),
+        header_heights: (nsh_core::Points(44.0), nsh_core::Points(96.0)),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
+        data_dir: None,
+        cache: nsh_engine::CacheOptions::off(),
+        storage: None,
+        clock: Default::default(),
+        context: Default::default(),
+        pinned: Default::default(),
+        clipboard: None,
+        host: Default::default(),
+        picker: None,
     };
     let errors = Arc::new(Mutex::new(Vec::new()));
     let engine = Engine::start(config, || ApproxTextEngine, Sink(errors.clone())).unwrap();

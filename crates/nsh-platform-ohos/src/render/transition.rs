@@ -3,9 +3,11 @@
 use std::sync::Arc;
 
 use nsh_core::{
-    BoxShadow, Color, KeyframeAnimation, Keyframes, LayoutAnimation, LayoutCurve, LayoutProperty,
-    LayoutTransition, Rect, Transform, TransitionProps, ViewStyle,
+    BoxShadow, Color, Corners, Edges, KeyframeAnimation, Keyframes, LayoutAnimation, LayoutCurve,
+    LayoutProperty, LayoutTransition, Points, Transform, TransitionProps, ViewStyle,
 };
+
+use crate::render::geometry::Rect;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Extra {
@@ -209,7 +211,9 @@ impl Curve {
             // UIKit's curves.
             LayoutCurve::EaseIn => Curve::Bezier([0.42, 0.0, 1.0, 1.0]),
             LayoutCurve::EaseOut => Curve::Bezier([0.0, 0.0, 0.58, 1.0]),
-            LayoutCurve::EaseInEaseOut => Curve::Bezier([0.42, 0.0, 0.58, 1.0]),
+            LayoutCurve::EaseInEaseOut | LayoutCurve::Keyboard => {
+                Curve::Bezier([0.42, 0.0, 0.58, 1.0])
+            }
             LayoutCurve::Spring { damping } => Curve::Spring(damping),
         }
     }
@@ -418,6 +422,10 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+fn lerp_points(a: Points, b: Points, t: f32) -> Points {
+    Points(lerp(a.0, b.0, t))
+}
+
 /// Interpolates colors in premultiplied RGBA, as CSS does, so that
 /// transparent ends do not pass through black.
 fn lerp_color(a: Color, b: Color, t: f32) -> Color {
@@ -467,10 +475,10 @@ fn lerp_transform(a: &Transform, b: &Transform, t: f32) -> Option<Transform> {
 /// A shadow that draws nothing, to interpolate against `s`.
 fn none_like(s: &BoxShadow) -> BoxShadow {
     BoxShadow {
-        offset_x: 0.0,
-        offset_y: 0.0,
-        blur: 0.0,
-        spread: 0.0,
+        offset_x: Points::ZERO,
+        offset_y: Points::ZERO,
+        blur: Points::ZERO,
+        spread: Points::ZERO,
         color: Color::TRANSPARENT,
         inset: s.inset,
     }
@@ -491,11 +499,12 @@ fn lerp_box_shadows(a: &[BoxShadow], b: &[BoxShadow], t: f32) -> Option<Vec<BoxS
         if sa.inset != sb.inset {
             return None;
         }
+        let l = |a: Points, b: Points| Points(lerp(a.0, b.0, t));
         out.push(BoxShadow {
-            offset_x: lerp(sa.offset_x, sb.offset_x, t),
-            offset_y: lerp(sa.offset_y, sb.offset_y, t),
-            blur: lerp(sa.blur, sb.blur, t).max(0.0),
-            spread: lerp(sa.spread, sb.spread, t),
+            offset_x: l(sa.offset_x, sb.offset_x),
+            offset_y: l(sa.offset_y, sb.offset_y),
+            blur: l(sa.blur, sb.blur).max(Points::ZERO),
+            spread: l(sa.spread, sb.spread),
             color: lerp_color(sa.color, sb.color, t),
             inset: sa.inset,
         });
@@ -554,10 +563,10 @@ fn lerp_style(
     if props.has(TransitionProps::SHADOW) {
         let (a, b) = (&from.shadow, &to.shadow);
         out.shadow.color = lerp_color(a.color, b.color, t);
-        out.shadow.offset_x = lerp(a.offset_x, b.offset_x, t);
-        out.shadow.offset_y = lerp(a.offset_y, b.offset_y, t);
+        out.shadow.offset_x = lerp_points(a.offset_x, b.offset_x, t);
+        out.shadow.offset_y = lerp_points(a.offset_y, b.offset_y, t);
         out.shadow.opacity = lerp(a.opacity, b.opacity, t).clamp(0.0, 1.0);
-        out.shadow.radius = lerp(a.radius, b.radius, t).max(0.0);
+        out.shadow.radius = lerp_points(a.radius, b.radius, t).max(Points::ZERO);
         let (sa, sb) = (box_shadows(from), box_shadows(to));
         if sa != sb
             && let Some(shadows) = lerp_box_shadows(sa, sb, t)
@@ -568,22 +577,24 @@ fn lerp_style(
         }
     }
     if props.has(TransitionProps::SHAPE) {
-        out.border_radius = lerp(from.border_radius, to.border_radius, t).max(0.0);
-        out.corner_radius =
-            std::array::from_fn(|i| match (from.corner_radius[i], to.corner_radius[i]) {
-                (None, None) => None,
-                (a, b) => Some(
-                    lerp(
-                        a.unwrap_or(from.border_radius),
-                        b.unwrap_or(to.border_radius),
-                        t,
-                    )
-                    .max(0.0),
-                ),
-            });
-        out.borders.widths =
-            std::array::from_fn(|i| lerp(from.borders.widths[i], to.borders.widths[i], t).max(0.0));
-        out.outline.width = lerp(from.outline.width, to.outline.width, t).max(0.0);
+        out.border_radius = lerp_points(from.border_radius, to.border_radius, t).max(Points::ZERO);
+        let (ca, cb) = (from.corner_radius.to_array(), to.corner_radius.to_array());
+        out.corner_radius = Corners::from(std::array::from_fn(|i| match (ca[i], cb[i]) {
+            (None, None) => None,
+            (a, b) => Some(
+                lerp_points(
+                    a.unwrap_or(from.border_radius),
+                    b.unwrap_or(to.border_radius),
+                    t,
+                )
+                .max(Points::ZERO),
+            ),
+        }));
+        let (wa, wb) = (from.borders.widths.to_array(), to.borders.widths.to_array());
+        out.borders.widths = Edges::from(std::array::from_fn(|i| {
+            lerp_points(wa[i], wb[i], t).max(Points::ZERO)
+        }));
+        out.outline.width = Points(lerp(from.outline.width.0, to.outline.width.0, t).max(0.0));
     }
 }
 

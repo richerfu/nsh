@@ -3,7 +3,10 @@
 //! calls and display link ticks. Views are identified by their `tag` (the node id).
 
 use dispatch2::DispatchQueue;
-use nsh_core::{EventKind, EventPayload, KeyboardTaps, NodeId, SubmitBehavior};
+use nsh_core::{
+    EventKind, EventPayload, KeyboardTaps, NodeId, SubmitBehavior,
+    geometry::{point, px},
+};
 use nsh_engine::EngineControl;
 use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
@@ -28,6 +31,8 @@ pub(crate) struct TargetIvars {
     /// Scrolls the core asked for that each scroll view applied, reported
     /// with its offsets (`EngineControl::scroll`).
     scrolls_applied: std::cell::RefCell<rustc_hash::FxHashMap<NodeId, u32>>,
+    /// The app's keyboard shortcuts, matched as keys are pressed.
+    keymap: crate::keymap::KeymapState,
 }
 
 define_class!(
@@ -60,11 +65,26 @@ define_class!(
         fn handle_hover(&self, recognizer: &objc2_ui_kit::UIHoverGestureRecognizer) {
             let Some(view) = recognizer.view() else { return };
             let id = view.tag() as NodeId;
-            let on = matches!(
-                recognizer.state(),
-                UIGestureRecognizerState::Began | UIGestureRecognizerState::Changed
-            );
-            self.with_mounter(move |m| m.hover_changed(id, on));
+            let state = recognizer.state();
+            let in_window = recognizer.locationInView(None);
+            // SAFETY: UIGestureRecognizer's `modifierFlags` (iOS 13.4), a
+            // UIKeyModifierFlags (NSInteger).
+            let modifiers: isize = unsafe { msg_send![recognizer, modifierFlags] };
+            self.with_mounter(move |m| m.hover(id, state, in_window, modifiers));
+        }
+
+        #[unsafe(method(handleContextMenu:))]
+        fn handle_context_menu(&self, recognizer: &UITapGestureRecognizer) {
+            if recognizer.state() != UIGestureRecognizerState::Ended {
+                return;
+            }
+            let Some(view) = recognizer.view() else { return };
+            let id = view.tag() as NodeId;
+            let in_window = recognizer.locationInView(None);
+            // SAFETY: UIGestureRecognizer's `modifierFlags` (iOS 13.4), a
+            // UIKeyModifierFlags (NSInteger).
+            let modifiers: isize = unsafe { msg_send![recognizer, modifierFlags] };
+            self.with_mounter(move |m| m.context_menu(id, in_window, modifiers));
         }
 
         #[unsafe(method(handlePinch:))]
@@ -120,8 +140,9 @@ define_class!(
         fn handle_editing_changed(&self, field: &UITextField) {
             // Read now: a deferred call must report this edit's text.
             let text = field.text().map(|t| t.to_string()).unwrap_or_default();
+            let marked = input::marked_text(field);
             let id = field.tag() as NodeId;
-            self.with_mounter(move |m| m.input_changed(id, text));
+            self.with_mounter(move |m| m.input_edited(id, text, marked));
         }
     }
 
@@ -156,6 +177,9 @@ define_class!(
         #[unsafe(method(textFieldDidChangeSelection:))]
         fn text_field_did_change_selection(&self, field: &UITextField) {
             self.selection_changed(field);
+            // Unmarking keeps the text and only moves the selection.
+            let text = field.text().map(|t| t.to_string()).unwrap_or_default();
+            self.composition(field, text);
         }
 
         #[unsafe(method(textFieldShouldReturn:))]
@@ -187,13 +211,15 @@ define_class!(
         #[unsafe(method(textViewDidChange:))]
         fn text_view_did_change(&self, view: &UITextView) {
             let text = view.text().to_string();
+            let marked = input::marked_text(view);
             let id = view.tag() as NodeId;
-            self.with_mounter(move |m| m.input_changed(id, text));
+            self.with_mounter(move |m| m.input_edited(id, text, marked));
         }
 
         #[unsafe(method(textViewDidChangeSelection:))]
         fn text_view_did_change_selection(&self, view: &UITextView) {
             self.selection_changed(view);
+            self.composition(view, view.text().to_string());
         }
 
         #[unsafe(method(textViewDidBeginEditing:))]
@@ -235,6 +261,12 @@ define_class!(
             a: &UIGestureRecognizer,
             b: &UIGestureRecognizer,
         ) -> bool {
+            if let Ok(m) = self.ivars().mounter.get(self.mtm()).try_borrow()
+                && let Some(m) = m.as_ref()
+                && (m.pan_shares_scroll(a, b) || m.pan_shares_scroll(b, a))
+            {
+                return true.into();
+            }
             let transform = |r: &UIGestureRecognizer| {
                 r.isKindOfClass(UIPanGestureRecognizer::class())
                     || r.isKindOfClass(UIPinchGestureRecognizer::class())
@@ -257,6 +289,13 @@ define_class!(
         /// keyboard (`keyboardShouldPersistTaps`).
         #[unsafe(method(gestureRecognizer:shouldReceiveTouch:))]
         fn should_receive_touch(&self, recognizer: &UIGestureRecognizer, touch: &UITouch) -> bool {
+            if recognizer.isKindOfClass(UIPanGestureRecognizer::class())
+                && let (Some(view), Some(touched)) = (recognizer.view(), touch.view())
+                && let Ok(mut m) = self.ivars().mounter.get(self.mtm()).try_borrow_mut()
+                && let Some(m) = m.as_mut()
+            {
+                m.pan_touch(view.tag() as NodeId, &touched);
+            }
             !recognizer.isKindOfClass(UITapGestureRecognizer::class())
                 || self.tap_dismisses_keyboard(touch)
         }
@@ -267,12 +306,25 @@ define_class!(
         fn scroll_view_did_scroll(&self, scroll: &UIScrollView) {
             let id = scroll.tag() as NodeId;
             let offset = scroll.contentOffset();
+            if let Ok(m) = self.ivars().mounter.get(self.mtm()).try_borrow()
+                && let Some(m) = m.as_ref()
+            {
+                let clamped = m.pan_scroll_offset(scroll, offset);
+                if clamped != offset {
+                    scroll.setContentOffset(clamped);
+                    return;
+                }
+            }
             // Lists need offsets to pick rows; the engine coalesces them.
             let applied = self.ivars().scrolls_applied.borrow().get(&id).copied().unwrap_or(0);
             self.ivars()
                 .control
-                .scroll(id, offset.x as f32, offset.y as f32, applied);
+                .scroll(id, point(px(offset.x as f32), px(offset.y as f32)), applied);
             self.with_mounter(move |m| m.scrolled(id, offset));
+            // A text area scrolling moves its caret.
+            if scroll.downcast_ref::<input::Area>().is_some() {
+                self.caret_moved(scroll);
+            }
         }
 
         /// Zoomable scroll views zoom their zoom view.
@@ -291,7 +343,7 @@ define_class!(
             let applied = self.ivars().scrolls_applied.borrow().get(&id).copied().unwrap_or(0);
             self.ivars()
                 .control
-                .scroll(id, offset.x as f32, offset.y as f32, applied);
+                .scroll(id, point(px(offset.x as f32), px(offset.y as f32)), applied);
         }
 
         #[unsafe(method(scrollViewDidEndZooming:withView:atScale:))]
@@ -308,7 +360,7 @@ define_class!(
 
         #[unsafe(method(scrollViewDidEndDecelerating:))]
         fn scroll_view_did_end_decelerating(&self, scroll: &UIScrollView) {
-            self.scroll_event(scroll, EventKind::MomentumScrollEnd);
+            self.scroll_event(scroll, EventKind::MomentumEnd);
             self.scroll_event(scroll, EventKind::ScrollEnd);
         }
 
@@ -318,9 +370,9 @@ define_class!(
             self.with_mounter(|m| m.cancel_touches());
             // Caught while gliding: the glide ended.
             if scroll.isDecelerating() {
-                self.scroll_event(scroll, EventKind::MomentumScrollEnd);
+                self.scroll_event(scroll, EventKind::MomentumEnd);
             }
-            self.scroll_event(scroll, EventKind::ScrollBeginDrag);
+            self.scroll_event(scroll, EventKind::ScrollDragStart);
         }
 
         /// Snaps a fling to `snapToInterval` / `snapToOffsets` / pages.
@@ -336,7 +388,10 @@ define_class!(
             let proposed = unsafe { target.read() };
             let snapped = match self.ivars().mounter.get(self.mtm()).try_borrow() {
                 // UIKit's velocity is in points per millisecond.
-                Ok(m) => m.as_ref().and_then(|m| m.snap_target(id, velocity, proposed)),
+                Ok(m) => m.as_ref().and_then(|m| {
+                    let clamped = m.pan_scroll_offset(scroll, proposed);
+                    if clamped != proposed { Some(clamped) } else { m.snap_target(id, velocity, proposed) }
+                }),
                 Err(_) => None,
             };
             if let Some(p) = snapped {
@@ -349,9 +404,9 @@ define_class!(
         fn scroll_view_did_end_dragging(&self, scroll: &UIScrollView, decelerate: bool) {
             let (id, offset) = (scroll.tag() as NodeId, scroll.contentOffset());
             self.with_mounter(move |m| m.drag_ended(id, offset));
-            self.scroll_event(scroll, EventKind::ScrollEndDrag);
+            self.scroll_event(scroll, EventKind::ScrollDragEnd);
             if decelerate {
-                self.scroll_event(scroll, EventKind::MomentumScrollBegin);
+                self.scroll_event(scroll, EventKind::MomentumStart);
             } else {
                 self.scroll_event(scroll, EventKind::ScrollEnd);
             }
@@ -431,6 +486,7 @@ impl EventTarget {
             control,
             mounter,
             scrolls_applied: Default::default(),
+            keymap: Default::default(),
         });
         // SAFETY: NSObject's designated initializer.
         unsafe { msg_send![super(this), init] }
@@ -452,7 +508,12 @@ impl EventTarget {
         self.ivars().scrolls_applied.borrow_mut().remove(&id);
     }
 
-    fn dispatch(&self, id: NodeId, event: EventKind, payload: EventPayload) {
+    /// The app's keyboard shortcuts.
+    pub(crate) fn keymap(&self) -> &crate::keymap::KeymapState {
+        &self.ivars().keymap
+    }
+
+    pub(crate) fn dispatch(&self, id: NodeId, event: EventKind, payload: EventPayload) {
         self.ivars().control.dispatch_event(id, event, payload);
     }
 
@@ -536,6 +597,41 @@ impl EventTarget {
                 ]),
             )
         });
+        self.caret_moved(view);
+    }
+
+    /// `onPaste` of input `id`: what the user pasted.
+    pub(crate) fn pasted(&self, id: NodeId, paste: nsh_core::PasteEvent) {
+        self.with_mounter(move |m| {
+            m.input_event(id, EventKind::Paste, EventPayload::Paste(Box::new(paste)))
+        });
+    }
+
+    /// `onCaretMove` of the input `view` belongs to if its caret moved:
+    /// with the selection, or as a text area scrolled or the input was laid
+    /// out again, while it edits.
+    pub(crate) fn caret_moved(&self, view: &UIView) {
+        if !view.isFirstResponder() {
+            return;
+        }
+        let Some(caret) = input::caret(view) else {
+            return;
+        };
+        if !input::caret_changed(view, caret) {
+            return;
+        }
+        let id = view.tag() as NodeId;
+        self.with_mounter(move |m| {
+            m.input_event(id, EventKind::CaretMove, EventPayload::caret(caret))
+        });
+    }
+
+    /// The composition of the input `view` belongs to, as it is with
+    /// `text` in it.
+    fn composition(&self, view: &UIView, text: String) {
+        let id = view.tag() as NodeId;
+        let marked = input::marked_text(view);
+        self.with_mounter(move |m| m.input_composition(id, text, marked));
     }
 
     /// A press event on a pressable text span.
@@ -582,14 +678,19 @@ impl EventTarget {
     }
 
     fn scroll_event(&self, scroll: &UIScrollView, event: EventKind) {
+        if event == EventKind::ScrollEnd {
+            // Snapping animated values that follow it settle.
+            let id = scroll.tag() as NodeId;
+            self.with_mounter(move |m| m.scroll_ended(id));
+        }
         let offset = scroll.contentOffset();
         self.dispatch(
             scroll.tag() as NodeId,
             event,
-            EventPayload::Scroll {
-                x: offset.x as f32,
-                y: offset.y as f32,
-            },
+            EventPayload::Scroll(nsh_core::geometry::point(
+                nsh_core::Points(offset.x as f32),
+                nsh_core::Points(offset.y as f32),
+            )),
         );
     }
 

@@ -1,7 +1,10 @@
 //! Cached background paints and outlines; geometry comes from the shared core.
 use std::{cell::RefCell, sync::Arc};
 
-use nsh_core::{BorderStyle, Gradient, GradientKind, GradientSize, Size, ViewStyle};
+use nsh_core::{
+    BorderStyle, Bounds, Corners, Gradient, GradientKind, GradientSize, Point, Points,
+    Size as CoreSize, ViewStyle,
+};
 use ohos_arkui_binding::{
     component::attribute::ArkUICommonAttribute,
     types::{attribute::ArkUINodeAttributeType as A, view::BlendMode as B},
@@ -12,7 +15,10 @@ use ohos_drawing_binding::{
 };
 
 use crate::{
-    render::node::{Node, Result},
+    render::{
+        geometry::Size,
+        node::{Node, Result},
+    },
     text::typography::argb,
 };
 #[derive(Default)]
@@ -64,8 +70,8 @@ impl Decoration {
             .flat_map(|e| &e.background_images)
         {
             if matches!(g.kind, GradientKind::Conic { .. }) && g.repeating && !g.stops.is_empty() {
-                let stops = g.resolved_stops();
-                let span = stops.last().unwrap().1 - stops[0].1;
+                let stops = g.resolved_stops(CoreSize::default());
+                let span = stops.last().unwrap().1.0 - stops[0].1.0;
                 if span > 1e-5 && (1.0 / span + 3.0) * stops.len() as f32 > 4096.0 {
                     log::warn!("OHOS repeating conic gradient: limiting repeated stops to 4096");
                 }
@@ -87,7 +93,7 @@ impl Decoration {
             .flat_map(|e| &e.backdrop_filters)
         {
             if let F::Blur(radius) = filter {
-                effect.backdrop_blur += radius;
+                effect.backdrop_blur += radius.0;
             }
         }
         let mut previous = self.native.borrow_mut();
@@ -177,12 +183,14 @@ impl Decoration {
         }
         let radii = style
             .corner_radius
-            .map(|radius| radius.unwrap_or(style.border_radius));
+            .map(|radius| radius.unwrap_or(style.border_radius).0)
+            .to_array();
+        let borders = style.borders.widths.to_array().map(|w| w.0);
         let mut cache = self.shadows.borrow_mut();
         if cache.as_ref().is_none_or(|cache| {
             cache.size != size
                 || cache.radii != radii
-                || cache.borders != style.borders.widths
+                || cache.borders != borders
                 || cache.continuous != style.continuous_corners
                 || !match (&cache.effects, &style.effects) {
                     (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -199,22 +207,22 @@ impl Decoration {
                     let mut brush = Brush::new();
                     brush.set_anti_alias(true);
                     brush.set_color(argb(layer.color));
-                    let mask = MaskFilter::blur(layer.blur.max(0.0) * 0.5, true);
+                    let mask = MaskFilter::blur(layer.blur.0.max(0.0) * 0.5, true);
                     let mut filter = Filter::new();
                     filter.set_mask_filter(mask.as_ref());
                     brush.set_filter(Some(&filter));
                     let mut path = if layer.inset {
-                        padding_outline(style, size, layer.spread)
+                        padding_outline(style, size, layer.spread.0)
                     } else {
-                        outline(style, size, layer.spread)
+                        outline(style, size, layer.spread.0)
                     };
                     path.transform(&Matrix::from_affine(
                         1.0,
                         0.0,
                         0.0,
                         1.0,
-                        layer.offset_x,
-                        layer.offset_y,
+                        layer.offset_x.0,
+                        layer.offset_y.0,
                     ));
                     if layer.inset {
                         path.set_fill_type(PathFillType::InverseWinding);
@@ -230,7 +238,7 @@ impl Decoration {
                 effects: style.effects.clone(),
                 size,
                 radii,
-                borders: style.borders.widths,
+                borders,
                 continuous: style.continuous_corners,
                 border: outline(style, size, 0.0),
                 padding,
@@ -258,62 +266,68 @@ impl Decoration {
     }
     pub(crate) fn outline(&self, canvas: &Canvas, style: &ViewStyle, size: Size, scale: f32) {
         let o = style.outline;
-        if o.width <= 0.0 || o.color.is_transparent() {
+        if o.width.0 <= 0.0 || o.color.is_transparent() {
             return;
         }
+        let width = o.width.0;
         let mut pen = Pen::new();
         pen.set_anti_alias(true);
         pen.set_color(argb(o.color));
-        pen.set_width(o.width);
+        pen.set_width(width);
         let dash = match o.style {
             BorderStyle::Solid => None,
-            BorderStyle::Dashed => PathEffect::dash(&[o.width * 3.0, o.width * 3.0], 0.0),
-            BorderStyle::Dotted => PathEffect::dash(&[o.width, o.width], 0.0),
+            BorderStyle::Dashed => PathEffect::dash(&[width * 3.0, width * 3.0], 0.0),
+            BorderStyle::Dotted => PathEffect::dash(&[width, width], 0.0),
         };
         pen.set_path_effect(dash.as_ref());
         canvas.save();
         canvas.scale(scale, scale);
         canvas.attach_pen(&pen);
-        canvas.draw_path(&outline(style, size, o.offset + o.width * 0.5));
+        canvas.draw_path(&outline(style, size, o.offset.0 + width * 0.5));
         canvas.detach_pen();
         canvas.restore();
     }
 }
 fn padding_outline(style: &ViewStyle, size: Size, spread: f32) -> Path {
-    let [top, right, bottom, left] = style.borders.widths.map(|width| width + spread);
+    let [top, right, bottom, left] = style
+        .borders
+        .widths
+        .to_array()
+        .map(|width| width.0 + spread);
     let radii = nsh_core::canvas::fit_radii(
-        size.width,
-        size.height,
+        size.into(),
         style
             .corner_radius
             .map(|radius| radius.unwrap_or(style.border_radius)),
-    );
+    )
+    .to_array()
+    .map(|r| r.0);
     let corners = [(left, top), (right, top), (right, bottom), (left, bottom)];
     let mut path = Path::new();
     if size.width <= left + right || size.height <= top + bottom {
         return path;
     }
     nsh_core::shape::rounded_rect(
-        (
-            left as f64,
-            top as f64,
-            (size.width - right) as f64,
-            (size.height - bottom) as f64,
+        Bounds::new(
+            Point::new(Points(left), Points(top)),
+            CoreSize::new(
+                Points(size.width - left - right),
+                Points(size.height - top - bottom),
+            ),
         ),
-        std::array::from_fn(|i| {
-            (
-                (radii[i] - corners[i].0).max(0.0) as f64,
-                (radii[i] - corners[i].1).max(0.0) as f64,
+        Corners::from(std::array::from_fn(|i| {
+            CoreSize::new(
+                Points((radii[i] - corners[i].0).max(0.0)),
+                Points((radii[i] - corners[i].1).max(0.0)),
             )
-        }),
+        })),
         style.continuous_corners,
         false,
         &mut |segment| match segment {
-            nsh_core::shape::Segment::Move(x, y) => path.move_to(x as f32, y as f32),
-            nsh_core::shape::Segment::Line(x, y) => path.line_to(x as f32, y as f32),
-            nsh_core::shape::Segment::Cubic(values) => {
-                let [a, b, c, d, e, f] = values.map(|value| value as f32);
-                path.bezier_curve_to(a, b, c, d, e, f);
+            nsh_core::shape::Segment::Move(p) => path.move_to(p.x.0, p.y.0),
+            nsh_core::shape::Segment::Line(p) => path.line_to(p.x.0, p.y.0),
+            nsh_core::shape::Segment::Cubic([a, b, c]) => {
+                path.bezier_curve_to(a.x.0, a.y.0, b.x.0, b.y.0, c.x.0, c.y.0);
             }
             nsh_core::shape::Segment::Close => path.close(),
         },
@@ -325,28 +339,24 @@ pub(crate) fn outline(style: &ViewStyle, size: Size, spread: f32) -> Path {
     let w = (size.width + spread * 2.0).max(0.0);
     let h = (size.height + spread * 2.0).max(0.0);
     let radii = nsh_core::canvas::fit_radii(
-        w,
-        h,
+        CoreSize::new(Points(w), Points(h)),
         style
             .corner_radius
-            .map(|r| (r.unwrap_or(style.border_radius) + spread).max(0.0)),
+            .map(|r| Points((r.unwrap_or(style.border_radius).0 + spread).max(0.0))),
     );
     nsh_core::shape::rounded_rect(
-        (
-            -spread as f64,
-            -spread as f64,
-            (size.width + spread) as f64,
-            (size.height + spread) as f64,
+        Bounds::new(
+            Point::new(Points(-spread), Points(-spread)),
+            CoreSize::new(Points(w), Points(h)),
         ),
-        radii.map(|r| (r as f64, r as f64)),
+        radii.map(|&r| CoreSize::new(r, r)),
         style.continuous_corners,
         false,
         &mut |s| match s {
-            nsh_core::shape::Segment::Move(x, y) => path.move_to(x as f32, y as f32),
-            nsh_core::shape::Segment::Line(x, y) => path.line_to(x as f32, y as f32),
-            nsh_core::shape::Segment::Cubic(v) => {
-                let [a, b, c, d, e, f] = v.map(|v| v as f32);
-                path.bezier_curve_to(a, b, c, d, e, f);
+            nsh_core::shape::Segment::Move(p) => path.move_to(p.x.0, p.y.0),
+            nsh_core::shape::Segment::Line(p) => path.line_to(p.x.0, p.y.0),
+            nsh_core::shape::Segment::Cubic([a, b, c]) => {
+                path.bezier_curve_to(a.x.0, a.y.0, b.x.0, b.y.0, c.x.0, c.y.0);
             }
             nsh_core::shape::Segment::Close => path.close(),
         },
@@ -382,13 +392,13 @@ fn gradient(g: &Gradient, size: Size) -> Brush {
     if g.stops.is_empty() {
         return brush;
     }
-    let stops = g.resolved_stops();
-    let first = stops[0].1;
-    let last = stops.last().unwrap().1;
+    let stops = g.resolved_stops(size.into());
+    let first = stops[0].1.0;
+    let last = stops.last().unwrap().1.0;
     let span = (last - first).max(1e-6);
     brush.set_color(argb(stops.last().unwrap().0));
     let colors: Vec<_> = stops.iter().map(|(c, _)| argb(*c)).collect();
-    let positions: Vec<_> = stops.iter().map(|(_, p)| (*p - first) / span).collect();
+    let positions: Vec<_> = stops.iter().map(|(_, p)| (p.0 - first) / span).collect();
     let tile = if g.repeating {
         TileMode::Repeat
     } else {
@@ -397,7 +407,7 @@ fn gradient(g: &Gradient, size: Size) -> Brush {
     let (w, h) = (size.width, size.height);
     let shader = match g.kind {
         GradientKind::Radial { circle, size, x, y } => {
-            let (cx, cy) = (x * w, y * h);
+            let (cx, cy) = (x.0 * w, y.0 * h);
             let (rx, ry) = radii(circle, size, cx, cy, w, h);
             let matrix = Matrix::from_affine(rx.max(0.01), 0.0, 0.0, ry.max(0.01), cx, cy);
             ShaderEffect::two_point_conical_gradient(
@@ -412,7 +422,7 @@ fn gradient(g: &Gradient, size: Size) -> Brush {
             )
         }
         GradientKind::Conic { from, x, y } => {
-            let mut stops: Vec<_> = stops.into_iter().map(|(c, p)| (p, c)).collect();
+            let mut stops: Vec<_> = stops.into_iter().map(|(c, p)| (p.0, c)).collect();
             if g.repeating && span > 1e-5 {
                 let original = stops.clone();
                 stops.clear();
@@ -433,11 +443,13 @@ fn gradient(g: &Gradient, size: Size) -> Brush {
             stops.insert(0, (0.0, begin));
             stops.push((1.0, end));
             let (colors, positions) =
-                crate::render::canvas::sweep_stops(&stops, (from - 90.0).to_radians());
-            ShaderEffect::conic_gradient((x * w, y * h), &colors, &positions, TileMode::Clamp)
+                crate::render::canvas::sweep_stops(&stops, from.0 - std::f32::consts::FRAC_PI_2);
+            ShaderEffect::conic_gradient((x.0 * w, y.0 * h), &colors, &positions, TileMode::Clamp)
         }
         kind => {
-            let angle = kind.linear_angle(w, h).unwrap_or(180.0).to_radians();
+            let angle = kind
+                .linear_angle(size.into())
+                .map_or(std::f32::consts::PI, |r| r.0);
             let (dx, dy) = (angle.sin(), -angle.cos());
             let length = (w * dx).abs() + (h * dy).abs();
             let point = |t: f32| {

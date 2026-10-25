@@ -5,7 +5,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use nsh_core::Size;
+use crate::geometry::Size;
 
 #[path = "../../src/scroll/refresh.rs"]
 mod refresh;
@@ -86,6 +86,7 @@ impl Native {
 
 // Only the binding API used by the production controller is doubled here.
 pub(crate) mod render {
+    pub(crate) use crate::geometry;
     pub(crate) mod node {
         pub(crate) type NativeNode = super::super::NativeNode;
         pub(crate) type Result<T> = std::result::Result<T, super::super::ControllerError>;

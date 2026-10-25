@@ -4,31 +4,33 @@
 use std::{cell::RefCell, sync::Arc};
 
 use dispatch2::{DispatchQueue, MainThreadBound};
-use nsh_animation::{AnimationProp, AnimationValue};
 use nsh_core::{
-    Color, Command, EventKind, EventMask, EventPayload, GestureValues, ImageSource,
+    Bounds, Color, Command, EventKind, EventMask, EventPayload, GestureValues, ImageSource,
     KeyboardDismissMode, LayoutAnimation, LayoutCurve, LayoutProperty, LayoutTransition,
-    MountBatch, MountItem, NodeId, PayloadValue, Rect, ResizeMode, StickyCell, SubmitBehavior,
+    MountBatch, MountItem, NodeId, PayloadValue, Points, ResizeMode, StickyCell, SubmitBehavior,
     ViewKind, ViewProps, ViewStyle,
+    animation::{AnimationProp, AnimationValue},
+    geometry::{DevicePixels, point, size},
+    time::Instant,
 };
 use nsh_engine::EngineControl;
 use objc2::{
     MainThreadMarker, MainThreadOnly, Message, rc::Retained, runtime::ProtocolObject, sel,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
-use objc2_quartz_core::CATransform3D;
+use objc2_quartz_core::{CAAnimation, CALayer, CAMediaTiming, CATransform3D};
 use objc2_ui_kit::{
     UIActivityIndicatorView, UIActivityIndicatorViewStyle, UIControlEvents, UIDevice,
     UIGestureRecognizer, UIGestureRecognizerState, UIPanGestureRecognizer,
     UIPinchGestureRecognizer, UIRefreshControl, UIRotationGestureRecognizer, UIScrollView,
     UIScrollViewContentInsetAdjustmentBehavior, UIScrollViewKeyboardDismissMode,
-    UIUserInterfaceIdiom, UIView, UIViewAnimationOptions,
+    UITraitEnvironment, UIUserInterfaceIdiom, UIView, UIViewAnimationOptions,
 };
 
 use crate::{
     animation::Animator,
     decor::{self, Decor},
-    image::{AssetBase, DecodedImage, ImageLoader, Request},
+    image::{AssetBase, DecodedImage, ImageLoader, Request, not_a_bitmap},
     input::Input,
     native_view::NshView,
     navigation::{ModalHost, ScreenHost, StackHost},
@@ -129,8 +131,11 @@ impl Native {
 #[derive(Default)]
 struct Gestures {
     press: Option<Retained<PressRecognizer>>,
-    /// Reports `hover:` (pointers).
+    /// Reports `hover:` and the hover events (pointers).
     hover: Option<Retained<objc2_ui_kit::UIHoverGestureRecognizer>>,
+    /// `onContextMenu`: secondary clicks (iPad pointers, Mac Catalyst's
+    /// mouse).
+    context: Option<Retained<objc2_ui_kit::UITapGestureRecognizer>>,
     /// `cursor`: the pointer's look.
     pointer: Option<Retained<objc2_ui_kit::UIPointerInteraction>>,
     pan: Option<Retained<UIPanGestureRecognizer>>,
@@ -139,6 +144,13 @@ struct Gestures {
     /// `panActivation`.
     gate: Option<Retained<crate::touch::PanGate>>,
     refresh: Option<Refresh>,
+}
+
+/// The scroll view touched inside a cooperating pan. Its starting offset
+/// is consumed before the panel moves, including within one continuous drag.
+struct PanScroll {
+    view: Retained<UIScrollView>,
+    offset: f32,
 }
 
 /// Pull-to-refresh. `UIRefreshControl` throws under Mac Catalyst's Mac
@@ -209,24 +221,137 @@ fn innermost(view: &UIView, point: CGPoint) -> Retained<UIView> {
 
 fn ui_insets(i: nsh_core::EdgeInsets) -> objc2_ui_kit::UIEdgeInsets {
     objc2_ui_kit::UIEdgeInsets {
-        top: i.top as CGFloat,
-        left: i.left as CGFloat,
-        bottom: i.bottom as CGFloat,
-        right: i.right as CGFloat,
+        top: i.top.0 as CGFloat,
+        left: i.left.0 as CGFloat,
+        bottom: i.bottom.0 as CGFloat,
+        right: i.right.0 as CGFloat,
     }
 }
 
-fn set_bottom_inset(scroll: &UIScrollView, bottom: CGFloat, duration: f64, mtm: MainThreadMarker) {
-    let scroll = scroll.retain();
+/// How the software keyboard last moved: what `LayoutCurve::Keyboard`
+/// follows.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KeyboardMotion {
+    /// UIKit's curve (`UIKeyboardAnimationCurveUserInfoKey`): 7, a spring
+    /// UIKit has no name for, while the keyboard shows or hides.
+    pub(crate) curve: isize,
+    /// Seconds.
+    pub(crate) duration: f64,
+    /// When the keyboard started to move (`CACurrentMediaTime`).
+    pub(crate) start: f64,
+}
+
+impl KeyboardMotion {
+    /// Easing in and out from now, over `duration` seconds.
+    fn now(duration: f64) -> Self {
+        Self {
+            // UIViewAnimationCurveEaseInOut.
+            curve: 0,
+            duration,
+            start: objc2_quartz_core::CACurrentMediaTime(),
+        }
+    }
+
+    /// The options of a UIKit animation on this curve.
+    fn options(&self) -> UIViewAnimationOptions {
+        // UIViewAnimationOptions keeps the curve in bits 16-19, where any
+        // UIViewAnimationCurve fits, the keyboard's unnamed 7 included.
+        UIViewAnimationOptions::from_bits_retain(((self.curve as usize) & 0xf) << 16)
+            | UIViewAnimationOptions::BeginFromCurrentState
+            | UIViewAnimationOptions::AllowUserInteraction
+    }
+
+    /// Runs `f`, then starts the animations it added to `view`'s layer
+    /// when the keyboard started to move, so that they keep pace with it
+    /// however late they come (a batch from the engine thread arrives a
+    /// frame or more after the keyboard's notification).
+    fn aligned(&self, view: &UIView, f: impl FnOnce()) {
+        let layer = view.layer();
+        let animations = |layer: &CALayer| {
+            layer
+                .animationKeys()
+                .map(|keys| {
+                    keys.iter()
+                        .filter_map(|key| {
+                            // SAFETY: a key the layer just listed.
+                            let animation = unsafe { layer.animationForKey(&key) }?;
+                            Some((key, animation))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        let before = animations(&layer);
+        f();
+        let elapsed = objc2_quartz_core::CACurrentMediaTime() - self.start;
+        if !(elapsed > 0.0 && elapsed < self.duration) {
+            return;
+        }
+        let begin = layer.convertTime_fromLayer(self.start, None);
+        for (key, animation) in animations(&layer) {
+            if before
+                .iter()
+                .any(|(k, a)| *k == key && std::ptr::eq::<CAAnimation>(&**a, &*animation))
+            {
+                continue;
+            }
+            // Animations a layer holds are frozen: change a copy.
+            // SAFETY: CAAnimation conforms to NSCopying; `copy` returns a
+            // new, mutable animation of the same class.
+            let copy: Retained<CAAnimation> = unsafe { objc2::msg_send![&*animation, copy] };
+            copy.setBeginTime(begin);
+            // SAFETY: an immutable Core Animation constant.
+            copy.setFillMode(unsafe { objc2_quartz_core::kCAFillModeBackwards });
+            layer.addAnimation_forKey(&copy, Some(&key));
+        }
+    }
+}
+
+/// Sets the bottom inset of `scroll` and scrolls `reveal` (a rectangle in
+/// its content) into view in one animation along `motion`, the keyboard's,
+/// so that the content moves with the keyboard.
+fn set_bottom_inset(
+    scroll: &UIScrollView,
+    bottom: CGFloat,
+    reveal: Option<CGRect>,
+    motion: KeyboardMotion,
+    mtm: MainThreadMarker,
+) {
+    let target = scroll.retain();
     let block = block2::RcBlock::new(move || {
+        let scroll = &target;
         let mut inset = scroll.contentInset();
         inset.bottom = bottom;
         scroll.setContentInset(inset);
         let mut indicators = scroll.verticalScrollIndicatorInsets();
         indicators.bottom = bottom;
         scroll.setVerticalScrollIndicatorInsets(indicators);
+        if let Some(rect) = reveal {
+            let insets = scroll.adjustedContentInset();
+            let height = scroll.bounds().size.height;
+            let mut offset = scroll.contentOffset();
+            let (top, bottom) = (offset.y + insets.top, offset.y + height - insets.bottom);
+            let (min_y, max_y) = (rect.origin.y, rect.origin.y + rect.size.height);
+            if max_y > bottom {
+                offset.y += (max_y - bottom).min(min_y - top);
+            } else if min_y < top {
+                offset.y -= top - min_y;
+            }
+            let end = (scroll.contentSize().height + insets.bottom - height).max(-insets.top);
+            offset.y = offset.y.clamp(-insets.top, end);
+            scroll.setContentOffset(offset);
+        }
     });
-    UIView::animateWithDuration_animations(duration, &block, mtm);
+    motion.aligned(scroll, || {
+        UIView::animateWithDuration_delay_options_animations_completion(
+            motion.duration,
+            0.0,
+            motion.options(),
+            &block,
+            None,
+            mtm,
+        )
+    });
 }
 
 /// How far past the top a release must be to trigger a custom refresh.
@@ -244,21 +369,20 @@ struct Slot {
     decor: Decor,
     events: EventMask,
     gestures: Gestures,
-    bindings: Vec<(AnimationProp, nsh_animation::NodeId)>,
+    bindings: Vec<(AnimationProp, nsh_core::animation::NodeId)>,
     values: GestureValues,
     /// Values of the gesture nodes when the gesture began: pan x, pan y,
     /// pinch, rotation.
     gesture_start: [f32; 4],
-    /// `activeOpacity`: opacity while pressed.
-    active_opacity: Option<f32>,
+    pan_scroll_handoff: bool,
+    pan_scroll: Option<PanScroll>,
     /// `delayLongPress` (milliseconds).
     long_press_delay: Option<f32>,
     /// A horizontal list laid out right to left: mirrored as a whole.
     mirrored: bool,
     /// A cell of such a list: mirrored back.
     in_mirrored: bool,
-    pressed: bool,
-    scroll_value: Option<nsh_animation::NodeId>,
+    scroll_value: Option<nsh_core::animation::NodeId>,
     /// How a scroll view scrolls (scroll views only).
     behavior: Option<Box<nsh_core::ScrollBehavior>>,
     horizontal: bool,
@@ -307,11 +431,11 @@ impl Slot {
             bindings: Vec::new(),
             values: GestureValues::default(),
             gesture_start: [0.0; 4],
-            active_opacity: None,
+            pan_scroll_handoff: false,
+            pan_scroll: None,
             long_press_delay: None,
             mirrored: false,
             in_mirrored: false,
-            pressed: false,
             scroll_value: None,
             behavior: None,
             horizontal: false,
@@ -334,6 +458,8 @@ pub(crate) struct Mounter {
     animated: Vec<NodeId>,
     /// Image views waiting for their frame before loading.
     pending_images: Vec<NodeId>,
+    /// The display scale images were last requested at.
+    image_scale: CGFloat,
     target: Retained<EventTarget>,
     animator: Animator,
     images: ImageLoader,
@@ -347,6 +473,8 @@ pub(crate) struct Mounter {
     focused: Option<NodeId>,
     /// Height of the software keyboard over the surface.
     keyboard: f32,
+    /// How the keyboard last moved (`LayoutCurve::Keyboard`).
+    keyboard_motion: KeyboardMotion,
     /// The scroll view given a bottom inset to clear the keyboard.
     avoiding: Option<NodeId>,
     /// Animates the frames, insertions and removals of the current batch.
@@ -384,6 +512,10 @@ pub(crate) struct Mounter {
     sticky: rustc_hash::FxHashMap<NodeId, Vec<StickyCell>>,
     /// The native components the app registered.
     components: crate::component::Components,
+    /// Selection areas (`ViewProps::selection_area`) and their selections.
+    areas: Vec<(NodeId, Retained<crate::selection_area::AreaResponder>)>,
+    /// The performance monitor, while it measures ([`Mounter::measure`]).
+    fps: Option<std::rc::Rc<crate::fps::Fps>>,
     mtm: MainThreadMarker,
 }
 
@@ -407,6 +539,7 @@ impl Mounter {
             views,
             animated: Vec::new(),
             pending_images: Vec::new(),
+            image_scale: 0.0,
             animator: Animator::new(&target),
             target,
             images: ImageLoader::new(
@@ -429,6 +562,10 @@ impl Mounter {
                 == UIUserInterfaceIdiom::Mac,
             focused: None,
             keyboard: 0.0,
+            keyboard_motion: KeyboardMotion {
+                start: f64::NEG_INFINITY,
+                ..KeyboardMotion::now(0.25)
+            },
             avoiding: None,
             layout_animation: None,
             created: Vec::new(),
@@ -446,11 +583,29 @@ impl Mounter {
             blocked_scrolls: Vec::new(),
             rtl: false,
             components,
+            areas: Vec::new(),
+            fps: None,
             mtm,
         }
     }
 
+    /// Measures the surface's frames and commits with a performance
+    /// monitor ([`crate::fps`]) from now on.
+    pub(crate) fn measure(&mut self) {
+        let fps = crate::fps::Fps::start(self.mtm);
+        self.control.set_perf_monitor(Some(fps.monitor.clone()));
+        self.fps = Some(fps);
+    }
+
     pub(crate) fn apply(&mut self, batch: MountBatch) {
+        let start = self.fps.is_some().then(Instant::now);
+        self.apply_batch(batch);
+        if let (Some(fps), Some(start)) = (&self.fps, start) {
+            fps.drained(start.elapsed());
+        }
+    }
+
+    fn apply_batch(&mut self, batch: MountBatch) {
         let mut animation_changed = false;
         for item in batch.items {
             animation_changed |= self.apply_item(item);
@@ -465,6 +620,86 @@ impl Mounter {
         }
         self.report_finished();
         self.start_image_loads();
+        for (_, area) in &self.areas {
+            area.batch_applied();
+        }
+        self.focused_caret_moved();
+    }
+
+    /// Reports the focused input's caret if the batch moved it (the input
+    /// was laid out again: its text wraps elsewhere).
+    fn focused_caret_moved(&self) {
+        let Some(id) = self.focused else { return };
+        let Some(Slot {
+            native: Native::Input(input),
+            events,
+            ..
+        }) = self.slot(id)
+        else {
+            return;
+        };
+        if !events.contains(EventKind::CaretMove) {
+            return;
+        }
+        let view = input.editor_view();
+        view.layoutIfNeeded();
+        let Some(caret) = crate::input::caret(view) else {
+            return;
+        };
+        if crate::input::caret_changed(view, caret) {
+            self.input_event(id, EventKind::CaretMove, EventPayload::caret(caret));
+        }
+    }
+
+    /// The surface's event target.
+    pub(crate) fn target(&self) -> &Retained<EventTarget> {
+        &self.target
+    }
+
+    /// Node `id`'s view (`nsh test --target ios`).
+    #[cfg(feature = "dev")]
+    pub(crate) fn ui_view(&self, id: NodeId) -> Option<Retained<UIView>> {
+        Some(self.slot(id)?.native.view().retain())
+    }
+
+    /// Text view `id` (`None`: it is no text view).
+    #[cfg(feature = "dev")]
+    pub(crate) fn text_view(&self, id: NodeId) -> Option<Retained<TextView>> {
+        match &self.slot(id)?.native {
+            Native::Text(text) => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    /// The text input `id` holds (`None`: it is no input).
+    #[cfg(feature = "dev")]
+    pub(crate) fn input_text(&self, id: NodeId) -> Option<String> {
+        match &self.slot(id)?.native {
+            Native::Input(input) => Some(input.text()),
+            _ => None,
+        }
+    }
+
+    /// VoiceOver's escape gesture (or the test agent's `back`) reached the
+    /// surface: while the app listens to going back (an overlay's
+    /// `onCancel`, a back listener), the core hears it as the back button
+    /// (the top overlay listening first). Whether it was taken.
+    pub(crate) fn escape(&self) -> bool {
+        if !self
+            .slot(nsh_core::ROOT_ID)
+            .is_some_and(|s| s.events.contains(EventKind::BackPress))
+        {
+            return false;
+        }
+        self.control
+            .dispatch_event(nsh_core::ROOT_ID, EventKind::BackPress, EventPayload::None);
+        true
+    }
+
+    /// Whether a native animation runs.
+    #[cfg(feature = "dev")]
+    pub(crate) fn animating(&self) -> bool {
+        self.animator.animating()
     }
 
     #[inline]
@@ -607,7 +842,13 @@ impl Mounter {
             MountItem::Delete { id } => {
                 self.remove_hosted(id);
                 self.sticky.remove(&id);
+                // A removal animation it was running ends with it: its end
+                // must not find the id, which a new view may take.
+                self.disappearing.remove(&id);
                 self.target.scroll_deleted(id);
+                if let Some(i) = self.areas.iter().position(|(a, _)| *a == id) {
+                    self.areas.remove(i).1.detach();
+                }
                 if let Some(mut s) = self.views.get_mut(id as usize).and_then(Option::take) {
                     // A modal deleted while presented (its subtree released
                     // without a remove) goes away too, as on Android.
@@ -635,7 +876,10 @@ impl Mounter {
                     let origin = view.frame().origin;
                     view.setFrame(CGRect::new(
                         origin,
-                        CGSize::new(frame.width as CGFloat, frame.height as CGFloat),
+                        CGSize::new(
+                            frame.size.width.0 as CGFloat,
+                            frame.size.height.0 as CGFloat,
+                        ),
                     ));
                     return false;
                 }
@@ -646,10 +890,10 @@ impl Mounter {
                 {
                     // The keyboard places it and sets its width.
                     let old = view.frame();
-                    let height = frame.height as CGFloat;
+                    let height = frame.size.height.0 as CGFloat;
                     view.setFrame(CGRect::new(
                         old.origin,
-                        CGSize::new(old.size.width.max(frame.width as CGFloat), height),
+                        CGSize::new(old.size.width.max(frame.size.width.0 as CGFloat), height),
                     ));
                     if old.size.height != height {
                         let view = Retained::into_super(view.clone());
@@ -672,13 +916,15 @@ impl Mounter {
                             if !self.created.contains(&id)
                                 && view.bounds().size != CGSize::ZERO =>
                         {
-                            let view = view.retain();
-                            animate(&t, self.mtm, move || set_frame(&view, frame));
+                            let target = view.retain();
+                            animate(&t, self.keyboard_motion, view, self.mtm, move || {
+                                set_frame(&target, frame)
+                            });
                         }
                         _ => set_frame(view, frame),
                     }
                     if let Some(Refresh::Custom { spinner, .. }) = &s.gestures.refresh {
-                        place_spinner(spinner, frame.width);
+                        place_spinner(spinner, frame.size.width.0);
                     }
                     if let Native::Video(video) = &s.native {
                         video.layout();
@@ -697,7 +943,7 @@ impl Mounter {
                     crate::interaction::keyframes(
                         &s.native.view().layer(),
                         Some(&a),
-                        frame.height as f64,
+                        frame.size.height.0 as f64,
                     );
                 }
                 // The origin of the transform depends on the size.
@@ -715,8 +961,8 @@ impl Mounter {
                 if let Some(view) = self.slot(id).and_then(|s| s.native.nsh()) {
                     view.set_overflow(extent.map(|e| {
                         CGRect::new(
-                            CGPoint::new(e.x as CGFloat, e.y as CGFloat),
-                            CGSize::new(e.width as CGFloat, e.height as CGFloat),
+                            CGPoint::new(e.origin.x.0 as CGFloat, e.origin.y.0 as CGFloat),
+                            CGSize::new(e.size.width.0 as CGFloat, e.size.height.0 as CGFloat),
                         )
                     }));
                 }
@@ -764,7 +1010,7 @@ impl Mounter {
             MountItem::ScrollConfig {
                 id,
                 horizontal,
-                shows_indicator,
+                scrollbar_visible,
                 scroll_value,
                 keyboard_dismiss,
                 mirrored,
@@ -800,8 +1046,8 @@ impl Mounter {
                     let bounces = s.behavior.as_ref().is_none_or(|b| b.bounces);
                     scroll.setAlwaysBounceVertical(bounces && !horizontal);
                     scroll.setAlwaysBounceHorizontal(bounces && horizontal);
-                    scroll.setShowsVerticalScrollIndicator(shows_indicator && !horizontal);
-                    scroll.setShowsHorizontalScrollIndicator(shows_indicator && horizontal);
+                    scroll.setShowsVerticalScrollIndicator(scrollbar_visible && !horizontal);
+                    scroll.setShowsHorizontalScrollIndicator(scrollbar_visible && horizontal);
                     s.horizontal = horizontal;
                     s.scroll_value = scroll_value;
                 }
@@ -814,7 +1060,7 @@ impl Mounter {
                     },
                 ) = self.slot(id)
                 {
-                    let size = CGSize::new(size.width as CGFloat, size.height as CGFloat);
+                    let size = CGSize::new(size.width.0 as CGFloat, size.height.0 as CGFloat);
                     match s.zoom_view() {
                         Some(zoom) => crate::zoom::layout(scroll, &zoom, size, s.centers()),
                         None => scroll.setContentSize(size),
@@ -829,7 +1075,10 @@ impl Mounter {
                 {
                     self.target.scroll_applied(id);
                     let o = scroll.contentOffset();
-                    scroll.setContentOffset(CGPoint::new(o.x + dx as CGFloat, o.y + dy as CGFloat));
+                    scroll.setContentOffset(CGPoint::new(
+                        o.x + dx.0 as CGFloat,
+                        o.y + dy.0 as CGFloat,
+                    ));
                 }
             }
             MountItem::StickyCells { id, cells } => {
@@ -1018,7 +1267,7 @@ impl Mounter {
             }
             MountItem::Command { id, command } => self.command(id, command),
             // Hardware keyboards' shortcuts are not matched yet.
-            MountItem::Keymap(_) => {}
+            MountItem::Keymap(keymap) => self.target.keymap().set(keymap),
         }
         false
     }
@@ -1064,8 +1313,8 @@ impl Mounter {
                 let max_x = (size.width + inset.right - bounds.width).max(-inset.left);
                 let max_y = (size.height + inset.bottom - bounds.height).max(-inset.top);
                 let offset = CGPoint::new(
-                    (x as CGFloat).clamp(-inset.left, max_x),
-                    (y as CGFloat).clamp(-inset.top, max_y),
+                    (x.0 as CGFloat).clamp(-inset.left, max_x),
+                    (y.0 as CGFloat).clamp(-inset.top, max_y),
                 );
                 self.target.scroll_applied(id);
                 scroll.setContentOffset_animated(offset, animated);
@@ -1079,6 +1328,7 @@ impl Mounter {
                 Native::Scroll(scroll),
             ) => {
                 if crate::zoom::zoom_view(scroll).is_some() {
+                    let center = center.map(|c| (c.x.0, c.y.0));
                     crate::zoom::zoom_to(scroll, scale, center, animated);
                 }
             }
@@ -1087,6 +1337,15 @@ impl Mounter {
             }
             (Command::Dialog(dialog), native) if id == nsh_core::ROOT_ID => {
                 crate::system::show_dialog(&dialog, native.view(), &self.control);
+            }
+            (
+                Command::PickImages {
+                    id: request,
+                    request: asked,
+                },
+                native,
+            ) if id == nsh_core::ROOT_ID => {
+                crate::picker::pick_images(request, asked, native.view(), &self.control);
             }
             (Command::SetJsResponder { block }, _) => self.set_js_responder(id, block),
             (Command::SetSelection { start, end }, Native::Input(input)) => {
@@ -1098,6 +1357,7 @@ impl Mounter {
             (Command::Announce(text), _) => crate::system::announce(&text),
             (Command::ImageInfo { id, uri }, _) => self.images.info(id, &uri),
             (Command::SetClipboard(text), _) => crate::system::set_clipboard(&text),
+            (Command::OpenUrl { id, url }, _) => crate::system::open_url(id, &url, &self.control),
             (Command::ReadClipboard { id, has_only }, _) => {
                 let (has, text) = crate::system::read_clipboard(has_only);
                 let mut fields = vec![
@@ -1113,6 +1373,17 @@ impl Mounter {
                     EventPayload::Map(fields),
                 );
             }
+            (Command::SetClipboardImage(uri), _) => crate::system::set_clipboard_image(&uri),
+            (Command::ReadClipboardImage { id, has_only }, _) => self.control.dispatch_event(
+                nsh_core::ROOT_ID,
+                EventKind::Clipboard,
+                crate::system::read_clipboard_image(id, has_only),
+            ),
+            (Command::ReadClipboardFiles { id }, _) => self.control.dispatch_event(
+                nsh_core::ROOT_ID,
+                EventKind::Clipboard,
+                crate::system::read_clipboard_files(id),
+            ),
             (Command::AccessibilityFocus, native) => {
                 crate::system::accessibility_focus(native.view())
             }
@@ -1138,6 +1409,7 @@ impl Mounter {
             return;
         };
         input.count += 1;
+        input.known.clone_from(&text);
         input.update_placeholder();
         let count = input.count;
         self.control.dispatch_event(
@@ -1147,7 +1419,71 @@ impl Mounter {
         );
     }
 
+    /// The user edited input `id` to `text`, with the marked text `marked`
+    /// (`None`: no composition). A composition that starts or changes is
+    /// reported before the `onChangeText` of the text holding it, and one
+    /// that ends after the `onChangeText` of the text it committed, as
+    /// browsers order them.
+    pub(crate) fn input_edited(&mut self, id: NodeId, text: String, marked: Option<String>) {
+        if marked.is_some() {
+            if let Some(Slot {
+                native: Native::Input(input),
+                ..
+            }) = self.slot_mut(id)
+                && let Some(change) = input.compose(marked)
+            {
+                self.composition_changed(id, change);
+            }
+            self.input_changed(id, text);
+        } else {
+            self.input_changed(id, text.clone());
+            self.input_composition(id, text, marked);
+        }
+    }
+
+    /// A UIKit callback of input `id` saw `text` with the marked text
+    /// `marked` (`None`: no composition). Ignored while `text` is an edit
+    /// not reported yet: the callback reporting it follows, so a commit's
+    /// `onChangeText` comes before the composition's end.
+    pub(crate) fn input_composition(&mut self, id: NodeId, text: String, marked: Option<String>) {
+        let Some(Slot {
+            native: Native::Input(input),
+            ..
+        }) = self.slot_mut(id)
+        else {
+            return;
+        };
+        if text != input.known {
+            return;
+        }
+        if let Some(change) = input.compose(marked) {
+            self.composition_changed(id, change);
+        }
+    }
+
+    /// `onCompositionChange` of input `id`, if it listens.
+    fn composition_changed(&self, id: NodeId, (composing, text): (bool, String)) {
+        self.input_event(
+            id,
+            EventKind::CompositionChange,
+            EventPayload::Map(vec![
+                ("composing", nsh_core::PayloadValue::Bool(composing)),
+                ("text", nsh_core::PayloadValue::Str(text)),
+            ]),
+        );
+    }
+
     pub(crate) fn input_focused(&mut self, id: NodeId, focused: bool) {
+        // Leaving an input ends its composition.
+        if !focused
+            && let Some(Slot {
+                native: Native::Input(input),
+                ..
+            }) = self.slot_mut(id)
+            && let Some(change) = input.compose(None)
+        {
+            self.composition_changed(id, change);
+        }
         self.report_state(id, nsh_core::tailwind::state::FOCUSED, focused);
         let Some(s) = self.slot(id) else { return };
         let event = if focused {
@@ -1162,7 +1498,7 @@ impl Mounter {
             self.focused = Some(id);
             // Moving between fields with the keyboard up.
             if self.keyboard > 0.0 {
-                self.avoid_keyboard(0.25);
+                self.avoid_keyboard(KeyboardMotion::now(0.25));
             }
         } else if self.focused == Some(id) {
             self.focused = None;
@@ -1193,15 +1529,18 @@ impl Mounter {
         }
     }
 
-    /// The software keyboard now covers `height` points of the surface.
-    pub(crate) fn keyboard_changed(&mut self, height: f32, duration: f64) {
+    /// The software keyboard now covers `height` points of the surface,
+    /// getting there as `motion` says.
+    pub(crate) fn keyboard_changed(&mut self, height: f32, motion: KeyboardMotion) {
         self.keyboard = height;
-        self.avoid_keyboard(duration);
+        self.keyboard_motion = motion;
+        self.avoid_keyboard(motion);
     }
 
     /// Keeps the focused input visible: gives its scroll view a bottom inset
-    /// as high as the part the keyboard covers, and scrolls to the input.
-    fn avoid_keyboard(&mut self, duration: f64) {
+    /// as high as the part the keyboard covers, and scrolls to the input,
+    /// both moving as the keyboard does.
+    fn avoid_keyboard(&mut self, motion: KeyboardMotion) {
         let scroll = self.focused.and_then(|id| self.scroll_around(id));
         if let Some(previous) = self.avoiding.take()
             && (Some(previous) != scroll.as_ref().map(|(id, _)| *id) || self.keyboard <= 0.0)
@@ -1211,7 +1550,7 @@ impl Mounter {
             }) = self.slot(previous)
         {
             let base = self.base_inset(previous).bottom;
-            set_bottom_inset(view, base, duration, self.mtm);
+            set_bottom_inset(view, base, None, motion, self.mtm);
         }
         let (Some((scroll_id, scroll)), Some(root)) = (scroll, self.slot(nsh_core::ROOT_ID)) else {
             return;
@@ -1231,24 +1570,23 @@ impl Mounter {
         let keyboard_top = root_bottom.y - self.keyboard as CGFloat;
         let covered = (frame.origin.y + frame.size.height - keyboard_top).max(0.0);
         let base = self.base_inset(scroll_id).bottom;
-        set_bottom_inset(&scroll, base + covered, duration, self.mtm);
-        self.avoiding = Some(scroll_id);
-        if let Some(Slot {
-            native: Native::Input(input),
-            ..
-        }) = self.focused.and_then(|id| self.slot(id))
-        {
-            let editor = input.editor_view();
-            let rect = editor.convertRect_toView(editor.bounds(), Some(&scroll));
-            let margin = 12.0;
-            scroll.scrollRectToVisible_animated(
-                CGRect::new(
+        let reveal = match self.focused.and_then(|id| self.slot(id)) {
+            Some(Slot {
+                native: Native::Input(input),
+                ..
+            }) => {
+                let editor = input.editor_view();
+                let rect = editor.convertRect_toView(editor.bounds(), Some(&scroll));
+                let margin = 12.0;
+                Some(CGRect::new(
                     CGPoint::new(rect.origin.x, rect.origin.y - margin),
                     CGSize::new(rect.size.width, rect.size.height + 2.0 * margin),
-                ),
-                true,
-            );
-        }
+                ))
+            }
+            _ => None,
+        };
+        set_bottom_inset(&scroll, base + covered, reveal, motion, self.mtm);
+        self.avoiding = Some(scroll_id);
     }
 
     /// The nearest app scroll view containing view `id`.
@@ -1472,13 +1810,15 @@ impl Mounter {
                 content.height,
             )
         };
-        let snapped = b.snap_target(
-            at as f32,
-            projected as f32,
-            v as f32,
-            viewport as f32,
-            length as f32,
-        )? as CGFloat;
+        let snapped = b
+            .snap_target(
+                Points(at as f32),
+                Points(projected as f32),
+                v as f32,
+                Points(viewport as f32),
+                Points(length as f32),
+            )?
+            .0 as CGFloat;
         Some(if *horizontal {
             CGPoint::new(snapped, target.y)
         } else {
@@ -1641,9 +1981,101 @@ impl Mounter {
         }
     }
 
-    /// A pointer entered or left view `id`.
-    pub(crate) fn hover_changed(&mut self, id: NodeId, on: bool) {
+    /// A pointer (an iPad's, a Mac's mouse) entered (`Began`), moved over
+    /// or left view `id`, at `in_window` (the window's coordinates).
+    pub(crate) fn hover(
+        &mut self,
+        id: NodeId,
+        state: UIGestureRecognizerState,
+        in_window: CGPoint,
+        modifiers: isize,
+    ) {
+        let on = matches!(
+            state,
+            UIGestureRecognizerState::Began | UIGestureRecognizerState::Changed
+        );
         self.report_state(id, nsh_core::tailwind::state::HOVERED, on);
+        let Some(events) = self.slot(id).map(|s| s.events) else {
+            return;
+        };
+        let changed = match state {
+            UIGestureRecognizerState::Began => Some(EventKind::HoverIn),
+            UIGestureRecognizerState::Ended | UIGestureRecognizerState::Cancelled => {
+                Some(EventKind::HoverOut)
+            }
+            _ => None,
+        };
+        if let Some(kind) = changed.filter(|k| events.contains(*k)) {
+            self.control.dispatch_event(id, kind, EventPayload::None);
+        }
+        if !on || !events.contains(EventKind::HoverMove) {
+            return;
+        }
+        let Some(view) = self.slot(id).map(|s| s.native.view().retain()) else {
+            return;
+        };
+        let local = view.convertPoint_fromView(in_window, None);
+        let page = self.root_view_of(&view).map_or(in_window, |root| {
+            root.convertPoint_fromView(in_window, None)
+        });
+        // UIKeyModifierShift, Control, Alternate, Command.
+        let has = |bit: u32| modifiers & (1 << bit) != 0;
+        let event = nsh_core::HoverEvent {
+            position: point(Points(local.x as f32), Points(local.y as f32)),
+            page_position: point(Points(page.x as f32), Points(page.y as f32)),
+            modifiers: nsh_core::keymap::Modifiers {
+                ctrl: has(18),
+                alt: has(19),
+                shift: has(17),
+                cmd: has(20),
+            },
+        };
+        self.control
+            .dispatch_event(id, EventKind::HoverMove, EventPayload::Hover(event));
+    }
+
+    /// A secondary click on view `id`, at `in_window` (the window's
+    /// coordinates).
+    pub(crate) fn context_menu(&mut self, id: NodeId, in_window: CGPoint, modifiers: isize) {
+        let Some(view) = self.slot(id).map(|s| s.native.view().retain()) else {
+            return;
+        };
+        let local = view.convertPoint_fromView(in_window, None);
+        let page = self.root_view_of(&view).map_or(in_window, |root| {
+            root.convertPoint_fromView(in_window, None)
+        });
+        // UIKeyModifierShift, Control, Alternate, Command.
+        let has = |bit: u32| modifiers & (1 << bit) != 0;
+        let event = nsh_core::ContextMenuEvent {
+            position: point(Points(local.x as f32), Points(local.y as f32)),
+            page_position: point(Points(page.x as f32), Points(page.y as f32)),
+            modifiers: nsh_core::keymap::Modifiers {
+                ctrl: has(18),
+                alt: has(19),
+                shift: has(17),
+                cmd: has(20),
+            },
+        };
+        self.control
+            .dispatch_event(id, EventKind::ContextMenu, EventPayload::ContextMenu(event));
+    }
+
+    /// The root view `view` is in: the surface's, or its modal's (touches'
+    /// page coordinates are in it).
+    fn root_view_of(&self, view: &UIView) -> Option<Retained<UIView>> {
+        let mut current = Some(view.retain());
+        while let Some(v) = current {
+            let tag = v.tag() as NodeId;
+            if tag == nsh_core::ROOT_ID
+                || self
+                    .slot(tag)
+                    .is_some_and(|s| matches!(s.native, Native::Modal(_)))
+            {
+                return Some(v);
+            }
+            current = v.superview();
+        }
+        None
     }
 
     /// The pointer's look over view `id`.
@@ -1696,9 +2128,13 @@ impl Mounter {
         if !matches!(s.native, Native::Image(_)) {
             return;
         }
-        s.decor.set_resize_mode(resize_mode);
-        let same_source =
-            s.image.as_ref().map(|src| &src.uri) == source.as_ref().map(|src| &src.uri);
+        // `center` shows the image at its own size: decoded so, where the
+        // other modes decode it at the view's.
+        let natural = |m: ResizeMode| m == ResizeMode::Center;
+        let same_decode = natural(s.decor.resize_mode()) == natural(resize_mode);
+        s.decor.set_fit(resize_mode, options.position);
+        let same_source = same_decode
+            && s.image.as_ref().map(|src| &src.uri) == source.as_ref().map(|src| &src.uri);
         let same_look = s.image_options.placeholder == options.placeholder
             && s.image_options.blur_radius == options.blur_radius;
         s.image_options = options;
@@ -1718,19 +2154,64 @@ impl Mounter {
         }
     }
 
+    /// The screen's pixels per point. Not `contentScaleFactor`: it stays 1
+    /// on views that draw nothing themselves.
+    fn display_scale(&self) -> CGFloat {
+        let Some(root) = self.slot(nsh_core::ROOT_ID).map(|s| s.native.view()) else {
+            return 2.0;
+        };
+        // SAFETY: a plain getter.
+        let scale = unsafe { root.traitCollection().displayScale() };
+        if scale > 0.0 {
+            return scale;
+        }
+        root.window().map_or(2.0, |w| w.screen().scale())
+    }
+
+    /// The surface's traits changed: on a screen of another scale (an
+    /// external display, Catalyst), images decode again for it.
+    pub(crate) fn traits_changed(&mut self) {
+        if self.display_scale() == self.image_scale {
+            return;
+        }
+        for (id, slot) in self.views.iter_mut().enumerate() {
+            let Some(s) = slot else { continue };
+            if !matches!(s.native, Native::Image(_))
+                || (s.image.is_none() && s.image_options.placeholder.is_none())
+            {
+                continue;
+            }
+            let id = id as NodeId;
+            for key in [s.image_key.take(), s.placeholder_key.take()]
+                .into_iter()
+                .flatten()
+            {
+                self.images.cancel(id, &key);
+            }
+            if !self.pending_images.contains(&id) {
+                self.pending_images.push(id);
+            }
+        }
+        self.start_image_loads();
+    }
+
     /// Starts loads queued during the batch, now that frames are known so
     /// images can be decoded at their display size.
     fn start_image_loads(&mut self) {
-        let scale = self
-            .slot(nsh_core::ROOT_ID)
-            .map_or(2.0, |s| s.native.view().contentScaleFactor());
+        let scale = self.display_scale();
+        self.image_scale = scale;
         for id in std::mem::take(&mut self.pending_images) {
             let Some(s) = self.slot(id) else { continue };
             let Native::Image(view) = &s.native else {
                 continue;
             };
             let size = view.bounds().size;
-            let max_pixels = (size.width.max(size.height) * scale).ceil() as u32;
+            // 0: the image's own size, which `center` shows.
+            let max_pixels = if s.decor.resize_mode() == ResizeMode::Center {
+                0
+            } else {
+                (size.width.max(size.height) * scale).ceil() as u32
+            };
             let filters = s
                 .style
                 .effects
@@ -1738,15 +2219,21 @@ impl Mounter {
                 .map(|e| &e.filters[..])
                 .unwrap_or(&[]);
             let look = crate::image::Look {
-                blur: s.image_options.blur_radius + nsh_core::blur_radius(filters),
+                blur: s.image_options.blur_radius.0 + nsh_core::blur_radius(filters).0,
                 matrix: nsh_core::compose_color_matrices(filters),
             };
             let (source, placeholder) = (
-                s.image.as_ref().map(|s| s.uri.clone()),
-                s.image_options.placeholder.as_ref().map(|s| s.uri.clone()),
+                s.image.as_ref().map(|s| (s.uri.clone(), s.data.clone())),
+                s.image_options
+                    .placeholder
+                    .as_ref()
+                    .map(|s| (s.uri.clone(), s.data.clone())),
             );
-            if let Some(uri) = source {
-                match self.images.request(id, &uri, max_pixels, scale, look) {
+            if let Some((uri, data)) = source {
+                match self
+                    .images
+                    .request(id, &uri, data.as_ref(), max_pixels, scale, look)
+                {
                     Request::Ready(decoded) => {
                         if let Some(s) = self.slot_mut(id) {
                             s.decor.set_image(Some(&decoded.image), 0.0);
@@ -1770,9 +2257,12 @@ impl Mounter {
             }
             // The placeholder, until the image shows.
             let shown = self.slot(id).is_some_and(|s| s.image_shown);
-            if let Some(uri) = placeholder.filter(|_| !shown) {
+            if let Some((uri, data)) = placeholder.filter(|_| !shown) {
                 let plain = crate::image::Look::default();
-                match self.images.request(id, &uri, max_pixels, scale, plain) {
+                match self
+                    .images
+                    .request(id, &uri, data.as_ref(), max_pixels, scale, plain)
+                {
                     Request::Ready(decoded) => {
                         if let Some(s) = self.slot_mut(id) {
                             s.decor.set_image(Some(&decoded.image), 0.0);
@@ -1799,16 +2289,24 @@ impl Mounter {
         };
         let view = view.clone();
         view.set_drawing(drawing.clone());
-        let scale = view.contentScaleFactor();
+        // Not the view's `contentScaleFactor`: zooming raises it.
+        let scale = self.display_scale();
         for image in drawing.images() {
             if view.has_image(&image.uri) {
                 continue;
             }
             // At their natural size: the drawing may scale them anyway.
-            match self
-                .images
-                .request(id, &image.uri, 0, scale, crate::image::Look::default())
-            {
+            match self.images.request(
+                id,
+                &image.uri,
+                None,
+                0,
+                scale,
+                crate::image::Look::default(),
+            ) {
+                Request::Ready(decoded) if decoded.vector => {
+                    log::warn!("canvas image failed: {}", not_a_bitmap(&image.uri));
+                }
                 Request::Ready(decoded) => view.set_image(image.uri.clone(), decoded.image),
                 Request::Pending => {}
             }
@@ -1816,11 +2314,17 @@ impl Mounter {
     }
 
     /// What the image loader reports.
+    /// The disk cache the images it loads go through.
+    pub(crate) fn set_image_cache(&mut self, cache: Option<nsh_core::image::DiskCache>) {
+        self.images.set_disk_cache(cache);
+    }
+
     pub(crate) fn load_event(&mut self, event: crate::image::LoadEvent) {
         use crate::image::LoadEvent;
         match event {
             LoadEvent::Decoded { key, result } => self.image_loaded(&key, result),
             LoadEvent::Bytes { uri, result } => self.images.bytes_ready(&uri, result),
+            LoadEvent::Download { uri, headers } => self.images.download(&uri, &headers),
             LoadEvent::Progress { uri, loaded, total } => {
                 for id in self.images.waiting(&uri) {
                     let Some(s) = self.slot(id) else { continue };
@@ -1865,6 +2369,9 @@ impl Mounter {
             {
                 // Canvas images are requested at their natural size.
                 match (&result, key.strip_prefix("0@")) {
+                    (Ok(decoded), Some(uri)) if decoded.vector => {
+                        log::warn!("canvas image failed: {}", not_a_bitmap(uri));
+                    }
                     (Ok(decoded), Some(uri)) => view.set_image(uri.into(), decoded.image.clone()),
                     (Err(message), _) => log::warn!("canvas image failed: {message}"),
                     _ => {}
@@ -1908,10 +2415,10 @@ impl Mounter {
                 self.control.dispatch_event(
                     id,
                     EventKind::Load,
-                    EventPayload::Image {
-                        width: decoded.width as f32,
-                        height: decoded.height as f32,
-                    },
+                    EventPayload::Image(size(
+                        DevicePixels(decoded.width as i32),
+                        DevicePixels(decoded.height as i32),
+                    )),
                 );
             }
             Err(message) if s.events.contains(EventKind::Error) => {
@@ -1952,15 +2459,19 @@ impl Mounter {
             return;
         };
         slot.events = events;
+        if let Native::Input(input) = &mut slot.native {
+            input.set_paste_listens(events.contains(EventKind::Paste));
+        }
         let v = slot.values;
+        let handoff = slot.pan_scroll_handoff;
         let any = |kinds: &[EventKind]| kinds.iter().any(|&k| events.contains(k));
-        let own_press = any(&[
+        let handles_press = any(&[
             EventKind::Press,
             EventKind::LongPress,
-            EventKind::PressIn,
-            EventKind::PressOut,
-        ]) || slot.active_opacity.is_some()
-            || slot.tracked & nsh_core::tailwind::state::PRESSED != 0;
+            EventKind::PressDown,
+            EventKind::PressUp,
+        ]);
+        let own_press = handles_press || slot.tracked & nsh_core::tailwind::state::PRESSED != 0;
         let (links, links_long_press) = match &slot.native {
             Native::Text(t) => (t.has_links(), t.links_long_press()),
             _ => (false, false),
@@ -1988,6 +2499,9 @@ impl Mounter {
                     Some(sel!(handlePan:)),
                 );
                 r.setDelegate(Some(delegate));
+                if handoff {
+                    r.setMaximumNumberOfTouches(1);
+                }
                 r
             });
             toggle(&mut g.pinch, wants_pinch, view, || {
@@ -2011,10 +2525,13 @@ impl Mounter {
         }
         if let Some(press) = &g.press {
             press.set_long_press(events.contains(EventKind::LongPress) || links_long_press);
-            press.set_own(own_press);
+            press.set_own(own_press, handles_press);
             press.set_long_press_delay(slot.long_press_delay);
         }
-        let wants_hover = slot.tracked & nsh_core::tailwind::state::HOVERED != 0;
+        let wants_hover = slot.tracked & nsh_core::tailwind::state::HOVERED != 0
+            || events.contains(EventKind::HoverIn)
+            || events.contains(EventKind::HoverOut)
+            || events.contains(EventKind::HoverMove);
         toggle(&mut slot.gestures.hover, wants_hover, view, || {
             // SAFETY: `handleHover:` is implemented by the target, which
             // outlives the recognizer.
@@ -2026,8 +2543,35 @@ impl Mounter {
                 )
             }
         });
+        let wants_context = events.contains(EventKind::ContextMenu);
+        toggle(&mut slot.gestures.context, wants_context, view, || {
+            // SAFETY: `handleContextMenu:` is implemented by the target,
+            // which outlives the recognizer; `buttonMaskRequired` is
+            // UIGestureRecognizer's (iOS 13.4), UIEventButtonMaskSecondary.
+            unsafe {
+                let r = objc2_ui_kit::UITapGestureRecognizer::initWithTarget_action(
+                    objc2_ui_kit::UITapGestureRecognizer::alloc(mtm),
+                    Some(&target),
+                    Some(sel!(handleContextMenu:)),
+                );
+                let _: () = objc2::msg_send![&r, setButtonMaskRequired: 1isize << 1];
+                // A finger has no buttons, so the mask does not hold it:
+                // a tap would open the menu and cancel the presses inside.
+                // Only a mouse or a trackpad (UITouchTypeIndirectPointer).
+                let pointer = objc2_foundation::NSNumber::new_isize(3);
+                r.setAllowedTouchTypes(&objc2_foundation::NSArray::from_retained_slice(&[pointer]));
+                r
+            }
+        });
         let wants_touch = events.contains(EventKind::Touch);
-        if wants_press || wants_pan || wants_pinch || wants_rotation || wants_touch || wants_hover {
+        if wants_press
+            || wants_pan
+            || wants_pinch
+            || wants_rotation
+            || wants_touch
+            || wants_hover
+            || wants_context
+        {
             view.setUserInteractionEnabled(true);
         }
         if let Some(nsh) = slot.native.nsh() {
@@ -2193,10 +2737,14 @@ impl Mounter {
             else {
                 continue;
             };
-            screen.apply_header(|item| match self.slot(item).map(|s| &s.native) {
-                Some(Native::HeaderItem(v)) => Some(Retained::into_super(v.clone())),
-                _ => None,
-            });
+            let press = Some(self.shared.clone());
+            screen.apply_header(
+                |item| match self.slot(item).map(|s| &s.native) {
+                    Some(Native::HeaderItem(v)) => Some(Retained::into_super(v.clone())),
+                    _ => None,
+                },
+                press,
+            );
             if screen.config.large_title {
                 // Large titles collapse as the content scrolls under them.
                 if let Some(scroll) = first_scroll_view(&screen.view) {
@@ -2250,7 +2798,7 @@ impl Mounter {
             return;
         };
         let c = &screen.config;
-        nav.setNavigationBarHidden_animated(!c.header_shown, animated);
+        nav.setNavigationBarHidden_animated(!c.header_visible, animated);
         crate::navigation::style_bar(&nav.navigationBar(), c);
     }
 
@@ -2315,8 +2863,9 @@ impl Mounter {
         }
     }
 
-    /// The top screen of stack `id` if it keeps the user (`preventBack`).
-    pub(crate) fn stack_prevents_back(&self, id: NodeId) -> Option<NodeId> {
+    /// The top screen of stack `id`, whether it listens to `onBackPress`
+    /// and whether it keeps the user (`popOnBack` false).
+    pub(crate) fn stack_back_press(&self, id: NodeId) -> Option<(NodeId, bool, bool)> {
         let Some(Slot {
             native: Native::Stack(stack),
             ..
@@ -2329,8 +2878,16 @@ impl Mounter {
             .iter()
             .rev()
             .find(|s| !stack.popped.contains(s))?;
-        match self.slot(top).map(|s| &s.native) {
-            Some(Native::Screen(screen)) if screen.config.prevent_back => Some(top),
+        match self.slot(top) {
+            Some(Slot {
+                native: Native::Screen(screen),
+                events,
+                ..
+            }) => Some((
+                top,
+                events.contains(EventKind::BackRequest),
+                screen.config.prevent_back,
+            )),
             _ => None,
         }
     }
@@ -2381,8 +2938,15 @@ impl Mounter {
     fn set_view_props(&mut self, id: NodeId, props: ViewProps) {
         let (control, mtm) = (self.control.clone(), self.mtm);
         let Some(s) = self.slot_mut(id) else { return };
-        let active = props.active_opacity;
         s.long_press_delay = props.long_press_delay;
+        s.pan_scroll_handoff = props.pan_scroll_handoff;
+        if let Some(pan) = &s.gestures.pan {
+            pan.setMaximumNumberOfTouches(if props.pan_scroll_handoff {
+                1
+            } else {
+                usize::MAX
+            });
+        }
         let activation = props.pan_activation;
         toggle(
             &mut s.gestures.gate,
@@ -2396,6 +2960,11 @@ impl Mounter {
         if let Some(press) = &s.gestures.press {
             press.set_long_press_delay(props.long_press_delay);
         }
+        // Only views that keep their props (which texts below look up).
+        let area =
+            (props.selection_area && s.native.nsh().is_some()).then(|| s.native.view().retain());
+        let was_area = self.areas.iter().any(|(a, _)| *a == id);
+        let Some(s) = self.slot_mut(id) else { return };
         match s.native.nsh() {
             Some(view) => view.set_props(props, &control),
             None => {
@@ -2416,10 +2985,17 @@ impl Mounter {
                 view.setAccessibilityElementsHidden(props.accessibility.hidden, mtm);
             }
         }
-        if s.active_opacity != active {
-            s.active_opacity = active;
-            let events = s.events;
-            self.set_events(id, events);
+        // After the props: the texts below read whether they are in an area.
+        match (area, was_area) {
+            (Some(view), false) => self
+                .areas
+                .push((id, crate::selection_area::AreaResponder::attach(&view, mtm))),
+            (None, true) => {
+                if let Some(i) = self.areas.iter().position(|(a, _)| *a == id) {
+                    self.areas.remove(i).1.detach();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2440,32 +3016,53 @@ impl Mounter {
     /// A finger went down on (or left) a pressable view.
     pub(crate) fn press_changed(&mut self, id: NodeId, pressed: bool) {
         self.report_state(id, nsh_core::tailwind::state::PRESSED, pressed);
-        let Some(s) = self.slot_mut(id) else { return };
-        s.pressed = pressed;
+        let Some(s) = self.slot(id) else { return };
         let event = if pressed {
-            EventKind::PressIn
+            EventKind::PressDown
         } else {
-            EventKind::PressOut
+            EventKind::PressUp
         };
         if s.events.contains(event) {
             self.control.dispatch_event(id, event, EventPayload::None);
         }
-        let Some(s) = self.slot(id) else { return };
-        if s.active_opacity.is_some() {
-            // Native feedback: no JS round trip.
-            let view = s.native.view().retain();
-            let alpha = dynamic_opacity(s, &self.animator);
-            let block = block2::RcBlock::new(move || view.setAlpha(alpha as CGFloat));
-            let duration = if pressed { 0.1 } else { 0.25 };
-            UIView::animateWithDuration_delay_options_animations_completion(
-                duration,
-                0.0,
-                UIViewAnimationOptions::BeginFromCurrentState
-                    | UIViewAnimationOptions::AllowUserInteraction,
-                &block,
-                None,
-                self.mtm,
-            );
+    }
+
+    /// Presses the element the app put in the trailing header slot, as a tap
+    /// on a system bar button does: the first view inside the slot that
+    /// takes a press (the one made first), resolved now (the slot's content
+    /// arrives after the button is made). A slot with none takes no press.
+    pub(crate) fn press_trailing_header(&mut self, screen: NodeId) {
+        let Some(Slot {
+            native: Native::Screen(host),
+            ..
+        }) = self.slot(screen)
+        else {
+            return;
+        };
+        let Some(slot_node) = host.config.right else {
+            return;
+        };
+        let Some(container) = self.slot(slot_node).map(|s| s.native.view().retain()) else {
+            return;
+        };
+        let mut found = None;
+        for (index, slot) in self.views.iter().enumerate() {
+            let Some(slot) = slot else { continue };
+            if !slot.events.contains(EventKind::Press) {
+                continue;
+            }
+            let id = index as NodeId;
+            if let Some(view) = self.slot(id).map(|s| s.native.view().retain())
+                && view != container
+                && view.isDescendantOfView(&container)
+            {
+                found = Some(id);
+                break;
+            }
+        }
+        if let Some(node) = found {
+            self.control
+                .dispatch_event(node, EventKind::Press, EventPayload::None);
         }
     }
 
@@ -2501,6 +3098,84 @@ impl Mounter {
         }
     }
 
+    /// A cooperating pan sees only scrolls between its view and the touch,
+    /// never a scroll elsewhere in the sheet or behind its backdrop.
+    pub(crate) fn pan_touch(&mut self, id: NodeId, touched: &UIView) {
+        let Some(s) = self.slot_mut(id) else { return };
+        s.pan_scroll = None;
+        if !s.pan_scroll_handoff {
+            return;
+        }
+        let panel = s.native.view();
+        let mut current = Some(touched.retain());
+        while let Some(view) = current {
+            if &*view == panel {
+                break;
+            }
+            if let Some(scroll) = view.downcast_ref::<UIScrollView>()
+                && scroll.isScrollEnabled()
+                && (scroll.contentSize().height > scroll.bounds().size.height
+                    || scroll.alwaysBounceVertical())
+            {
+                s.pan_scroll = Some(PanScroll {
+                    view: scroll.retain(),
+                    offset: (scroll.contentOffset().y + scroll.adjustedContentInset().top).max(0.0)
+                        as f32,
+                });
+                break;
+            }
+            current = view.superview();
+        }
+    }
+
+    /// Sharing is restricted to the touched descendant's scroll pan.
+    pub(crate) fn pan_shares_scroll(
+        &self,
+        pan: &UIGestureRecognizer,
+        other: &UIGestureRecognizer,
+    ) -> bool {
+        let Some(view) = pan.view() else { return false };
+        let Some(s) = self.slot(view.tag() as NodeId) else {
+            return false;
+        };
+        s.pan_scroll_handoff
+            && s.gestures
+                .pan
+                .as_deref()
+                .is_some_and(|own| std::ptr::eq(own as &UIGestureRecognizer, pan))
+            && s.pan_scroll.as_ref().is_some_and(|scroll| {
+                std::ptr::eq(
+                    &*scroll.view.panGestureRecognizer() as &UIGestureRecognizer,
+                    other,
+                )
+            })
+    }
+
+    /// Keep the native scroll at its top while the panel consumes the
+    /// remaining drag. This also prevents rubber banding under the panel.
+    pub(crate) fn pan_scroll_offset(&self, scroll: &UIScrollView, offset: CGPoint) -> CGPoint {
+        let mut current = scroll.superview();
+        while let Some(view) = current {
+            if let Some(s) = self.slot(view.tag() as NodeId)
+                && s.pan_scroll_handoff
+                && let Some(touched) = &s.pan_scroll
+                && &*touched.view == scroll
+                && let Some(pan) = &s.gestures.pan
+                && (matches!(
+                    pan.state(),
+                    UIGestureRecognizerState::Began | UIGestureRecognizerState::Changed
+                ) || pan.state() == UIGestureRecognizerState::Ended && scroll.isDragging())
+            {
+                let t = pan.translationInView(view.superview().as_deref());
+                if s.gesture_start[1] + t.y as f32 > touched.offset {
+                    return CGPoint::new(offset.x, -scroll.adjustedContentInset().top);
+                }
+            }
+            current = view.superview();
+        }
+        offset
+    }
+
     /// A drag on a view: moves its pan values natively and reports start
     /// and end (with velocity) to JS.
     pub(crate) fn pan(
@@ -2512,13 +3187,24 @@ impl Mounter {
     ) {
         let Some(s) = self.slot(id) else { return };
         let (values, events) = (s.values, s.events);
-        let payload = |m: &Self| EventPayload::Pan {
-            translation_x: t.x as f32,
-            translation_y: t.y as f32,
-            velocity_x: v.x as f32,
-            velocity_y: v.y as f32,
-            value_x: values.pan_x.map(|n| m.animator.value(n)),
-            value_y: values.pan_y.map(|n| m.animator.value(n)),
+        let payload = |m: &Self| {
+            if state == UIGestureRecognizerState::Cancelled {
+                EventPayload::PanCancelled {
+                    translation: point(Points(t.x as f32), Points(t.y as f32)),
+                    velocity_x: v.x as f32,
+                    velocity_y: v.y as f32,
+                    value_x: values.pan_x.map(|n| Points(m.animator.value(n))),
+                    value_y: values.pan_y.map(|n| Points(m.animator.value(n))),
+                }
+            } else {
+                EventPayload::Pan {
+                    translation: point(Points(t.x as f32), Points(t.y as f32)),
+                    velocity_x: v.x as f32,
+                    velocity_y: v.y as f32,
+                    value_x: values.pan_x.map(|n| Points(m.animator.value(n))),
+                    value_y: values.pan_y.map(|n| Points(m.animator.value(n))),
+                }
+            }
         };
         if state == UIGestureRecognizerState::Began {
             // Grabbing an animating value stops it where it is.
@@ -2541,7 +3227,20 @@ impl Mounter {
                 self.animator.set(n, start[0] + t.x as f32);
             }
             if let Some(n) = values.pan_y {
-                self.animator.set(n, start[1] + t.y as f32);
+                let y = self
+                    .slot(id)
+                    .and_then(|s| s.pan_scroll.as_ref())
+                    .map_or(start[1] + t.y as f32, |scroll| {
+                        (start[1] + t.y as f32 - scroll.offset).max(0.0)
+                    });
+                self.animator.set(n, y);
+                if let Some(scroll) = self.slot(id).and_then(|s| s.pan_scroll.as_ref()) {
+                    let offset = scroll.view.contentOffset();
+                    let clamped = self.pan_scroll_offset(&scroll.view, offset);
+                    if clamped != offset {
+                        scroll.view.setContentOffset(clamped);
+                    }
+                }
             }
             self.apply_animations();
         }
@@ -2649,14 +3348,14 @@ impl Mounter {
                     .layer()
                     .setTransform(scaled_transform(&view.layer().transform(), 0.01)),
             }
-            let (view, alpha, transform) = (
+            let (target, alpha, transform) = (
                 view.retain(),
                 dynamic_opacity(s, &self.animator) as CGFloat,
                 dynamic_transform(s, &self.animator),
             );
-            animate(&t, self.mtm, move || {
-                view.setAlpha(alpha);
-                view.layer().setTransform(transform);
+            animate(&t, self.keyboard_motion, view, self.mtm, move || {
+                target.setAlpha(alpha);
+                target.layer().setTransform(transform);
             });
         }
     }
@@ -2696,7 +3395,7 @@ impl Mounter {
                 let base = s
                     .behavior
                     .as_ref()
-                    .map_or(0.0, |b| b.content_inset.top as CGFloat);
+                    .map_or(0.0, |b| b.content_inset.top.0 as CGFloat);
                 inset.top = base + if on { REFRESH_INSET } else { 0.0 };
                 if on {
                     spinner.startAnimating();
@@ -2742,14 +3441,18 @@ impl Mounter {
         }
     }
 
-    /// Brings a list's sticky cells above its other cells.
+    /// Brings a list's sticky cells above its other cells (the cells of a
+    /// list in the scroll view's viewport are in that list, where the core
+    /// keeps them on top).
     fn front_sticky(&self, list: NodeId) {
         let (Some(cells), Some(l)) = (self.sticky.get(&list), self.slot(list)) else {
             return;
         };
         let container = l.native.view();
         for c in cells {
-            if let Some(s) = self.slot(c.cell) {
+            if let Some(s) = self.slot(c.cell)
+                && s.native.view().superview().as_deref() == Some(container)
+            {
                 container.bringSubviewToFront(s.native.view());
             }
         }
@@ -2768,7 +3471,10 @@ impl Mounter {
         let offset = if l.horizontal { offset.x } else { offset.y } as f32;
         for c in cells {
             let Some(s) = self.slot(c.cell) else { continue };
-            let t = (offset - c.start).clamp(0.0, c.end - c.start) as CGFloat;
+            // An animated offset is the graph's (pinned again with its frames).
+            let extra = c.offset.map_or(0.0, |n| self.animator.value(n));
+            let t =
+                (offset + extra - c.start.0).clamp(0.0, (c.end.0 - c.start.0).max(0.0)) as CGFloat;
             let (x, y) = if l.horizontal { (t, 0.0) } else { (0.0, t) };
             s.native
                 .view()
@@ -2794,7 +3500,18 @@ impl Mounter {
     }
 
     pub(crate) fn scrolled(&mut self, id: NodeId, offset: CGPoint) {
+        let start = self.fps.is_some().then(Instant::now);
+        self.follow_scroll(id, offset);
+        if let (Some(fps), Some(start)) = (&self.fps, start) {
+            fps.scrolled(start.elapsed());
+        }
+    }
+
+    fn follow_scroll(&mut self, id: NodeId, offset: CGPoint) {
         self.pin_sticky(id);
+        for (_, area) in &self.areas {
+            area.scrolled();
+        }
         let Some(s) = self.slot(id) else { return };
         if let Some(node) = s.scroll_value {
             let value = if s.horizontal { offset.x } else { offset.y };
@@ -2804,12 +3521,24 @@ impl Mounter {
         }
     }
 
+    /// Scroll view `id` came to rest (`onScrollEnd`).
+    pub(crate) fn scroll_ended(&mut self, id: NodeId) {
+        if let Some(node) = self.slot(id).and_then(|s| s.scroll_value) {
+            self.animator.settle(node);
+        }
+    }
+
     /// Display link frame.
     pub(crate) fn tick(&mut self) {
-        if self.animator.tick() {
+        let start = self.fps.is_some().then(Instant::now);
+        let changed = self.animator.tick();
+        if changed {
             self.apply_animations();
         }
         self.report_finished();
+        if let (Some(fps), Some(start)) = (&self.fps, start) {
+            fps.ticked(start.elapsed(), changed);
+        }
     }
 
     fn apply_animations(&mut self) {
@@ -2817,6 +3546,12 @@ impl Mounter {
         for &id in &self.animated {
             if let Some(s) = self.views.get(id as usize).and_then(Option::as_ref) {
                 apply_dynamic(s, animator);
+            }
+        }
+        // Sticky cells that stick an animated value further in follow it.
+        for (&id, cells) in &self.sticky {
+            if cells.iter().any(|c| c.offset.is_some()) {
+                self.pin_sticky(id);
             }
         }
     }
@@ -2878,20 +3613,22 @@ fn toggle<G: AsRef<UIGestureRecognizer>>(
 /// Sets a frame through `bounds` + `center`: `frame` is undefined for
 /// transformed views, and a scroll view's bounds origin is its scroll
 /// offset, which must be kept.
-fn set_frame(view: &UIView, frame: Rect) {
+fn set_frame(view: &UIView, frame: Bounds<Points>) {
     let origin = view.bounds().origin;
     view.setBounds(CGRect::new(
         origin,
-        CGSize::new(frame.width as CGFloat, frame.height as CGFloat),
+        CGSize::new(
+            frame.size.width.0 as CGFloat,
+            frame.size.height.0 as CGFloat,
+        ),
     ));
     view.setCenter(CGPoint::new(
-        (frame.x + frame.width / 2.0) as CGFloat,
-        (frame.y + frame.height / 2.0) as CGFloat,
+        (frame.origin.x.0 + frame.size.width.0 / 2.0) as CGFloat,
+        (frame.origin.y.0 + frame.size.height.0 / 2.0) as CGFloat,
     ));
 }
 
-/// The opacity to show: the style's or its animated value, dimmed while
-/// pressed with `activeOpacity`.
+/// The opacity to show: the style's or its animated value.
 fn dynamic_background(slot: &Slot, animator: &Animator) -> (Color, bool) {
     let mut background = slot.style.background_color;
     let mut animated = false;
@@ -2913,10 +3650,7 @@ fn dynamic_opacity(slot: &Slot, animator: &Animator) -> f32 {
             opacity = animator.eval(node).number().clamp(0.0, 1.0);
         }
     }
-    match slot.active_opacity {
-        Some(active) if slot.pressed => opacity * active,
-        _ => opacity,
-    }
+    opacity
 }
 
 /// The transform list with animated entries, as a Core Animation matrix.
@@ -2944,8 +3678,11 @@ fn dynamic_transform(slot: &Slot, animator: &Animator) -> CATransform3D {
         // Around the origin rather than the layer's center (its anchor):
         // to the origin, transform, and back (row vectors).
         let size = slot.native.view().bounds().size;
-        let (dx, dy, dz) = origin.offset(size.width as f32, size.height as f32);
-        let (dx, dy, dz) = (dx as CGFloat, dy as CGFloat, dz as CGFloat);
+        let (d, dz) = origin.offset(nsh_core::geometry::size(
+            Points(size.width as f32),
+            Points(size.height as f32),
+        ));
+        let (dx, dy, dz) = (d.x.0 as CGFloat, d.y.0 as CGFloat, dz.0 as CGFloat);
         m = mat_mul(
             &mat_mul(&translation(-dx, -dy, -dz), &m),
             &translation(dx, dy, dz),
@@ -3042,7 +3779,7 @@ fn bound_style(slot: &Slot, animator: &Animator) -> Option<ViewStyle> {
                 shadow = true;
             }
             (AnimationProp::ShadowRadius, v) => {
-                style.shadow.radius = v.number().max(0.0);
+                style.shadow.radius = Points(v.number().max(0.0));
                 shadow = true;
             }
             _ => {}
@@ -3077,13 +3814,13 @@ fn apply_bound_decor(slot: &Slot, animator: &Animator) {
                 shadow.get_or_insert(slot.style.shadow).opacity = v.number()
             }
             (AnimationProp::ShadowRadius, v) => {
-                shadow.get_or_insert(slot.style.shadow).radius = v.number()
+                shadow.get_or_insert(slot.style.shadow).radius = Points(v.number())
             }
             _ => {}
         }
     }
     if let Some(s) = shadow {
-        slot.decor.set_shadow(view, s.color, s.opacity, s.radius);
+        slot.decor.set_shadow(view, s.color, s.opacity, s.radius.0);
     }
 }
 
@@ -3121,13 +3858,31 @@ fn apply_dynamic(slot: &Slot, animator: &Animator) {
     }
 }
 
-/// Runs `f` in a UIKit animation following `t`.
-fn animate(t: &LayoutTransition, mtm: MainThreadMarker, f: impl Fn() + 'static) {
+/// Runs `f` in a UIKit animation of `view` following `t`; on the
+/// keyboard's curve, `keyboard` says how it moves.
+fn animate(
+    t: &LayoutTransition,
+    keyboard: KeyboardMotion,
+    view: &UIView,
+    mtm: MainThreadMarker,
+    f: impl Fn() + 'static,
+) {
     let block = block2::RcBlock::new(f);
     let (duration, delay) = (t.duration_ms as f64 / 1000.0, t.delay_ms as f64 / 1000.0);
     let base = UIViewAnimationOptions::BeginFromCurrentState
         | UIViewAnimationOptions::AllowUserInteraction;
     match t.curve {
+        // The keyboard's own spring, from when it started to move.
+        LayoutCurve::Keyboard => keyboard.aligned(view, || {
+            UIView::animateWithDuration_delay_options_animations_completion(
+                duration,
+                delay,
+                keyboard.options(),
+                &block,
+                None,
+                mtm,
+            )
+        }),
         LayoutCurve::Spring { damping } => {
             UIView::animateWithDuration_delay_usingSpringWithDamping_initialSpringVelocity_options_animations_completion(
                 duration,

@@ -1,7 +1,7 @@
 //! What components that run once read of the surface and ask of the
 //! platform, as free functions (TS: `nsh`'s accessors and modules).
 //!
-//! The environment, the theme, globals and screens' insets are signals the
+//! The environment, the design tokens, globals and screens' insets are signals the
 //! core writes: reading one in a binding subscribes it, so a change reaches
 //! only what read it. Services (dialogs, the clipboard, toasts) are actions
 //! for the core; tasks and timers belong to the current owner and end with
@@ -18,35 +18,34 @@ use std::{
 use rustc_hash::FxHashMap;
 
 use super::{
-    AdaptiveColor, Environment, Memo, Owner, Signal, SignalEquals, Theme, cleanup, computed,
+    AdaptiveColor, Environment, Memo, Owner, Signal, SignalEquals, Tokens, cleanup, computed,
     reactive::with_data,
     signal_with,
-    status_bar::{SharedStatusBars, StatusBarEntry, StatusBars},
-    task::{self, Action, Answer, DialogAnswer, Executor, ImageSize},
+    task::{self, Action, Answer, ClipboardImage, DialogAnswer, Executor, ImageSize},
 };
 use crate::{
-    Command, Dialog, EdgeInsets, LayoutAnimation, NodeId, Size, StatusBarSetting,
+    Command, Dialog, EdgeInsets, LayoutAnimation, NodeId, Points, Size,
     canvas::CanvasFont,
+    color::Hsla,
     platform::{Appearance, Idiom, Locale, Os},
-    style::Color,
     time::Instant,
 };
 
 /// How text is measured on one line, in a canvas font.
-pub(crate) type MeasureFn = Rc<dyn Fn(&CanvasFont, &str) -> f32>;
+pub(crate) type MeasureFn = Rc<dyn Fn(&CanvasFont, &str) -> crate::canvas::TextMetrics>;
 
 /// What the core gives components that run once.
 #[derive(Default)]
 pub(crate) struct Ambient {
     executor: Option<Rc<Executor>>,
-    /// The status bar's layers.
-    status_bars: Option<SharedStatusBars>,
     env: Option<EnvSignals>,
-    theme: Option<Signal<Arc<Theme>>>,
+    tokens: Option<Signal<Arc<Tokens>>>,
     globals: FxHashMap<TypeId, Box<dyn Any>>,
     /// The insets of the screens or modals components are on, by host.
     insets: FxHashMap<NodeId, Signal<EdgeInsets>>,
     measure: Option<MeasureFn>,
+    /// The app's key-value storage (`nsh/storage`).
+    storage: Option<crate::storage::Store>,
 }
 
 impl Ambient {
@@ -60,16 +59,15 @@ impl Ambient {
 /// the readers of the parts that changed).
 struct EnvSignals {
     env: Signal<Environment>,
-    window: Memo<Size>,
+    window: Memo<Size<Points>>,
     safe_area: Memo<EdgeInsets>,
-    title_bar: Memo<crate::platform::Insets>,
-    keyboard_height: Memo<f32>,
+    title_bar: Memo<crate::geometry::Edges<crate::geometry::Points>>,
+    keyboard_height: Memo<Points>,
     keyboard_duration: Memo<f32>,
     dark: Memo<bool>,
     font_scale: Memo<f32>,
     reduce_motion: Memo<bool>,
     screen_reader: Memo<bool>,
-    rtl: Memo<bool>,
     pixel_ratio: Memo<f32>,
     locale: Memo<Locale>,
 }
@@ -94,7 +92,6 @@ impl EnvSignals {
                 font_scale: part!(font_scale),
                 reduce_motion: part!(reduce_motion),
                 screen_reader: part!(screen_reader),
-                rtl: part!(rtl),
                 pixel_ratio: part!(pixel_ratio),
                 locale: part!(locale),
             }
@@ -105,13 +102,16 @@ impl EnvSignals {
 // --- What the core sets ------------------------------------------------------
 
 impl super::Runtime {
-    /// The executor of tasks and actions, and the status bar's layers.
-    pub(crate) fn set_services(&self, executor: Rc<Executor>, status_bars: SharedStatusBars) {
+    /// The executor of tasks and actions.
+    pub(crate) fn set_services(&self, executor: Rc<Executor>) {
         let _entered = self.enter();
-        with_data(|d| {
-            d.ambient.executor = Some(executor);
-            d.ambient.status_bars = Some(status_bars);
-        });
+        with_data(|d| d.ambient.executor = Some(executor));
+    }
+
+    /// Where the app's storage is kept.
+    pub(crate) fn set_storage(&self, storage: crate::storage::Store) {
+        let _entered = self.enter();
+        with_data(|d| d.ambient.storage = Some(storage));
     }
 
     /// How text is measured (the core's text engine).
@@ -133,15 +133,15 @@ impl super::Runtime {
         }
     }
 
-    /// The theme now: what read it runs again.
-    pub(crate) fn set_theme(&self, theme: Arc<Theme>) {
+    /// The design tokens now: what read them runs again.
+    pub(crate) fn set_tokens(&self, tokens: Arc<Tokens>) {
         let _entered = self.enter();
-        let signal = with_data(|d| d.ambient.theme);
+        let signal = with_data(|d| d.ambient.tokens);
         match signal {
-            Some(signal) => signal.set(theme),
+            Some(signal) => signal.set(tokens),
             None => {
-                let signal = Owner::detached().run(|| signal_with(theme, SignalEquals::Never));
-                with_data(|d| d.ambient.theme = Some(signal));
+                let signal = Owner::detached().run(|| signal_with(tokens, SignalEquals::Never));
+                with_data(|d| d.ambient.tokens = Some(signal));
             }
         }
     }
@@ -184,7 +184,7 @@ fn act(action: Action) {
 // --- The environment ---------------------------------------------------------
 
 /// The surface's size in points (TS: `windowSize()`).
-pub fn window() -> Size {
+pub fn window() -> Size<Points> {
     env(|e| e.window)
 }
 
@@ -194,8 +194,8 @@ pub fn safe_area() -> EdgeInsets {
 }
 
 /// The software keyboard's height over the surface, 0 when hidden (TS:
-/// `keyboard().height`).
-pub fn keyboard_height() -> f32 {
+/// `keyboardFrame().height`).
+pub fn keyboard_height() -> Points {
     env(|e| e.keyboard_height)
 }
 
@@ -210,9 +210,9 @@ pub fn dark() -> bool {
     env(|e| e.dark)
 }
 
-/// `color` for the appearance now (props that take a [`Color`], such as an
+/// `color` for the appearance now (props that take one color, such as an
 /// input's placeholder color; styles take theme colors as they are).
-pub fn color(color: impl Into<AdaptiveColor>) -> Color {
+pub fn color(color: impl Into<AdaptiveColor>) -> Hsla {
     let color = color.into();
     if dark() { color.dark } else { color.light }
 }
@@ -232,21 +232,16 @@ pub fn screen_reader() -> bool {
     env(|e| e.screen_reader)
 }
 
-/// The layout runs right to left (TS: `I18nManager.isRTL`).
-pub fn rtl() -> bool {
-    env(|e| e.rtl)
-}
-
-/// Device pixels per point (TS: `PixelRatio.get()`).
+/// Device pixels per point (TS: `pixelRatio()`).
 pub fn pixel_ratio() -> f32 {
     env(|e| e.pixel_ratio)
 }
 
 /// `points` rounded to whole device pixels (TS:
-/// `PixelRatio.roundToNearestPixel`).
-pub fn round_to_nearest_pixel(points: f32) -> f32 {
+/// `Math.round(x * pixelRatio()) / pixelRatio()`).
+pub fn round_to_nearest_pixel(points: Points) -> Points {
     let ratio = pixel_ratio().max(f32::MIN_POSITIVE);
-    (points * ratio).round() / ratio
+    Points((points.0 * ratio).round() / ratio)
 }
 
 /// The user's locale (TS: what `Intl` formats for by default).
@@ -254,7 +249,7 @@ pub fn locale() -> Locale {
     env(|e| e.locale)
 }
 
-/// The operating system (TS: `Platform.OS`); it does not change.
+/// The operating system (TS: `platform.os`); it does not change.
 pub fn os() -> Os {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
@@ -262,14 +257,14 @@ pub fn os() -> Os {
 }
 
 /// The OS version: major and minor on iOS, the API level and 0 on Android
-/// (TS: `Platform.Version`).
+/// (TS: `platform.version`).
 pub fn os_version() -> (u16, u16) {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
         .with_untracked(|e| e.os_version)
 }
 
-/// The kind of device (TS: `Platform.isPad`, `isTV`, `isMacCatalyst`).
+/// The kind of device (TS: `platform.idiom`, `platform.catalyst`).
 pub fn idiom() -> Idiom {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
@@ -277,25 +272,33 @@ pub fn idiom() -> Idiom {
 }
 
 /// Whether desktop behavior applies: a desktop OS, or a browser in the
-/// desktop idiom (TS: `Platform.isDesktop`); it does not change.
+/// desktop idiom (TS: `platform.idiom` `"desktop"`); it does not change.
 pub fn is_desktop() -> bool {
     with_data(|d| d.ambient.env.as_ref().map(|e| e.env))
         .expect("the core sets the environment")
         .with_untracked(|e| e.idiom.desktop_on(e.os))
 }
 
-/// The app's theme (reading it subscribes: a new theme reaches what read
-/// it).
-pub fn theme() -> Arc<Theme> {
-    with_data(|d| d.ambient.theme)
-        .expect("the core sets the theme")
+/// The design tokens the app is drawn with (reading them subscribes: new
+/// tokens reach what read them).
+pub fn tokens() -> Arc<Tokens> {
+    with_data(|d| d.ambient.tokens)
+        .expect("the core sets the tokens")
         .get()
 }
 
 /// The width of `text` on one line in `font` (the CSS `font` shorthand; an
 /// invalid one measures in `10px sans-serif`), by the platform's text engine
 /// (TS: a canvas's `measureText(text).width`).
-pub fn measure_text(font: &str, text: &str) -> f32 {
+pub fn measure_text(font: &str, text: &str) -> Points {
+    text_metrics(font, text).width
+}
+
+/// How `text` sits on one line in `font` (the CSS `font` shorthand; an
+/// invalid one measures in `10px sans-serif`), by the platform's text
+/// engine: its width and the font's ascent, descent and line height, to
+/// place text a canvas draws (a cell's baseline, a caret over it).
+pub fn text_metrics(font: &str, text: &str) -> crate::canvas::TextMetrics {
     let font = CanvasFont::parse(font).unwrap_or_default();
     let measure = with_data(|d| d.ambient.measure.clone()).expect("the core sets the text engine");
     measure(&font, text)
@@ -319,7 +322,7 @@ pub fn global<G: Default + 'static>() -> Signal<G> {
 }
 
 /// The insets of the screen or modal the component on `host` is on, below
-/// its header, else the safe area (TS: `useSafeAreaInsets()`).
+/// its header, else the safe area (TS: `safeAreaInsets()`).
 pub(crate) fn insets_of(host: NodeId) -> EdgeInsets {
     let existing = with_data(|d| d.ambient.insets.get(&host).copied());
     let signal = existing.unwrap_or_else(|| {
@@ -335,6 +338,7 @@ pub(crate) fn insets_of(host: NodeId) -> EdgeInsets {
 
 /// Shows `dialog` (an alert, or with `sheet` an action sheet); await the
 /// answer in a task.
+#[deprecated(note = "use nsh_base::alert_dialog, as TSX's `AlertDialog.show` of `nsh/base`")]
 pub fn dialog(dialog: Dialog) -> DialogAnswer {
     let (answer, slot) = DialogAnswer::new();
     act(Action::Dialog(dialog, slot));
@@ -356,29 +360,110 @@ pub fn animate_layout(animation: LayoutAnimation) {
 }
 
 /// The screen reader reads `message` (TS:
-/// `AccessibilityInfo.announceForAccessibility`).
+/// `announce`).
 pub fn announce_for_accessibility(message: impl Into<String>) {
     act(super::services::announce(message.into()));
 }
 
-/// Puts `text` on the system clipboard (TS: `Clipboard.setString`).
+/// Runs `f` with the app's storage (`nsh/storage`, [`crate::storage::Storage`]):
+/// the one the engine was given, or one in memory when it was given none.
+pub(crate) fn with_storage<R>(f: impl FnOnce(&crate::storage::Store) -> R) -> R {
+    let storage = with_data(|d| {
+        d.ambient
+            .storage
+            .get_or_insert_with(|| crate::storage::Store::new(None))
+            .clone()
+    });
+    f(&storage)
+}
+
+/// Opens `url` outside the app (TS: `openUrl` of `nsh/device`): a web page
+/// in the browser, a `mailto:` or `tel:` link in its app, any scheme
+/// another app registered. The embedding app may take it first (its host
+/// channel's URL handler, which routes it through the host's router).
+/// Resolves to whether it opened: `false` for a URL
+/// [`crate::open_url::check_url`] refuses, when the app's `openUrl`
+/// capability is not granted, or when no app handles it. Await it in a
+/// task, or drop it when the answer does not matter.
+pub fn open_url(url: impl Into<String>) -> Answer<bool> {
+    let (answer, action) = super::services::open_url(url.into());
+    act(action);
+    answer
+}
+
+/// Puts `text` on the system clipboard (TS: `Clipboard.writeText`).
 pub fn set_clipboard(text: impl Into<String>) {
     act(super::services::set_clipboard(text.into()));
 }
 
 /// The text on the system clipboard, `""` when it holds none (TS:
-/// `Clipboard.getString`), to await in a task.
+/// `Clipboard.readText`), to await in a task.
 pub fn clipboard_string() -> Answer<String> {
     let (answer, action) = super::services::clipboard_string();
     act(action);
     answer
 }
 
-/// Whether the system clipboard holds text (TS: `Clipboard.hasString`).
+/// Whether the system clipboard holds text (TS: `Clipboard.hasText`).
 pub fn clipboard_has_string() -> Answer<bool> {
     let (answer, action) = super::services::clipboard_has_string();
     act(action);
     answer
+}
+
+/// Puts the image of a `data:` URI (as [`clipboard_image`] gives) on the
+/// system clipboard (TS: `Clipboard.writeImage`).
+pub fn set_clipboard_image(uri: impl Into<String>) {
+    act(super::services::set_clipboard_image(uri.into()));
+}
+
+/// The image on the system clipboard, `None` when it holds none (TS:
+/// `Clipboard.readImage`), to await in a task.
+pub fn clipboard_image() -> Answer<Option<ClipboardImage>> {
+    let (answer, action) = super::services::clipboard_image();
+    act(action);
+    answer
+}
+
+/// Whether the system clipboard holds an image, without reading it (TS:
+/// `Clipboard.hasImage`).
+pub fn clipboard_has_image() -> Answer<bool> {
+    let (answer, action) = super::services::clipboard_has_image();
+    act(action);
+    answer
+}
+
+/// The `file:` URLs of the local files on the system clipboard (files
+/// copied in a file manager; TS: `Clipboard.readFiles`), to await in a task.
+pub fn clipboard_files() -> Answer<Vec<String>> {
+    let (answer, action) = super::services::clipboard_files();
+    act(action);
+    answer
+}
+
+/// Shows the system's picker for images and gives the ones the user picked,
+/// prepared as `request` says, none when cancelled (TS:
+/// `Picker.pickImages`), to await in a task.
+pub fn pick_images(request: crate::picker::PickRequest) -> Answer<Vec<crate::picker::PickedFile>> {
+    let (answer, action) = super::services::pick_images(request);
+    act(action);
+    answer
+}
+
+/// The value function `name` of the embedding app returns for `args`
+/// (TS: `host.call`), to await in a task.
+pub(crate) fn host_call(
+    name: String,
+    args: crate::JsonValue,
+) -> Answer<Result<crate::JsonValue, String>> {
+    let (answer, action) = super::services::host_call(name, args);
+    act(action);
+    answer
+}
+
+/// Forgets the host calls whose answers were dropped (they timed out).
+pub(crate) fn forget_host_calls() {
+    act(Action::ForgetHostCalls);
 }
 
 /// Shows `message` at the bottom of the screen (Android's toasts, TS:
@@ -387,16 +472,16 @@ pub fn toast(message: impl Into<String>, duration: super::ToastDuration) {
     act(super::services::toast(message.into(), duration));
 }
 
-/// The size in pixels of the image at `uri` (TS: `Image.getSize`).
-pub fn image_size(uri: impl Into<String>) -> Answer<Result<ImageSize, String>> {
-    let (answer, action) = super::services::image_size(uri.into());
+/// The size in pixels of the image at `src` (TS: `Image.getSize`).
+pub fn image_size(src: impl Into<String>) -> Answer<Result<ImageSize, String>> {
+    let (answer, action) = super::services::image_size(src.into());
     act(action);
     answer
 }
 
-/// Loads the image at `uri` ahead of showing it (TS: `Image.prefetch`).
-pub fn prefetch_image(uri: impl Into<String>) -> super::Prefetch {
-    let (answer, action) = super::services::prefetch(uri.into());
+/// Loads the image at `src` ahead of showing it (TS: `Image.prefetch`).
+pub fn prefetch_image(src: impl Into<String>) -> super::Prefetch {
+    let (answer, action) = super::services::prefetch(src.into());
     act(action);
     answer
 }
@@ -417,36 +502,6 @@ pub fn fetch(request: impl Into<crate::platform::HttpRequest>) -> super::Fetch {
 /// `setColorScheme`).
 pub fn set_color_scheme(appearance: Appearance) {
     act(Action::Appearance(appearance));
-}
-
-/// Lays the surface out right to left whatever the user's language (TS:
-/// `I18nManager.forceRTL`).
-pub fn force_rtl(force: bool) {
-    act(Action::Direction(super::services::Direction::Force(force)));
-}
-
-/// Whether a right-to-left language lays the surface out right to left
-/// (TS: `I18nManager.allowRTL`).
-pub fn allow_rtl(allow: bool) {
-    act(Action::Direction(super::services::Direction::Allow(allow)));
-}
-
-/// Adds `setting` over the status bar's other settings while the current
-/// owner lives (the most recently added wins, field by field): the entry,
-/// to change it.
-pub fn add_status_bar(setting: StatusBarSetting) -> StatusBarEntry {
-    let globals =
-        with_data(|d| d.ambient.status_bars.clone()).expect("the core sets the status bars");
-    let entry = StatusBars::update(&globals, |bars| bars.add(setting));
-    cleanup(move || StatusBars::update(&globals, |bars| bars.remove(entry)));
-    entry
-}
-
-/// Changes a setting [`add_status_bar`] added.
-pub fn update_status_bar(entry: StatusBarEntry, setting: StatusBarSetting) {
-    let globals =
-        with_data(|d| d.ambient.status_bars.clone()).expect("the core sets the status bars");
-    StatusBars::update(&globals, |bars| bars.set(entry, setting));
 }
 
 // --- Tasks and timers --------------------------------------------------------
@@ -474,13 +529,39 @@ impl<T> Future for Spawned<T> {
 }
 
 /// Runs `future` on the engine thread (TS: an `async` function): it changes
-/// what it wants by writing signals, and ends with the current owner.
+/// what it wants by writing signals, and ends with the current owner. It
+/// runs under that owner: what it makes is the owner's.
 pub fn spawn<T: 'static>(future: impl Future<Output = T> + 'static) -> Spawned<T> {
     let executor = executor();
-    let task = task::spawn_future(&executor, future);
+    let owner = Owner::current();
+    let task = task::spawn_future(
+        &executor,
+        Owned {
+            owner,
+            future: Box::pin(future),
+        },
+    );
     let handle = task.handle();
     cleanup(move || handle.cancel());
     Spawned(task)
+}
+
+/// A future polled under `owner` ([`Owner::scope`]).
+struct Owned<F> {
+    owner: Owner,
+    future: std::pin::Pin<Box<F>>,
+}
+
+impl<F: Future> Future for Owned<F> {
+    type Output = F::Output;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        let this = self.get_mut();
+        this.owner.scope(|| this.future.as_mut().poll(cx))
+    }
 }
 
 /// Runs `f` once after `delay` (TS: `setTimeout`; cancelling the task is
@@ -498,10 +579,10 @@ pub fn set_timeout(delay: Duration, f: impl FnOnce() + 'static) -> Spawned<()> {
 pub fn set_interval(period: Duration, f: impl Fn() + 'static) -> Spawned<()> {
     let owner = Owner::current();
     spawn(async move {
-        let mut next = Instant::now() + period;
+        let mut next = crate::time::now() + period;
         loop {
             timer_until(next).await;
-            next = (next + period).max(Instant::now());
+            next = (next + period).max(crate::time::now());
             owner.run(&f);
         }
     })
@@ -519,7 +600,7 @@ pub fn request_animation_frame(f: impl FnOnce(Instant) + 'static) -> Spawned<()>
 
 /// Waits `delay` (in a task; TS: what `setTimeout` waits for).
 pub fn timer(delay: Duration) -> Delay {
-    timer_until(Instant::now() + delay)
+    timer_until(crate::time::now() + delay)
 }
 
 /// Waits until `at` (in a task).
@@ -556,7 +637,7 @@ impl Future for Delay {
         if let Some(sleep) = &mut self.elsewhere {
             return sleep.as_mut().poll(cx);
         }
-        if Instant::now() >= self.at {
+        if crate::time::now() >= self.at {
             return std::task::Poll::Ready(());
         }
         if self.registered {
@@ -617,16 +698,24 @@ where
 
 // --- Handles -----------------------------------------------------------------
 
-/// A native animation value starting at `value` (TS: `createNativeValue`):
-/// bind it to styles, drags, scroll offsets or drawings, animate it from
-/// handlers and tasks.
-pub fn native_value(value: f32) -> super::NativeValue {
-    super::NativeValue::new(&executor(), value)
+/// An animated value starting at `value` (TS: `createAnimatedValue`): bind
+/// it to styles, drags, scroll offsets or drawings, animate it from handlers
+/// and tasks. A `Copy` handle the current owner keeps, as a signal is (with
+/// no owner, it lives as long as the surface).
+pub fn animated_value(value: f32) -> super::AnimatedValue {
+    super::AnimatedValue::new(&executor(), value)
+}
+
+/// Animated values for a view's opacity and transform, and motions to
+/// play on them (TS: `createMotion`): bind it with
+/// [`super::Styled::bind_motion`]. A `Copy` handle the current owner keeps.
+pub fn motion() -> super::Motion {
+    super::Motion::new(&executor())
 }
 
 /// A handle for an element (TS: `ref`): put it on the element with
 /// [`super::Element::element_ref`], call its commands from handlers and
-/// tasks.
+/// tasks. A `Copy` handle the current owner keeps, as a signal is.
 pub fn element_ref() -> super::ElementRef {
     super::ElementRef::new(&executor())
 }
@@ -634,7 +723,7 @@ pub fn element_ref() -> super::ElementRef {
 /// A handle for a component this view renders (TS: a `ref` to a
 /// component): put it on the component's element with
 /// [`super::ComponentElement::component_ref`]; [`super::ComponentRef::api`]
-/// is the API its view registered.
+/// is the API its view registered. A `Copy` handle the current owner keeps.
 pub fn component_ref<C: super::Component>() -> super::ComponentRef<C> {
     super::ComponentRef::new(&executor())
 }
@@ -721,7 +810,7 @@ pub fn key_label(keystroke: &str) -> String {
 }
 
 /// Listens to the Android or OHOS back button while the current owner lives (TS:
-/// `BackHandler.addEventListener("hardwareBackPress", f)`): when no modal is
+/// `BackHandler.onBackPress(f)`): when no modal is
 /// shown, `f` runs before the stack pops, newest listener first, and returns
 /// true when it handled the press. While one listens, a back gesture does
 /// not preview the pop.
@@ -734,7 +823,7 @@ pub fn on_back_press(f: impl Fn() -> bool + 'static) {
     cleanup(move || drop(subscription));
 }
 
-pub(crate) fn title_bar() -> crate::platform::Insets {
+pub(crate) fn title_bar() -> crate::geometry::Edges<crate::geometry::Points> {
     env(|e| e.title_bar)
 }
 

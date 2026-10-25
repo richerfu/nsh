@@ -28,14 +28,20 @@ final class SystemUi {
      * the appearance: {@code night}, the app's or the system's), 1 light
      * content, 2 dark content.
      */
-    @SuppressWarnings("deprecation")
-    static void statusBar(Context context, int style, boolean hidden, Integer background, boolean night) {
+    static void statusBar(Context context, int style, boolean hidden, boolean night) {
         Activity activity = activity(context);
         if (activity == null) return;
-        Window window = activity.getWindow();
+        statusBar(activity.getWindow(), style, hidden, night);
+    }
+
+    /**
+     * The status bar while {@code window} is on top: the activity's, or an
+     * open dialog's own window (which the bar follows while it is up).
+     */
+    @SuppressWarnings("deprecation")
+    static void statusBar(Window window, int style, boolean hidden, boolean night) {
+        if (window == null) return;
         boolean darkIcons = style == 2 || (style == 0 && !night);
-        // Before edge-to-edge (API 35) the bar has a color of its own.
-        if (background != null && Build.VERSION.SDK_INT < 35) window.setStatusBarColor(background);
         if (Build.VERSION.SDK_INT >= 30) {
             WindowInsetsController c = window.getInsetsController();
             if (c == null) return;
@@ -118,12 +124,13 @@ final class SystemUi {
             }
         }
         b.setOnDismissListener(d -> {
+            if (TestAgent.shownDialog == d) TestAgent.shownDialog = null;
             if (!answered[0]) {
                 answered[0] = true;
                 answer(mounter, dialogId, -1);
             }
         });
-        b.show();
+        TestAgent.shownDialog = b.show();
     }
 
     private static void answer(Mounter mounter, int dialogId, int index) {
@@ -135,7 +142,24 @@ final class SystemUi {
         Toast.makeText(context, text, longer ? Toast.LENGTH_LONG : Toast.LENGTH_SHORT).show();
     }
 
-    /** {@code Clipboard.setString}: a plain text clip. */
+    /**
+     * {@code openUrl}: opens {@code url} with the app Android resolves for it ({@code Intent.ACTION_VIEW}), from the
+     * view's activity (a new task from any other context). Whether an app took it: false when none handles the scheme.
+     */
+    static boolean openUrl(Context context, String url) {
+        android.content.Intent intent = new android.content.Intent(
+                android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url));
+        Activity activity = activity(context);
+        if (activity == null) intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            (activity != null ? activity : context).startActivity(intent);
+            return true;
+        } catch (android.content.ActivityNotFoundException | SecurityException e) {
+            return false;
+        }
+    }
+
+    /** {@code Clipboard.writeText}: a plain text clip. */
     static void setClipboard(Context context, String text) {
         android.content.ClipboardManager clipboard =
                 (android.content.ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
@@ -143,7 +167,7 @@ final class SystemUi {
     }
 
     /**
-     * {@code Clipboard.getString} / {@code hasString}: the clip's text, null when it holds none;
+     * {@code Clipboard.readText} / {@code hasText}: the clip's text, null when it holds none;
      * with {@code hasOnly} "" for text, without reading the clip (its description says).
      * Android 10+ only lets the focused app read it: null otherwise.
      */

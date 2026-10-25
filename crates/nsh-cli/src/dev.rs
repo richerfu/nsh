@@ -43,7 +43,14 @@ pub(crate) struct DevSession {
 
 impl DevSession {
     /// Starts the server and publishes the first build (or its error).
-    pub(crate) fn start(entry: &Path, port: u16, release: bool) -> anyhow::Result<DevSession> {
+    /// Hosts run the app with `limits` as an embedding app that sets them
+    /// would (`--limits`), or with none, as an app on its own.
+    pub(crate) fn start(
+        entry: &Path,
+        port: u16,
+        release: bool,
+        limits: Option<nsh_core::js::HostLimits>,
+    ) -> anyhow::Result<DevSession> {
         let entry = dunce::canonicalize(entry)
             .with_context(|| format!("entry not found: {}", entry.display()))?;
         let src_dir = entry
@@ -54,11 +61,13 @@ impl DevSession {
         let server = start_server(port, &src_dir, devices.clone())?;
         server.serve_files(crate::build::crate_assets().map(|a| (a.path, a.source)));
         server.install_commands(install_commands(&src_dir));
+        server.set_limits(limits.map(|l| l.to_string()));
         // Browsers too, when there is a web runtime to serve (`nsh run
         // --target web` builds it in a checkout).
         let rust_root = crate::rust_app::is_root(&entry);
         if let Ok(Some(runtime)) = crate::runtime::web(crate::runtime::WebKind::Dev, false) {
-            let (page, files) = crate::web::dev_host(&runtime, rust_root)?;
+            let (page, files) =
+                crate::web::with_page_host(crate::web::dev_host(&runtime, rust_root)?, &entry)?;
             server.serve_web(page, files);
         }
         let session = DevSession {
@@ -191,7 +200,10 @@ impl DevSession {
                         built.bytecode,
                         built.code,
                         built.source_map,
-                        capabilities,
+                        nsh_dev::AppInfo {
+                            capabilities,
+                            id: crate::package::app_id(&self.entry).ok(),
+                        },
                         None,
                         built.ui_sets,
                     );
@@ -224,7 +236,10 @@ impl DevSession {
                     built.bytecode,
                     built.code,
                     built.source_map,
-                    capabilities,
+                    nsh_dev::AppInfo {
+                        capabilities,
+                        id: crate::package::app_id(&self.entry).ok(),
+                    },
                     patch,
                     built.ui_sets,
                 );
@@ -331,6 +346,8 @@ impl Devices {
                 };
                 logger::device(&device, log.level, &log.target, &log.message);
             }
+            // Only a test session's traced app sends its batches.
+            ClientEvent::Trace { .. } => {}
         }
     }
 }

@@ -6,31 +6,58 @@
 //! space with the transform current when each piece is added (as in
 //! canvas), and survives `fill` / `stroke`; strokes apply the current
 //! transform again so line widths and dashes scale with it; gradients fill
-//! by clipping to the shape. Native value slots ([`CanvasState::args`])
+//! by clipping to the shape. Animated value slots ([`CanvasState::args`])
 //! are read while replaying: an animation only redraws, without JS.
+//!
+//! What comes before the first operation reading a slot paints the same
+//! every time ([`first_animated`]). When it is long and the drawing stays
+//! unchanged a while, it is rasterized once per drawing, size and scale into
+//! a `CGLayer` ([`Prefix`]), and a redraw draws that layer and replays only
+//! the painting from there on (the operations before it still set the
+//! state), as Linux does. A frame of a pulsing dot over a chart then
+//! replays the dot, not the chart under it. Short or changing drawings
+//! replay whole: drawing a layer costs about what replaying a sparkline
+//! does, and rasterizing one runs on the main thread, where a full replay
+//! is only recorded for Core Animation's drawing threads.
+//!
+//! Where a canvas draws ([`CanvasState::draws_asynchronously`]): at once on
+//! the main thread, unless it paints often ([`FREQUENT`] times a second or
+//! more: an animation, live data) and keeps no layer, when Core Animation
+//! replays it on its threads, which keeps the main thread free. Drawing
+//! there costs graphics memory (~50 MB for the process on macOS 27, held
+//! while any canvas draws so) and Metal work per layer, which a canvas
+//! redrawn now and then (a chart updated every few seconds) gains nothing
+//! from.
 //!
 //! Images are loaded through [`crate::image::load`] when a drawing names
 //! them, kept per canvas and drawn once loaded, at their natural size in
 //! pixels as points (as a canvas bitmap's CSS pixels).
 
-use std::{f64::consts::TAU, rc::Rc, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    f64::consts::TAU,
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use nsh_animation::AnimationValue;
 use nsh_core::{
     Color, FontVariant,
+    animation::AnimationValue,
     canvas::{
         CanvasFont, CanvasGradient, CanvasOp, CanvasTextAlign, CanvasTextBaseline, Composite,
         Damage, DamageScan, Drawing, FillRule, GradientShape, LineCap, LineJoin, Num, Paint,
-        PathOp, arc_sweep, fit_radii,
+        PathOp, arc_sweep, first_animated, fit_radii, prefix_path_needed,
     },
+    geometry::{Corners, Points, Radians, size},
 };
 use objc2_core_foundation::{
     CFAttributedString, CFMutableAttributedString, CFRange, CFRetained, CFString, CFType,
     CGAffineTransform, CGFloat, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{
-    CGBlendMode, CGContext, CGGradient, CGGradientDrawingOptions, CGImage, CGLineCap, CGLineJoin,
-    CGMutablePath, CGPath, CGTextDrawingMode,
+    CGBlendMode, CGContext, CGGradient, CGGradientDrawingOptions, CGImage, CGLayer, CGLineCap,
+    CGLineJoin, CGMutablePath, CGPath, CGTextDrawingMode,
 };
 use objc2_core_text::{CTLine, kCTFontAttributeName, kCTForegroundColorFromContextAttributeName};
 use rustc_hash::FxHashMap;
@@ -45,7 +72,7 @@ use crate::{
 pub(crate) struct CanvasState {
     /// The drawing.
     drawing: Option<Arc<Drawing>>,
-    /// Native value slots (`AnimationProp::CanvasArg`).
+    /// Animated value slots (`AnimationProp::CanvasArg`).
     args: Vec<Option<AnimationValue>>,
     /// The images the drawing names, by URI: `None` while loading (or
     /// when they failed to load).
@@ -54,6 +81,78 @@ pub(crate) struct CanvasState {
     scan: DamageScan,
     /// The slots that changed (scratch space of [`set_args`]).
     changed: Vec<u16>,
+    /// The first operation reading an animated slot ([`first_animated`]),
+    /// and whether the path the operations before it build is needed from
+    /// it on ([`prefix_path_needed`]).
+    split: usize,
+    split_path: bool,
+    /// What the operations before `split` paint, when some do and some
+    /// do not.
+    prefix: RefCell<Option<Prefix>>,
+    /// How often the drawing was painted since it was set.
+    redrawn: Cell<u32>,
+    /// How often it paints ([`CanvasState::draws_asynchronously`]).
+    cadence: Cadence,
+}
+
+/// How many paints a second make a canvas draw on Core Animation's threads.
+const FREQUENT: u32 = 10;
+
+/// How often a canvas paints, counted a second at a time.
+#[derive(Default)]
+struct Cadence {
+    /// When the current second began, and its paints so far.
+    since: Cell<Option<Instant>>,
+    paints: Cell<u32>,
+    /// [`FREQUENT`] paints in the current second, or in the last one.
+    frequent: Cell<bool>,
+}
+
+impl Cadence {
+    /// A paint at `now`.
+    fn paint(&self, now: Instant) {
+        match self.since.get() {
+            Some(since) if now.duration_since(since) < Duration::from_secs(1) => {
+                let paints = self.paints.get() + 1;
+                self.paints.set(paints);
+                if paints >= FREQUENT {
+                    self.frequent.set(true);
+                }
+            }
+            since => {
+                // A new second: the last one was slow, or a second without
+                // paints came between.
+                if since.is_some_and(|since| {
+                    self.paints.get() < FREQUENT
+                        || now.duration_since(since) >= Duration::from_secs(2)
+                }) {
+                    self.frequent.set(false);
+                }
+                self.since.set(Some(now));
+                self.paints.set(1);
+            }
+        }
+    }
+}
+
+/// How often a drawing is painted unchanged before its static part is kept
+/// ([`Prefix`]): one that keeps changing (a sparkline of live quotes) would
+/// rasterize it on the main thread more often than it draws from it.
+const STABLE: u32 = 30;
+
+/// The fewest operations before the first animated one that are kept as a
+/// layer: drawing one costs about as much as replaying a sparkline's 74
+/// (measured on the Stocks demo).
+const MIN_PREFIX: usize = 128;
+
+/// The pixels of a drawing's operations before its first animated one, at
+/// a size and scale.
+struct Prefix {
+    drawing: Arc<Drawing>,
+    /// The size in pixels, and how many of the drawing's images had loaded.
+    size: (usize, usize),
+    images: usize,
+    layer: CFRetained<CGLayer>,
 }
 
 /// Sets up a canvas view.
@@ -78,6 +177,13 @@ pub(crate) fn set(surface: &Rc<Surface>, view: &NshView, drawing: Arc<Drawing>) 
                 load.push(image.uri.clone());
             }
         }
+        c.split = first_animated(&drawing.ops);
+        // Short static parts replay faster than a layer draws.
+        if c.split < MIN_PREFIX || !drawing.ops[..c.split].iter().any(CanvasOp::paints) {
+            c.split = 0;
+        }
+        c.split_path = prefix_path_needed(&drawing.ops, c.split);
+        c.redrawn.set(0);
         c.drawing = Some(drawing);
     }
     for uri in load {
@@ -105,7 +211,7 @@ pub(crate) fn set(surface: &Rc<Surface>, view: &NshView, drawing: Arc<Drawing>) 
     view.restyle();
 }
 
-/// Native value slots changed (`(slot, value)`, every bound slot on each
+/// Animated value slots changed (`(slot, value)`, every bound slot on each
 /// frame): what has to be drawn again ([`crate::mount::Mounter::draw_when_shown`]).
 /// Only the operations reading a slot whose value changed are redrawn,
 /// where they were and where they are now ([`DamageScan`]).
@@ -157,48 +263,158 @@ fn slot_number(args: &[Option<AnimationValue>], s: u16) -> f32 {
 }
 
 /// Draws a canvas view's drawing (in its content layer's
-/// `drawLayer:inContext:`; the context is y down, in points) where it is
-/// `dirty`: Core Graphics skips the rest.
-pub(crate) fn draw(ctx: &CGContext, state: &ViewState, dirty: CGRect) {
-    let Some(canvas) = state.canvas.as_ref() else {
-        return;
-    };
-    let Some(drawing) = canvas.drawing.as_ref() else {
-        return;
-    };
-    if drawing.ops.is_empty() {
-        return;
+/// `drawLayer:inContext:`; the context is y down, in points, `size` points
+/// at `scale` pixels each) where it is `dirty`: Core Graphics skips the
+/// rest.
+pub(crate) fn draw(
+    cx: &CGContext,
+    state: &ViewState,
+    dirty: CGRect,
+    size: CGSize,
+    scale: f64,
+    asynchronous: bool,
+) {
+    if let Some(canvas) = state.canvas.as_ref() {
+        canvas.paint(cx, dirty, size, scale, asynchronous);
     }
-    let mut replay = Replay {
-        c: ctx,
-        args: &canvas.args,
-        images: &canvas.images,
-        state: State::default(),
-        stack: Vec::new(),
-        path: CGMutablePath::new(),
-    };
-    // Clearing and composite operations combine with what the canvas drew,
-    // as on a canvas bitmap: never with what is behind it (AppKit may draw
-    // views into one context, as when caching a display for a snapshot).
-    let isolated = drawing.ops.iter().any(|op| {
-        matches!(op, CanvasOp::ClearRect(_))
-            || matches!(op, CanvasOp::Composite(c) if *c != Composite::SourceOver)
-    });
-    CGContext::save_g_state(Some(ctx));
-    // Core Animation clips to what it redraws already; said again for the
-    // transparency layer, which takes the clip's size.
-    CGContext::clip_to_rect(Some(ctx), dirty);
-    if isolated {
+}
+
+impl CanvasState {
+    /// Whether the static part is (or is about to be) kept as a layer:
+    /// long, painted unchanged [`STABLE`] times. Such a canvas draws at once
+    /// (`drawsAsynchronously` off), where its layer is made.
+    pub(crate) fn keeps_prefix(&self) -> bool {
+        0 < self.split && self.redrawn.get() >= STABLE
+    }
+
+    /// Whether Core Animation draws it on its threads
+    /// (`drawsAsynchronously`): when it paints often and keeps no layer.
+    pub(crate) fn draws_asynchronously(&self) -> bool {
+        self.cadence.frequent.get() && !self.keeps_prefix()
+    }
+
+    /// [`draw`]'s replay; `asynchronous`: `cx` records for Core Animation's
+    /// drawing threads.
+    fn paint(&self, cx: &CGContext, dirty: CGRect, size: CGSize, scale: f64, asynchronous: bool) {
+        self.cadence.paint(Instant::now());
+        let canvas = self;
+        let Some(drawing) = canvas.drawing.as_ref() else {
+            return;
+        };
+        let ops = &drawing.ops[..];
+        if ops.is_empty() {
+            return;
+        }
+        let split = canvas.split.min(ops.len());
+        let prefix = (0 < split && split < ops.len())
+            .then(|| canvas.prefix(cx, drawing, split, size, scale, asynchronous))
+            .flatten();
+        let mut replay = Replay::new(cx, canvas);
+        // Clearing and composite operations combine with what the canvas drew,
+        // as on a canvas bitmap: never with what is behind it (AppKit may draw
+        // views into one context, as when caching a display for a snapshot).
+        let isolated = ops.iter().any(|op| {
+            matches!(op, CanvasOp::ClearRect(_))
+                || matches!(op, CanvasOp::Composite(c) if *c != Composite::SourceOver)
+        });
+        CGContext::save_g_state(Some(cx));
+        // Core Animation clips to what it redraws already; said again for the
+        // transparency layer, which takes the clip's size.
+        CGContext::clip_to_rect(Some(cx), dirty);
+        if isolated {
+            // SAFETY: no auxiliary info.
+            unsafe { CGContext::begin_transparency_layer(Some(cx), None) };
+        }
+        if let Some(layer) = &prefix {
+            // The layer holds the canvas y down at the layer's scale, as the
+            // replay draws; layers draw y up.
+            CGContext::save_g_state(Some(cx));
+            CGContext::translate_ctm(Some(cx), 0.0, size.height);
+            CGContext::scale_ctm(Some(cx), 1.0, -1.0);
+            CGContext::draw_layer_in_rect(Some(cx), CGRect::new(CGPoint::ZERO, size), Some(layer));
+            CGContext::restore_g_state(Some(cx));
+        }
+        for (i, op) in ops.iter().enumerate() {
+            // What the layer holds: the operations before `split` only set
+            // the state, and build the path when it is used from `split` on.
+            if prefix.is_some()
+                && i < split
+                && (op.paints()
+                    || (!canvas.split_path
+                        && matches!(op, CanvasOp::BeginPath | CanvasOp::Path(_))))
+            {
+                continue;
+            }
+            replay.op(op);
+        }
+        if isolated {
+            CGContext::end_transparency_layer(Some(cx));
+        }
+        CGContext::restore_g_state(Some(cx));
+    }
+
+    /// What `drawing`'s operations before `split` paint at `size` and
+    /// `scale`, in a layer made for `cx`, once it was painted [`STABLE`]
+    /// times: kept until one of them changes, or an image loads.
+    fn prefix(
+        &self,
+        cx: &CGContext,
+        drawing: &Arc<Drawing>,
+        split: usize,
+        size: CGSize,
+        scale: f64,
+        asynchronous: bool,
+    ) -> Option<CFRetained<CGLayer>> {
+        let px = (
+            (size.width * scale).ceil() as usize,
+            (size.height * scale).ceil() as usize,
+        );
+        if px.0 == 0 || px.1 == 0 {
+            return None;
+        }
+        let images = self.images.values().filter(|i| i.is_some()).count();
+        let mut prefix = self.prefix.borrow_mut();
+        if let Some(p) = &*prefix
+            && Arc::ptr_eq(&p.drawing, drawing)
+            && p.size == px
+            && p.images == images
+        {
+            return Some(p.layer.clone());
+        }
+        let redrawn = self.redrawn.get();
+        self.redrawn.set(redrawn.saturating_add(1));
+        // Made for the context it is drawn into: once the layer draws at
+        // once.
+        if redrawn < STABLE || asynchronous {
+            return None;
+        }
+        // In pixels: a layer takes its size in the user space of the
+        // context it is made for, not its device's.
         // SAFETY: no auxiliary info.
-        unsafe { CGContext::begin_transparency_layer(Some(ctx), None) };
+        let layer = unsafe {
+            CGLayer::with_context(
+                Some(cx),
+                CGSize::new(px.0 as CGFloat, px.1 as CGFloat),
+                None,
+            )
+        }?;
+        let context = CGLayer::context(Some(&layer))?;
+        // y down, in points, as the layer's context.
+        CGContext::translate_ctm(Some(&context), 0.0, px.1 as CGFloat);
+        CGContext::scale_ctm(Some(&context), scale, -scale);
+        let mut replay = Replay::new(&context, self);
+        for op in &drawing.ops[..split] {
+            replay.op(op);
+        }
+        drop(replay);
+        *prefix = Some(Prefix {
+            drawing: drawing.clone(),
+            size: px,
+            images,
+            layer: layer.clone(),
+        });
+        Some(layer)
     }
-    for op in &drawing.ops {
-        replay.op(op);
-    }
-    if isolated {
-        CGContext::end_transparency_layer(Some(ctx));
-    }
-    CGContext::restore_g_state(Some(ctx));
 }
 
 /// An affine transform `[a, b, c, d, e, f]` (canvas order: `x' = a x + c y
@@ -253,7 +469,7 @@ struct State {
     cap: LineCap,
     join: LineJoin,
     miter: f64,
-    dash: Arc<[f32]>,
+    dash: Arc<[Points]>,
     dash_offset: f64,
     alpha: f64,
     composite: Composite,
@@ -307,7 +523,18 @@ enum Mode {
 }
 
 impl<'a> Replay<'a> {
-    fn ctx(&self) -> Option<&'a CGContext> {
+    fn new(c: &'a CGContext, canvas: &'a CanvasState) -> Self {
+        Replay {
+            c,
+            args: &canvas.args,
+            images: &canvas.images,
+            state: State::default(),
+            stack: Vec::new(),
+            path: CGMutablePath::new(),
+        }
+    }
+
+    fn cx(&self) -> Option<&'a CGContext> {
         Some(self.c)
     }
 
@@ -327,7 +554,7 @@ impl<'a> Replay<'a> {
     }
 
     fn op(&mut self, op: &CanvasOp) {
-        let c = self.ctx();
+        let c = self.cx();
         match op {
             CanvasOp::Save => {
                 self.stack.push(self.state.clone());
@@ -418,10 +645,10 @@ impl<'a> Replay<'a> {
             }
             CanvasOp::Composite(m) => self.state.composite = *m,
             CanvasOp::ShadowColor(color) => self.state.shadow.0 = *color,
-            CanvasOp::ShadowBlur(b) => self.state.shadow.1 = *b as f64,
-            CanvasOp::ShadowOffset(x, y) => {
-                self.state.shadow.2 = *x as f64;
-                self.state.shadow.3 = *y as f64;
+            CanvasOp::ShadowBlur(b) => self.state.shadow.1 = b.0 as f64,
+            CanvasOp::ShadowOffset(offset) => {
+                self.state.shadow.2 = offset.x.0 as f64;
+                self.state.shadow.3 = offset.y.0 as f64;
             }
             CanvasOp::Font(f) => self.state.font = f.clone(),
             CanvasOp::FontVariantNumeric(v) => self.state.numeric = *v,
@@ -432,18 +659,22 @@ impl<'a> Replay<'a> {
                 x,
                 y,
                 max_width,
-            } => self.text(text, self.n(*x), self.n(*y), *max_width, false),
+            } => self.text(text, self.n(*x), self.n(*y), max_width.map(|m| m.0), false),
             CanvasOp::StrokeText {
                 text,
                 x,
                 y,
                 max_width,
-            } => self.text(text, self.n(*x), self.n(*y), *max_width, true),
+            } => self.text(text, self.n(*x), self.n(*y), max_width.map(|m| m.0), true),
             CanvasOp::DrawImage {
                 image,
                 source,
                 dest,
-            } => self.image(&image.uri, *source, dest),
+            } => self.image(
+                &image.uri,
+                source.map(|b| [b.origin.x, b.origin.y, b.size.width, b.size.height].map(|v| v.0)),
+                dest,
+            ),
         }
     }
 
@@ -513,7 +744,8 @@ impl<'a> Replay<'a> {
                 } => {
                     let r = n(*radius).max(0.0);
                     let start = n(*start);
-                    let sweep = arc_sweep(start as f32, n(*end) as f32, *ccw) as f64;
+                    let sweep =
+                        arc_sweep(Radians(start as f32), Radians(n(*end) as f32), *ccw).0 as f64;
                     // Increasing angles turn clockwise on a y-down screen,
                     // which is CoreGraphics' counterclockwise.
                     CGMutablePath::add_arc(
@@ -552,7 +784,8 @@ impl<'a> Replay<'a> {
                         .then([rx.max(1e-9), 0.0, 0.0, ry.max(1e-9), 0.0, 0.0])
                         .cg();
                     let start = n(*start);
-                    let sweep = arc_sweep(start as f32, n(*end) as f32, *ccw) as f64;
+                    let sweep =
+                        arc_sweep(Radians(start as f32), Radians(n(*end) as f32), *ccw).0 as f64;
                     CGMutablePath::add_arc(
                         p,
                         &unit,
@@ -574,8 +807,7 @@ impl<'a> Replay<'a> {
                 }
                 PathOp::RoundRect(rect, radii) => {
                     let [x, y, w, h] = rect.map(n);
-                    let [tl, tr, br, bl] =
-                        fit_radii(w as f32, h as f32, radii.map(|r| n(r) as f32)).map(f64::from);
+                    let [tl, tr, br, bl] = fit_corners(w, h, radii.map(n));
                     CGMutablePath::move_to_point(p, &m, x + tl, y);
                     CGMutablePath::add_arc_to_point(p, &m, x + w, y, x + w, y + h, tr);
                     CGMutablePath::add_arc_to_point(p, &m, x + w, y + h, x, y + h, br);
@@ -606,7 +838,7 @@ impl<'a> Replay<'a> {
 
     /// Alpha, blend mode and shadow of the current state, for one draw.
     fn compositing(&self) {
-        let c = self.ctx();
+        let c = self.cx();
         let s = &self.state;
         CGContext::set_alpha(c, s.alpha);
         CGContext::set_blend_mode(c, blend(s.composite));
@@ -621,7 +853,7 @@ impl<'a> Replay<'a> {
 
     /// Fills or strokes `path` (in the view's space) with the state's paint.
     fn paint(&self, path: &CGMutablePath, mode: Mode) {
-        let c = self.ctx();
+        let c = self.cx();
         let s = &self.state;
         CGContext::save_g_state(c);
         self.compositing();
@@ -693,7 +925,7 @@ impl<'a> Replay<'a> {
                 );
                 CGContext::set_miter_limit(c, s.miter);
                 if !s.dash.is_empty() {
-                    let lengths: Vec<CGFloat> = s.dash.iter().map(|&d| d as CGFloat).collect();
+                    let lengths: Vec<CGFloat> = s.dash.iter().map(|&d| d.0 as CGFloat).collect();
                     // SAFETY: `lengths` outlives the call.
                     unsafe {
                         CGContext::set_line_dash(c, s.dash_offset, lengths.as_ptr(), lengths.len())
@@ -724,14 +956,15 @@ impl<'a> Replay<'a> {
     /// Draws a gradient paint over the clip (in user space).
     fn gradient(&self, paint: &Paint) {
         let Paint::Gradient(g) = paint else { return };
-        let c = self.ctx();
+        let c = self.cx();
         if g.stops.is_empty() {
             return;
         }
         let options = CGGradientDrawingOptions::DrawsBeforeStartLocation
             | CGGradientDrawingOptions::DrawsAfterEndLocation;
         match g.shape {
-            GradientShape::Linear([x0, y0, x1, y1]) => {
+            GradientShape::Linear { start, end } => {
+                let [x0, y0, x1, y1] = [start.x, start.y, end.x, end.y].map(|v| v.0);
                 let Some(gradient) = cg_gradient(g) else {
                     return;
                 };
@@ -743,7 +976,14 @@ impl<'a> Replay<'a> {
                     options,
                 );
             }
-            GradientShape::Radial([x0, y0, r0, x1, y1, r1]) => {
+            GradientShape::Radial {
+                start,
+                start_radius,
+                end,
+                end_radius,
+            } => {
+                let [x0, y0, r0, x1, y1, r1] =
+                    [start.x, start.y, start_radius, end.x, end.y, end_radius].map(|v| v.0);
                 let Some(gradient) = cg_gradient(g) else {
                     return;
                 };
@@ -757,7 +997,16 @@ impl<'a> Replay<'a> {
                     options,
                 );
             }
-            GradientShape::Conic([angle, x, y]) => conic(c, g, angle as f64, x as f64, y as f64),
+            GradientShape::Conic {
+                start_angle,
+                center,
+            } => conic(
+                c,
+                g,
+                start_angle.0 as f64,
+                center.x.0 as f64,
+                center.y.0 as f64,
+            ),
         }
     }
 
@@ -765,7 +1014,7 @@ impl<'a> Replay<'a> {
         if text.is_empty() {
             return;
         }
-        let c = self.ctx();
+        let c = self.cx();
         let s = &self.state;
         let font = crate::text::make_font(&s.font.with_numeric(s.numeric).text_style());
         let string =
@@ -898,7 +1147,7 @@ impl<'a> Replay<'a> {
         if dh.is_nan() {
             dh = size.1;
         }
-        let c = self.ctx();
+        let c = self.cx();
         CGContext::save_g_state(c);
         self.compositing();
         CGContext::concat_ctm(c, self.state.ctm.cg());
@@ -955,7 +1204,7 @@ fn cg_gradient(g: &CanvasGradient) -> Option<CFRetained<CGGradient>> {
     for (offset, color) in &g.stops {
         let (r, gr, b, a) = color.to_f64();
         components.extend_from_slice(&[r, gr, b, a]);
-        locations.push(*offset as CGFloat);
+        locations.push(offset.0 as CGFloat);
     }
     // SAFETY: four components per location, both arrays live for the call.
     unsafe {
@@ -971,11 +1220,12 @@ fn cg_gradient(g: &CanvasGradient) -> Option<CFRetained<CGGradient>> {
 /// The gradient's color at `t` (0..1).
 fn stop_color(g: &CanvasGradient, t: f32) -> Color {
     let stops = &g.stops;
-    if t <= stops[0].0 {
+    if t <= stops[0].0.0 {
         return stops[0].1;
     }
     for w in stops.windows(2) {
         let ((o0, c0), (o1, c1)) = (w[0], w[1]);
+        let (o0, o1) = (o0.0, o1.0);
         if t <= o1 {
             let f = if o1 > o0 { (t - o0) / (o1 - o0) } else { 1.0 };
             return lerp(c0, c1, f);
@@ -1026,5 +1276,207 @@ fn conic(c: Option<&CGContext>, g: &CanvasGradient, angle: f64, x: f64, y: f64) 
         }
         CGContext::set_fill_color_with_color(c, Some(&crate::text::cg_color(color)));
         CGContext::fill_path(c);
+    }
+}
+
+/// [`fit_radii`] on CoreGraphics' numbers: top left, top right, bottom
+/// right, bottom left.
+fn fit_corners(w: f64, h: f64, radii: [f64; 4]) -> [f64; 4] {
+    let [top_left, top_right, bottom_right, bottom_left] = radii.map(|r| Points(r as f32));
+    let fit = fit_radii(
+        size(Points(w as f32), Points(h as f32)),
+        Corners {
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left,
+        },
+    );
+    [
+        fit.top_left,
+        fit.top_right,
+        fit.bottom_right,
+        fit.bottom_left,
+    ]
+    .map(|r| f64::from(r.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use nsh_core::{
+        canvas::PathOp,
+        geometry::{Percentage, Point},
+    };
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGBitmapContextGetData, CGColorSpace, CGImageAlphaInfo,
+        CGImageByteOrderInfo,
+    };
+
+    use super::*;
+
+    /// A sparkline as the Stocks demo draws it: a gradient fill, faded in
+    /// by `destination-out`, a stroke, then a pulsing ring (slots 0 and 1).
+    fn sparkline() -> Arc<Drawing> {
+        let c = Num::Const;
+        let line = |ops: &mut Vec<CanvasOp>| {
+            ops.push(CanvasOp::Path(PathOp::MoveTo(c(4.0), c(30.0))));
+            for (x, y) in [(20.0, 12.0), (40.0, 26.0), (60.0, 8.0), (90.0, 18.0)] {
+                ops.push(CanvasOp::Path(PathOp::LineTo(c(x), c(y))));
+            }
+        };
+        let gradient = |(x0, y0): (f32, f32), (x1, y1): (f32, f32), from: u32, to: u32| {
+            CanvasGradient::linear(
+                Point::new(Points(x0), Points(y0)),
+                Point::new(Points(x1), Points(y1)),
+            )
+            .add_color_stop(Percentage(0.0), Color(from))
+            .add_color_stop(Percentage(1.0), Color(to))
+        };
+        let fade = gradient((0.0, 0.0), (20.0, 0.0), 0x000000ff, 0x00000000);
+        let gradient = gradient((0.0, 8.0), (0.0, 36.0), 0x30a46c55, 0x30a46c00);
+        let mut ops = vec![CanvasOp::BeginPath];
+        line(&mut ops);
+        ops.extend([
+            CanvasOp::Path(PathOp::LineTo(c(90.0), c(36.0))),
+            CanvasOp::Path(PathOp::LineTo(c(4.0), c(36.0))),
+            CanvasOp::Path(PathOp::Close),
+            CanvasOp::FillStyle(Paint::Gradient(Arc::new(gradient))),
+            CanvasOp::Fill(None, FillRule::NonZero),
+            CanvasOp::Composite(Composite::DestinationOut),
+            CanvasOp::FillStyle(Paint::Gradient(Arc::new(fade))),
+            CanvasOp::FillRect([c(0.0), c(0.0), c(20.0), c(40.0)]),
+            CanvasOp::Composite(Composite::SourceOver),
+            CanvasOp::BeginPath,
+        ]);
+        line(&mut ops);
+        ops.extend([
+            CanvasOp::StrokeStyle(Paint::Color(Color(0x30a46cff))),
+            CanvasOp::LineWidth(c(1.5)),
+            CanvasOp::Stroke(None),
+            CanvasOp::GlobalAlpha(Num::Slot(1)),
+            CanvasOp::FillStyle(Paint::Color(Color(0x30a46cff))),
+            CanvasOp::BeginPath,
+            CanvasOp::Path(PathOp::Arc {
+                x: c(90.0),
+                y: c(18.0),
+                radius: Num::Slot(0),
+                start: c(0.0),
+                end: c(TAU as f32),
+                ccw: false,
+            }),
+            CanvasOp::Fill(None, FillRule::NonZero),
+        ]);
+        Arc::new(Drawing {
+            ops,
+            ..Drawing::default()
+        })
+    }
+
+    /// `canvas` painted into a fresh 100 × 40 point bitmap at scale 2.
+    fn pixels(canvas: &CanvasState) -> Vec<u8> {
+        let (w, h, scale) = (100.0, 40.0, 2.0);
+        let (pw, ph) = (200, 80);
+        let space = CGColorSpace::new_device_rgb().unwrap();
+        // SAFETY: a context with pixels of its own, read after drawing.
+        unsafe {
+            let cx = CGBitmapContextCreate(
+                std::ptr::null_mut(),
+                pw,
+                ph,
+                8,
+                pw * 4,
+                Some(&space),
+                CGImageAlphaInfo::PremultipliedFirst.0 | CGImageByteOrderInfo::Order32Little.0,
+            )
+            .unwrap();
+            CGContext::translate_ctm(Some(&cx), 0.0, ph as CGFloat);
+            CGContext::scale_ctm(Some(&cx), scale, -scale);
+            let size = CGSize::new(w, h);
+            canvas.paint(&cx, CGRect::new(CGPoint::ZERO, size), size, scale, false);
+            let data = CGBitmapContextGetData(Some(&cx)).cast::<u8>();
+            std::slice::from_raw_parts(data, pw * ph * 4).to_vec()
+        }
+    }
+
+    fn sparkline_canvas(radius: f32) -> CanvasState {
+        let drawing = sparkline();
+        let mut canvas = CanvasState {
+            split: first_animated(&drawing.ops),
+            split_path: prefix_path_needed(&drawing.ops, first_animated(&drawing.ops)),
+            drawing: Some(drawing),
+            redrawn: Cell::new(STABLE),
+            ..CanvasState::default()
+        };
+        canvas.args = vec![
+            Some(AnimationValue::Number(radius)),
+            Some(AnimationValue::Number(0.4)),
+        ];
+        canvas
+    }
+
+    #[test]
+    fn a_canvas_painting_often_draws_asynchronously() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        // Redrawn every 2 s: at once.
+        let rare = Cadence::default();
+        for n in 0..5 {
+            rare.paint(at(n * 2000));
+        }
+        assert!(!rare.frequent.get());
+        // An animation at 120 Hz: on Core Animation's threads from its
+        // tenth frame.
+        let animated = Cadence::default();
+        for n in 0..9 {
+            animated.paint(at(n * 8));
+        }
+        assert!(!animated.frequent.get());
+        animated.paint(at(72));
+        assert!(animated.frequent.get());
+        for n in 10..240 {
+            animated.paint(at(n * 8));
+        }
+        assert!(animated.frequent.get());
+        // It stops: the next paint, a second on, draws at once again.
+        animated.paint(at(240 * 8 + 3000));
+        assert!(!animated.frequent.get());
+        // A canvas keeping its static part draws at once however often.
+        let mut canvas = sparkline_canvas(5.0);
+        canvas.cadence.frequent.set(true);
+        canvas.split = MIN_PREFIX;
+        assert!(!canvas.draws_asynchronously());
+        canvas.redrawn.set(0);
+        assert!(canvas.draws_asynchronously());
+    }
+
+    #[test]
+    fn the_static_part_is_drawn_from_its_layer() {
+        // Not before the drawing has been painted unchanged a while.
+        let fresh = sparkline_canvas(5.0);
+        fresh.redrawn.set(0);
+        pixels(&fresh);
+        assert!(fresh.prefix.borrow().is_none());
+        let canvas = sparkline_canvas(5.0);
+        assert!(0 < canvas.split && canvas.split < canvas.drawing.as_ref().unwrap().ops.len());
+        assert!(!canvas.split_path, "the ring begins a path of its own");
+        let kept = pixels(&canvas);
+        assert!(canvas.prefix.borrow().is_some());
+        // The whole drawing replayed, nothing kept.
+        let mut whole = sparkline_canvas(5.0);
+        whole.split = 0;
+        let replayed = pixels(&whole);
+        assert!(replayed.iter().any(|&b| b != 0));
+        assert_eq!(kept, replayed);
+        // The ring grows: the layer is kept, the ring drawn anew.
+        let mut canvas = canvas;
+        canvas.args[0] = Some(AnimationValue::Number(8.0));
+        let layer = canvas.prefix.borrow().as_ref().map(|p| p.layer.clone());
+        let grown = pixels(&canvas);
+        let again = canvas.prefix.borrow().as_ref().map(|p| p.layer.clone());
+        assert!(
+            matches!((layer, again), (Some(a), Some(b)) if CFRetained::as_ptr(&a) == CFRetained::as_ptr(&b))
+        );
+        whole.args[0] = Some(AnimationValue::Number(8.0));
+        assert_eq!(grown, pixels(&whole));
     }
 }

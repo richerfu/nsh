@@ -80,7 +80,7 @@ impl Dialogs {
             .get()
             .resolve(self.context.platform.get().color_scheme)
             == nsh_engine::ColorScheme::Dark;
-        let width = (self.context.platform.get().window.0 - 32.0).clamp(120.0, 360.0);
+        let width = (self.context.platform.get().window.width.0 - 32.0).clamp(120.0, 360.0);
         let fg = if dark { 0xffeeeeee } else { 0xff202020 };
         let mut height = 16.0;
         let make_text = |text: &str, size: f32, h: f32, color: u32| -> Result<NativeNode> {
@@ -156,7 +156,7 @@ impl Dialogs {
         column.borrow().height(height)?;
         root.borrow().width(width)?;
         root.borrow()
-            .height(height.min((self.context.platform.get().window.1 * 0.8).max(96.0)))?;
+            .height(height.min((self.context.platform.get().window.height.0 * 0.8).max(96.0)))?;
         root.borrow_mut().add_child(column)?;
         dialog.background_color(if dark { 0xff202020 } else { 0xfffafafa })?;
         dialog.content_node(&root)?;

@@ -4,7 +4,8 @@
 
 use crate::{
     Command, ROOT_ID,
-    desktop::{DesktopCommand, TitleBarStyle, WindowFrame, WindowLevel},
+    desktop::{DesktopCommand, MenuBarMode, TitleBarStyle, WindowFrame, WindowLevel},
+    geometry::Points,
     ui::{ModuleCx, module, task::Action},
 };
 
@@ -15,10 +16,10 @@ fn desktop(cx: &mut ModuleCx, command: DesktopCommand) {
     ));
 }
 
-/// The app's window.
+/// The app's window (desktops; its functions do nothing elsewhere).
+#[module]
 pub(crate) struct Window;
 
-/// The app's window (desktops; its functions do nothing elsewhere).
 #[module]
 impl Window {
     /// Sets the window's title (the title bar, the taskbar / Dock, the
@@ -33,10 +34,24 @@ impl Window {
     /// `desktop={{ windowDrag: true }}`; the system's window controls stay,
     /// in the area `titleBar()` reports. `height` is the app's bar's height
     /// in points: the controls are centered in it (Windows' caption buttons
-    /// fill it); the platform's own without it.
+    /// fill it); the platform's own without it. On macOS, it selects compact
+    /// chrome up to 44 points and regular chrome above; use `titleBar().height`
+    /// to lay out the bar at AppKit's actual height. An embedding host's
+    /// existing toolbar keeps its own style and height.
     pub(crate) fn set_title_bar(style: TitleBarStyle, height: Option<f32>, cx: &mut ModuleCx) {
-        let height = crate::desktop::title_bar_height(height);
+        let height = crate::desktop::title_bar_height(height.map(Points));
         desktop(cx, DesktopCommand::SetTitleBar { style, height });
+    }
+
+    /// When the menu bar shows on Windows and Linux, where the window draws
+    /// the application menu as a bar above the app: `"shown"` (the
+    /// default) always; `"autoHide"` only after Alt is pressed and released
+    /// alone, until Alt alone hides it again, as in Windows and GNOME apps.
+    /// F10 and Alt with a menu's initial still open a menu, and the bar
+    /// shows while it is open. macOS's menu bar is the system's and always
+    /// shows.
+    pub(crate) fn set_menu_bar(mode: MenuBarMode, cx: &mut ModuleCx) {
+        desktop(cx, DesktopCommand::SetMenuBar(mode));
     }
 
     /// Minimizes the window.
@@ -60,14 +75,16 @@ impl Window {
     /// corner in macOS screen coordinates and the top left on Windows.
     /// `animated` enables macOS's resize animation (false by default).
     /// Sizing is supported on macOS, Windows and Linux; positioning and levels
-    /// on macOS and Windows. GPUI's host chooses its bounds and level.
+    /// on macOS and Windows. A view embedded in another app's window leaves
+    /// its bounds and level to that app.
     pub(crate) fn set_frame(frame: WindowFrame, cx: &mut ModuleCx) {
         let frame = WindowFrame {
             x: frame.x.filter(|v| v.is_finite()),
             y: frame.y.filter(|v| v.is_finite()),
-            width: frame.width.filter(|v| v.is_finite() && *v > 0.0),
-            height: frame.height.filter(|v| v.is_finite() && *v > 0.0),
+            width: frame.width.filter(|v| v.is_finite() && v.0 > 0.0),
+            height: frame.height.filter(|v| v.is_finite() && v.0 > 0.0),
             animated: frame.animated,
+            anchor_top: frame.anchor_top,
         };
         desktop(cx, DesktopCommand::SetFrame(frame));
     }
@@ -76,9 +93,16 @@ impl Window {
     /// normal level; `"floating"` stays above normal windows. `"desktopIcon"`
     /// selects macOS's desktop icon level or moves a Windows window to the
     /// bottom of the current z-order, where later activation can raise it.
-    /// GTK and GPUI leave the level to the host and window manager.
+    /// Elsewhere the level is left to the host and the window manager.
     pub(crate) fn set_level(level: WindowLevel, cx: &mut ModuleCx) {
         desktop(cx, DesktopCommand::SetLevel(level));
+    }
+
+    /// Brings the window to the front of its level and focuses it (the app
+    /// activates). The window keeps its level. On macOS, desktop-level
+    /// surfaces stay behind other windows.
+    pub(crate) fn order_front(cx: &mut ModuleCx) {
+        desktop(cx, DesktopCommand::OrderFront);
     }
 
     /// Closes the window; the app ends with it.

@@ -1,5 +1,5 @@
 import { mount, signal, View, Text, Scroll, type YNode } from "nsh";
-import { Modal } from "nsh/ui/mobile";
+import { Modal } from "nsh/base";
 import { WebView } from "nsh/webview";
 function App() {
   const loads = signal(0), geometry = signal(false), modal = signal(false), overlays = signal(0);

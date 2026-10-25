@@ -491,8 +491,8 @@ resource and HAP to deploy module changes; rebuild the SDK for native changes.
 ## See also
 
 - [Platform overview](./platforms.md)
-- [Embedding in iOS apps](./embedding-ios.md)
-- [Embedding in Android apps](./embedding-android.md)
+- [Embedding in iOS apps](./ios.md)
+- [Embedding in Android apps](./android.md)
 - [Backend architecture, implementation status and verification](../../docs/dev/ohos.md)
 
 ## Native WebView and video

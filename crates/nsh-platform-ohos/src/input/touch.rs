@@ -195,10 +195,11 @@ impl Touches {
                             id,
                             target: node.id,
                             path,
-                            page_x: page.0,
-                            page_y: page.1,
-                            location_x: 0.0,
-                            location_y: 0.0,
+                            page: nsh_core::Point::new(
+                                nsh_core::Points(page.0),
+                                nsh_core::Points(page.1),
+                            ),
+                            location: nsh_core::Point::default(),
                             changed: true,
                         },
                         node: Rc::downgrade(&node),
@@ -214,14 +215,14 @@ impl Touches {
                 self.keyboard_tap = None;
             }
             if let Some(finger) = self.fingers.iter_mut().find(|f| f.point.id == id) {
-                finger.point.page_x = page.0;
-                finger.point.page_y = page.1;
+                finger.point.page =
+                    nsh_core::Point::new(nsh_core::Points(page.0), nsh_core::Points(page.1));
                 if let Some(node) = finger.node.upgrade()
                     && let Some(matrix) = node.input_in_root(root)?
                     && let Some((x, y)) = crate::render::geometry::local_point(&matrix.0, local)
                 {
-                    finger.point.location_x = x;
-                    finger.point.location_y = y;
+                    finger.point.location =
+                        nsh_core::Point::new(nsh_core::Points(x), nsh_core::Points(y));
                 }
             }
         }
@@ -254,8 +255,8 @@ impl Touches {
                     };
                     match node.interaction.pan_activation().and_then(|p| {
                         p.decide(
-                            finger.point.page_x - finger.start.0,
-                            finger.point.page_y - finger.start.1,
+                            nsh_core::Points(finger.point.page.x.0 - finger.start.0),
+                            nsh_core::Points(finger.point.page.y.0 - finger.start.1),
                         )
                     }) {
                         Some(false) => *failed = true,
@@ -721,10 +722,10 @@ fn hit(root: &Rc<Node>, point: (f32, f32), world: &nsh_core::Matrix) -> Result<O
     };
     let frame = root.frame.get();
     let slop = root.interaction.hit_slop();
-    let inside = x >= -slop.left
-        && y >= -slop.top
-        && x < frame.width + slop.right
-        && y < frame.height + slop.bottom;
+    let inside = x >= -slop.left.0
+        && y >= -slop.top.0
+        && x < frame.width + slop.right.0
+        && y < frame.height + slop.bottom.0;
     let inside_clip = x >= 0.0 && y >= 0.0 && x < frame.width && y < frame.height;
     if pointer != PointerEvents::BoxOnly && (inside_clip || !root.clips_children()) {
         // Sticky cells are raised above their siblings in the native tree.

@@ -2,7 +2,7 @@ import { mount, signal, View, Text, Input, type YNode } from "nsh";
 import { LayoutAnimation } from "nsh/animated";
 import { keymap } from "nsh/keymap";
 import { AccessibilityInfo } from "nsh/accessibility";
-import { StatusBar } from "nsh/ui/mobile";
+import { StatusBar } from "nsh/base";
 
 function App() {
   const large = signal(false);

@@ -378,7 +378,7 @@ impl Services {
                                         services.app.window()?.set_status_bar(openharmony_ability_plugin_window::WindowStatusBarRequest {
                                             window_id: 0, enabled: !config.hidden,
                                             light_content: match config.style { nsh_core::StatusBarStyle::Default => dark, nsh_core::StatusBarStyle::Light => true, nsh_core::StatusBarStyle::Dark => false },
-                                            background: config.background.map(crate::text::typography::argb), animated: config.animated,
+                                            background: None, animated: config.animated,
                                         }).await
                                     });
                                 }
@@ -895,7 +895,7 @@ pub(crate) fn configure(app: OpenHarmonyApp) {
         .expect("on-demand host frames");
     app.register_plugin(ResourceBridgePlugin::new())
         .expect("resource plugin contract");
-    app.register_plugin(ClipboardBridgePlugin::default())
+    app.register_plugin(ClipboardBridgePlugin)
         .expect("clipboard plugin contract");
     app.register_plugin(WindowBridgePlugin)
         .expect("window plugin contract");

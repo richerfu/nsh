@@ -10,7 +10,7 @@ use std::{
     },
 };
 
-use nsh_core::{ResizeMode, Size, VideoProps};
+use nsh_core::{ResizeMode, VideoProps};
 use ohos_arkui_binding::{
     common::node_registry,
     component::{
@@ -26,7 +26,10 @@ use ohos_native_window_binding::NativeWindow;
 use ohos_xcomponent_binding::NativeXComponent;
 
 use super::Operation;
-use crate::render::node::{NativeNode, Node, Result, callback};
+use crate::render::{
+    geometry::Size,
+    node::{NativeNode, Node, Result, callback},
+};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 thread_local! {

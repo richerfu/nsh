@@ -43,8 +43,10 @@ use std::{
 
 use gtk4::{self as gtk, glib, prelude::*};
 use nsh_core::{
-    AutoCapitalize, EventKind, EventPayload, InputConfig, KeyboardType, PayloadValue, Rect,
-    SubmitBehavior, TextAlign, tailwind::state,
+    AutoCapitalize, Bounds, EventKind, EventPayload, InputConfig, KeyboardType, PayloadValue,
+    Points, SubmitBehavior, TextAlign,
+    geometry::{Point, Size},
+    tailwind::state,
 };
 
 use crate::{surface::Surface, view::NshView};
@@ -102,6 +104,41 @@ impl Editor {
                 (insert.min(bound), insert.max(bound))
             }
         }
+    }
+
+    /// The caret's bounds in `target`'s coordinates (`onCaretMove`'s
+    /// `bounds`): where the editor draws it, its scrolling applied.
+    fn caret_bounds(&self, target: &gtk::Widget) -> Option<Bounds<Points>> {
+        let (widget, x, y, width, height): (gtk::Widget, f32, f32, f32, f32) = match self {
+            Editor::Line(t) => {
+                let (strong, _) = t.compute_cursor_extents(t.position().max(0) as usize);
+                let w = t.clone().upcast();
+                (w, strong.x(), strong.y(), strong.width(), strong.height())
+            }
+            Editor::Area { view, .. } => {
+                let b = view.buffer();
+                let (strong, _) = view.cursor_locations(Some(&b.iter_at_mark(&b.get_insert())));
+                let (x, y) = view.buffer_to_window_coords(
+                    gtk::TextWindowType::Widget,
+                    strong.x(),
+                    strong.y(),
+                );
+                let w = view.clone().upcast();
+                (
+                    w,
+                    x as f32,
+                    y as f32,
+                    strong.width() as f32,
+                    strong.height() as f32,
+                )
+            }
+        };
+        let origin = widget.compute_point(target, &gtk::graphene::Point::new(x, y))?;
+        Some(Bounds {
+            origin: Point::new(Points(origin.x()), Points(origin.y())),
+            // GTK reports an empty width; its caret is a line one pixel wide.
+            size: Size::new(Points(width.max(1.0)), Points(height)),
+        })
     }
 
     /// The caret in characters.
@@ -171,7 +208,7 @@ pub(crate) struct InputState {
     /// A configuration was applied (auto focus happens on the first).
     configured: Cell<bool>,
     /// Content box; the whole view until the core sends one.
-    content: Cell<Option<Rect>>,
+    content: Cell<Option<Bounds<Points>>>,
     /// User edits reported to the engine.
     count: Cell<u32>,
     /// A change made here, not by the user, is being applied.
@@ -190,8 +227,17 @@ pub(crate) struct InputState {
     focused: Cell<bool>,
     /// Selection as last reported (UTF-16).
     selection: Cell<(u32, u32)>,
+    /// The caret as last reported, in the view.
+    caret: Cell<Bounds<Points>>,
+    /// The input method's composition (its preedit text) while one is in
+    /// progress: GTK shows it in the editor, outside the text.
+    composition: RefCell<Option<String>>,
+    /// JS's value set during a composition, with its count: setting the
+    /// text then would reset the input method, so it is applied when the
+    /// composition ends.
+    held: RefCell<Option<(String, u32)>>,
     /// The handlers' context, for reports after programmatic changes.
-    ctx: std::cell::OnceCell<Ctx>,
+    cx: std::cell::OnceCell<Ctx>,
     /// The window whose focus widget is watched, and the handler.
     window: RefCell<Option<(glib::WeakRef<gtk::Window>, glib::SignalHandlerId)>>,
     /// The handler that focuses the editor once it is shown (`autoFocus`).
@@ -308,6 +354,31 @@ impl Ctx {
         self.selection_changed();
     }
 
+    /// A paste (Ctrl+V, Shift+Insert, the context menu) into the editor
+    /// `widget`: reports what the clipboard holds (`onPaste`) if the app
+    /// listens, read now, on the user's paste (GTK reads it asynchronously:
+    /// the report may come after the text it inserts); whether the editor
+    /// pastes its text (`pasteBehavior`).
+    fn pasting(&self, widget: &gtk::Widget) -> bool {
+        let Some((surface, view, input)) = self.get() else {
+            return true;
+        };
+        if view.state().events.contains(EventKind::Paste) {
+            let id = view.id();
+            let surface = Rc::downgrade(&surface);
+            crate::system::read_pasted(widget.clipboard(), move |paste| {
+                if let Some(surface) = surface.upgrade() {
+                    surface.event(id, EventKind::Paste, EventPayload::Paste(Box::new(paste)));
+                }
+            });
+        }
+        let inserts = input.config.borrow().paste_behavior == nsh_core::PasteBehavior::Insert;
+        // Its insertion (and the deletion of the selection it replaces)
+        // types no key.
+        input.pasting.set(inserts);
+        inserts
+    }
+
     /// The caret or selection may have moved.
     fn selection_changed(&self) {
         let Some((_, view, input)) = self.get() else {
@@ -315,28 +386,48 @@ impl Ctx {
         };
         // A programmatic change moves the caret in steps; it is reported
         // once, where it ends. After a user edit, with its change.
-        if input.applying.get()
+        if input.applying.get() || input.pending.get() {
+            return;
+        }
+        let editor = input.editor.borrow().clone();
+        if view.state().events.contains(EventKind::SelectionChange) {
+            let (start, end) = editor.selection();
+            let text = editor.text();
+            let range = (
+                char_to_utf16(&text, start as usize),
+                char_to_utf16(&text, end as usize),
+            );
+            if input.selection.replace(range) != range {
+                self.send(EventKind::SelectionChange, || {
+                    EventPayload::Map(vec![
+                        ("start", PayloadValue::Number(range.0 as f64)),
+                        ("end", PayloadValue::Number(range.1 as f64)),
+                    ])
+                });
+            }
+        }
+        self.caret_moved();
+    }
+
+    /// `onCaretMove` while the input edits, if its caret moved: with the
+    /// selection, or as the text view scrolled or the input was laid out
+    /// again.
+    fn caret_moved(&self) {
+        let Some((_, view, input)) = self.get() else {
+            return;
+        };
+        if !input.focused.get()
+            || input.applying.get()
             || input.pending.get()
-            || !view.state().events.contains(EventKind::SelectionChange)
+            || !view.state().events.contains(EventKind::CaretMove)
         {
             return;
         }
         let editor = input.editor.borrow().clone();
-        let (start, end) = editor.selection();
-        let text = editor.text();
-        let range = (
-            char_to_utf16(&text, start as usize),
-            char_to_utf16(&text, end as usize),
-        );
-        if input.selection.replace(range) == range {
-            return;
+        let caret = editor.caret_bounds(view.upcast_ref()).unwrap_or_default();
+        if input.caret.replace(caret) != caret {
+            self.send(EventKind::CaretMove, || EventPayload::caret(caret));
         }
-        self.send(EventKind::SelectionChange, || {
-            EventPayload::Map(vec![
-                ("start", PayloadValue::Number(range.0 as f64)),
-                ("end", PayloadValue::Number(range.1 as f64)),
-            ])
-        });
     }
 
     /// Follows the focus of the window the editor `widget` is shown in.
@@ -366,6 +457,60 @@ impl Ctx {
         self.focus_changed();
     }
 
+    /// The input method's preedit text changed: empty when its
+    /// composition ends (committed or cancelled).
+    fn preedit_changed(&self, text: &str) {
+        let Some(input) = self.input.upgrade() else {
+            return;
+        };
+        if text.is_empty() {
+            self.composition_ended();
+            return;
+        }
+        if input.composition.borrow().as_deref() == Some(text) {
+            return;
+        }
+        *input.composition.borrow_mut() = Some(text.to_owned());
+        self.send_composition(true, text);
+    }
+
+    /// The composition ended. The text it committed is inserted around the
+    /// same time, so its end is reported once idle, after that text's
+    /// `onChangeText`; then the value JS set meanwhile applies.
+    fn composition_ended(&self) {
+        let Some(input) = self.input.upgrade() else {
+            return;
+        };
+        if input.composition.borrow_mut().take().is_none() {
+            return;
+        }
+        let c = self.clone();
+        glib::idle_add_local_once(move || {
+            let Some((_, view, input)) = c.get() else {
+                return;
+            };
+            if input.composition.borrow().is_some() {
+                // Another composition started: this one's value waits for it.
+                return;
+            }
+            c.flush_change();
+            c.send_composition(false, "");
+            let held = input.held.borrow_mut().take();
+            if let Some((text, count)) = held {
+                value(&view, &text, count);
+            }
+        });
+    }
+
+    fn send_composition(&self, composing: bool, text: &str) {
+        self.send(EventKind::CompositionChange, || {
+            EventPayload::Map(vec![
+                ("composing", PayloadValue::Bool(composing)),
+                ("text", PayloadValue::Str(text.to_owned())),
+            ])
+        });
+    }
+
     /// Focus entered or left the editor.
     fn focus_changed(&self) {
         let Some((surface, view, input)) = self.get() else {
@@ -382,6 +527,10 @@ impl Ctx {
             return;
         }
         self.flush_change();
+        if !focused {
+            // GTK resets the input method when the focus leaves.
+            self.composition_ended();
+        }
         crate::input::set_state(&surface, &view, state::FOCUSED, focused);
         let kind = if focused {
             EventKind::Focus
@@ -454,8 +603,8 @@ impl InputState {
         editor.select(caret, caret);
         self.applying.set(false);
         self.update_placeholder();
-        if let Some(ctx) = self.ctx.get() {
-            ctx.selection_changed();
+        if let Some(cx) = self.cx.get() {
+            cx.selection_changed();
         }
     }
 }
@@ -495,18 +644,21 @@ pub(crate) fn create(surface: &Rc<Surface>, view: &NshView) {
         pending: Cell::new(false),
         focused: Cell::new(false),
         selection: Cell::new((0, 0)),
-        ctx: std::cell::OnceCell::new(),
+        caret: Cell::new(Bounds::default()),
+        composition: RefCell::new(None),
+        held: RefCell::new(None),
+        cx: std::cell::OnceCell::new(),
         window: RefCell::new(None),
         auto_focus: RefCell::new(None),
     });
     add_provider(&input.placeholder, &input.provider);
-    let ctx = Ctx {
+    let cx = Ctx {
         surface: Rc::downgrade(surface),
         view: view.downgrade(),
         input: Rc::downgrade(&input),
     };
-    attach(&ctx, &input.editor.borrow(), &input);
-    let _ = input.ctx.set(ctx);
+    attach(&cx, &input.editor.borrow(), &input);
+    let _ = input.cx.set(cx);
     view.state_mut().input = Some(input);
 }
 
@@ -531,12 +683,12 @@ fn add_providers(widget: &impl IsA<gtk::Widget>, input: &InputState) {
 }
 
 /// Connects an editor's signals.
-fn attach(ctx: &Ctx, editor: &Editor, input: &InputState) {
+fn attach(cx: &Ctx, editor: &Editor, input: &InputState) {
     let widget = editor.widget();
     match editor {
         Editor::Line(t) => {
             add_providers(t, input);
-            let c = ctx.clone();
+            let c = cx.clone();
             t.connect_insert_text(move |t, text, pos| {
                 let Some(input) = c.user_edit() else { return };
                 let fit = c.allowed(|| t.text().into(), text);
@@ -552,7 +704,7 @@ fn attach(ctx: &Ctx, editor: &Editor, input: &InputState) {
                     }
                 }
             });
-            let c = ctx.clone();
+            let c = cx.clone();
             t.connect_delete_text(move |_, start, end| {
                 if start != end
                     && let Some(input) = c.user_edit()
@@ -560,21 +712,23 @@ fn attach(ctx: &Ctx, editor: &Editor, input: &InputState) {
                     c.deleted(&input);
                 }
             });
-            let c = ctx.clone();
-            t.connect_paste_clipboard(move |_| {
-                if let Some(input) = c.input.upgrade() {
-                    input.pasting.set(true);
+            let c = cx.clone();
+            t.connect_paste_clipboard(move |t| {
+                if !c.pasting(t.upcast_ref()) {
+                    t.stop_signal_emission_by_name("paste-clipboard");
                 }
             });
-            let c = ctx.clone();
+            let c = cx.clone();
             t.connect_changed(move |_| c.changed());
-            let c = ctx.clone();
+            let c = cx.clone();
+            t.connect_preedit_changed(move |_, text| c.preedit_changed(text));
+            let c = cx.clone();
             t.connect_local("activate", false, move |_| {
                 c.submitted();
                 None
             });
             for property in ["cursor-position", "selection-bound"] {
-                let c = ctx.clone();
+                let c = cx.clone();
                 t.connect_notify_local(Some(property), move |_, _| c.selection_changed());
             }
         }
@@ -582,7 +736,7 @@ fn attach(ctx: &Ctx, editor: &Editor, input: &InputState) {
             add_providers(scroller, input);
             add_providers(view, input);
             let buffer = view.buffer();
-            let c = ctx.clone();
+            let c = cx.clone();
             buffer.connect_insert_text(move |b, iter, text| {
                 let Some(input) = c.user_edit() else { return };
                 let fit = c.allowed(
@@ -602,7 +756,7 @@ fn attach(ctx: &Ctx, editor: &Editor, input: &InputState) {
                     }
                 }
             });
-            let c = ctx.clone();
+            let c = cx.clone();
             buffer.connect_delete_range(move |_, start, end| {
                 if start != end
                     && let Some(input) = c.user_edit()
@@ -610,28 +764,35 @@ fn attach(ctx: &Ctx, editor: &Editor, input: &InputState) {
                     c.deleted(&input);
                 }
             });
-            let c = ctx.clone();
-            view.connect_paste_clipboard(move |_| {
-                if let Some(input) = c.input.upgrade() {
-                    input.pasting.set(true);
+            let c = cx.clone();
+            view.connect_paste_clipboard(move |view| {
+                if !c.pasting(view.upcast_ref()) {
+                    view.stop_signal_emission_by_name("paste-clipboard");
                 }
             });
-            let c = ctx.clone();
+            let c = cx.clone();
             buffer.connect_changed(move |_| c.changed());
-            let c = ctx.clone();
+            let c = cx.clone();
+            view.connect_preedit_changed(move |_, text| c.preedit_changed(text));
+            let c = cx.clone();
             buffer.connect_mark_set(move |b, _, mark| {
                 if *mark == b.get_insert() || *mark == b.selection_bound() {
                     c.selection_changed();
                 }
             });
-            let c = ctx.clone();
+            let c = cx.clone();
             buffer.connect_cursor_position_notify(move |_| c.selection_changed());
+            // Scrolling the text moves the caret.
+            let c = cx.clone();
+            scroller
+                .vadjustment()
+                .connect_value_changed(move |_| c.caret_moved());
         }
     }
 
     // Focus is followed on the window: focus controllers only hear of it
     // while the window is active.
-    let c = ctx.clone();
+    let c = cx.clone();
     widget.connect_map(move |w| c.watch_window(w));
 
     // Backspace in an empty input deletes nothing, so no deletion reports
@@ -639,7 +800,7 @@ fn attach(ctx: &Ctx, editor: &Editor, input: &InputState) {
     // text view inserts a line break.
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let c = ctx.clone();
+    let c = cx.clone();
     let area = match editor {
         Editor::Area { view, .. } => Some(view.downgrade()),
         Editor::Line(_) => None,
@@ -715,8 +876,8 @@ pub(crate) fn config(_surface: &Rc<Surface>, view: &NshView, config: &InputConfi
         let focused = input.focused.get();
         view.remove_native(&old.host());
         let editor = new_editor(config.multiline);
-        if let Some(ctx) = input.ctx.get() {
-            attach(ctx, &editor, &input);
+        if let Some(cx) = input.cx.get() {
+            attach(cx, &editor, &input);
         }
         *input.editor.borrow_mut() = editor.clone();
         input.replace_text(&text);
@@ -810,14 +971,18 @@ fn auto_focus(input: &Rc<InputState>, editor: &Editor) {
 fn place(view: &NshView, input: &InputState) {
     let content = input.content.get().unwrap_or_else(|| {
         let f = view.state().frame;
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            width: f.width,
-            height: f.height,
+        Bounds {
+            origin: Point {
+                x: Points(0.0),
+                y: Points(0.0),
+            },
+            size: Size {
+                width: f.size.width,
+                height: f.size.height,
+            },
         }
     });
-    if content.width <= 0.0 || content.height <= 0.0 {
+    if content.size.width.0 <= 0.0 || content.size.height.0 <= 0.0 {
         return;
     }
     let label = &input.placeholder;
@@ -828,13 +993,17 @@ fn place(view: &NshView, input: &InputState) {
             // a box shorter than the line grows around its center.
             let min = |w: &gtk::Widget| w.measure(gtk::Orientation::Vertical, -1).0 as f32;
             let height = content
+                .size
                 .height
+                .0
                 .max(min(t.upcast_ref()))
                 .max(min(label.upcast_ref()));
-            let rect = Rect {
-                y: content.y + (content.height - height) / 2.0,
-                height,
-                ..content
+            let rect = Bounds {
+                origin: Point::new(
+                    content.origin.x,
+                    content.origin.y + (content.size.height - Points(height)) / 2.0,
+                ),
+                size: Size::new(content.size.width, Points(height)),
             };
             view.set_native(label, rect);
             view.set_native(t, rect);
@@ -850,17 +1019,17 @@ fn place(view: &NshView, input: &InputState) {
             // Ending it lets the allocation coming for the new height set
             // the adjustment up again (and back to the top if everything
             // fits).
-            if scroller.height() as f32 != content.height
+            if scroller.height() as f32 != content.size.height.0
                 && let Some(adjustment) = text.vadjustment()
             {
                 adjustment.set_value(adjustment.value());
             }
-            let width = content.width.max(0.0) as i32;
+            let width = content.size.width.0.max(0.0) as i32;
             let height = label.measure(gtk::Orientation::Vertical, width).0 as f32;
             view.set_native(
                 label,
-                Rect {
-                    height: content.height.max(height),
+                Bounds {
+                    size: Size::new(content.size.width, content.size.height.max(Points(height))),
                     ..content
                 },
             );
@@ -924,10 +1093,10 @@ fn css(config: &InputConfig) -> String {
     let _ = write!(
         font,
         "font-size: {}px; font-weight: {}; font-style: {}; letter-spacing: {}px;",
-        s.font_size,
+        s.font_size.0,
         s.font_weight,
         if s.italic { "italic" } else { "normal" },
-        s.letter_spacing,
+        s.letter_spacing.0,
     );
     let caret = if config.caret_hidden {
         "transparent".to_owned()
@@ -958,11 +1127,11 @@ fn css(config: &InputConfig) -> String {
          text > selection:backdrop, textview > text > selection:backdrop {{ \
          background-color: alpha({selection}, 0.3); color: {color}; }}"
     );
-    if s.line_height > 0.0 {
+    if s.line_height.0 > 0.0 {
         let _ = writeln!(
             css,
             "textview > text, label.nsh-placeholder {{ line-height: {}px; }}",
-            s.line_height
+            s.line_height.0
         );
     }
     css
@@ -986,12 +1155,24 @@ fn css_families(name: &str) -> Option<String> {
     (!families.is_empty()).then(|| families.join(", "))
 }
 
+/// The text input `view` holds now (`None`: it is no input).
+#[cfg(feature = "dev")]
+pub(crate) fn current_text(view: &NshView) -> Option<String> {
+    let input = view.state().input.clone()?;
+    let text = input.editor.borrow().text();
+    Some(text)
+}
+
 /// `InputValue`: JS's text, unless the user typed since JS saw `count`.
 pub(crate) fn value(view: &NshView, text: &str, count: u32) {
     let Some(input) = view.state().input.clone() else {
         return;
     };
     if count < input.count.get() || input.editor.borrow().text() == text {
+        return;
+    }
+    if input.composition.borrow().is_some() {
+        *input.held.borrow_mut() = Some((text.to_owned(), count));
         return;
     }
     input.replace_text(text);
@@ -1016,12 +1197,18 @@ pub(crate) fn animated(view: &NshView) {
 }
 
 /// `InputContent`.
-pub(crate) fn content(view: &NshView, content: Rect) {
+pub(crate) fn content(view: &NshView, content: Bounds<Points>) {
     let Some(input) = view.state().input.clone() else {
         return;
     };
     input.content.set(Some(content));
     place(view, &input);
+    // The text wraps again once GTK lays the editor out at its new size
+    // (before idle callbacks run).
+    if let Some(cx) = input.cx.get() {
+        let c = cx.clone();
+        glib::idle_add_local_once(move || c.caret_moved());
+    }
 }
 
 /// An input accessory inserted into `parent`. There is no software

@@ -8,8 +8,12 @@ use taffy::{
 use crate::{
     css,
     effects::{
-        BlendMode, BoxShadow, Cursor, Effects, Filter, Gradient, KeyframeAnimation, Keyframes,
-        Outline, Transition, TransitionProps,
+        BackdropMaterial, BlendMode, BoxShadow, Cursor, Effects, Filter, GlassEffect, Gradient,
+        KeyframeAnimation, Keyframes, Outline, Transition, TransitionProps,
+    },
+    geometry::{
+        AbsoluteLength, Corners, DefiniteLength, Edges, Percentage, Point, Points, REM_SIZE, Size,
+        percentage, point, px,
     },
     grid,
     transform::{Transform, TransformKind},
@@ -71,6 +75,37 @@ pub enum TextAlign {
     Right,
     /// Justified.
     Justify,
+}
+
+/// `verticalAlign`: where an element inside a `<Text>` (an inline
+/// attachment) sits in its line, as CSS's `vertical-align` places a
+/// replaced inline box. The font it is measured against is the text's
+/// around the attachment; the line grows to hold the attachment wherever
+/// it reaches past that font (`TextAttachment::extent`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum VerticalAlign {
+    /// `baseline`: its bottom on the baseline.
+    #[default]
+    Baseline,
+    /// `text-top`: its top at the top of the font (its ascent).
+    TextTop,
+    /// `text-bottom`: its bottom at the bottom of the font (its descent).
+    TextBottom,
+    /// `middle`: its middle half the font's x height above the baseline.
+    Middle,
+}
+
+impl VerticalAlign {
+    /// The value named by CSS keyword `name`.
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "baseline" => Self::Baseline,
+            "text-top" => Self::TextTop,
+            "text-bottom" => Self::TextBottom,
+            "middle" => Self::Middle,
+            _ => return None,
+        })
+    }
 }
 
 /// A font family name, interned: copying and comparing one is free, so
@@ -190,17 +225,18 @@ pub enum EllipsizeMode {
     Clip,
 }
 
-/// Corner radii in points, clockwise from the top left.
+/// The corner radii of a view, clockwise from the top left: a
+/// [`Corners<Points>`] with the curve they are drawn with.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct CornerRadii {
     /// Top left.
-    pub top_left: f32,
+    pub top_left: Points,
     /// Top right.
-    pub top_right: f32,
+    pub top_right: Points,
     /// Bottom right.
-    pub bottom_right: f32,
+    pub bottom_right: Points,
     /// Bottom left.
-    pub bottom_left: f32,
+    pub bottom_left: Points,
     /// `borderCurve: "continuous"`: corners whose curvature grows from the
     /// edges (iOS app icons) instead of circular arcs; see [`crate::shape`].
     pub continuous: bool,
@@ -208,7 +244,7 @@ pub struct CornerRadii {
 
 impl CornerRadii {
     /// The same circular radius on every corner.
-    pub const fn all(r: f32) -> Self {
+    pub const fn all(r: Points) -> Self {
         Self {
             top_left: r,
             top_right: r,
@@ -218,9 +254,31 @@ impl CornerRadii {
         }
     }
 
+    /// Circular corners with these radii.
+    pub const fn circular(corners: Corners<Points>) -> Self {
+        Self {
+            top_left: corners.top_left,
+            top_right: corners.top_right,
+            bottom_right: corners.bottom_right,
+            bottom_left: corners.bottom_left,
+            continuous: false,
+        }
+    }
+
+    /// The radii, without the curve.
+    #[inline]
+    pub const fn corners(self) -> Corners<Points> {
+        Corners {
+            top_left: self.top_left,
+            top_right: self.top_right,
+            bottom_right: self.bottom_right,
+            bottom_left: self.bottom_left,
+        }
+    }
+
     /// `[top_left, top_right, bottom_right, bottom_left]`.
     #[inline]
-    pub const fn to_array(self) -> [f32; 4] {
+    pub const fn to_array(self) -> [Points; 4] {
         [
             self.top_left,
             self.top_right,
@@ -232,17 +290,17 @@ impl CornerRadii {
     /// True if no corner is rounded.
     #[inline]
     pub fn is_zero(&self) -> bool {
-        self.to_array().iter().all(|&r| r <= 0.0)
+        self.to_array().iter().all(|&r| r <= Points::ZERO)
     }
 
     /// The radius shared by every rounded corner, if they all share one.
     /// Platforms render such shapes with a single radius plus a mask of
     /// the rounded corners (no paths).
-    pub fn shared(&self) -> Option<f32> {
-        let mut shared = 0.0;
+    pub fn shared(&self) -> Option<Points> {
+        let mut shared = Points::ZERO;
         for r in self.to_array() {
-            if r > 0.0 {
-                if shared > 0.0 && r != shared {
+            if r > Points::ZERO {
+                if shared > Points::ZERO && r != shared {
                     return None;
                 }
                 shared = r;
@@ -251,10 +309,13 @@ impl CornerRadii {
         Some(shared)
     }
 
-    /// Scales the radii down so adjacent corners do not overlap on a
-    /// `width` x `height` box (CSS rule).
-    pub fn fit(self, width: f32, height: f32) -> Self {
-        let ratio = |side: f32, a: f32, b: f32| if a + b > side { side / (a + b) } else { 1.0 };
+    /// Scales the radii down so adjacent corners do not overlap on a box
+    /// of `size` (CSS rule).
+    pub fn fit(self, size: Size<Points>) -> Self {
+        let ratio = |side: Points, a: Points, b: Points| {
+            if a + b > side { side / (a + b) } else { 1.0 }
+        };
+        let (width, height) = (size.width, size.height);
         let f = ratio(width, self.top_left, self.top_right)
             .min(ratio(width, self.bottom_left, self.bottom_right))
             .min(ratio(height, self.top_left, self.bottom_left))
@@ -272,16 +333,22 @@ impl CornerRadii {
         }
     }
 
-    /// The radii of a curve `d` points inside this one (e.g. the inner edge
-    /// of a border).
-    pub fn inset(self, d: f32) -> Self {
+    /// The radii of a curve `d` inside this one (e.g. the inner edge of a
+    /// border).
+    pub fn inset(self, d: Points) -> Self {
         Self {
-            top_left: (self.top_left - d).max(0.0),
-            top_right: (self.top_right - d).max(0.0),
-            bottom_right: (self.bottom_right - d).max(0.0),
-            bottom_left: (self.bottom_left - d).max(0.0),
+            top_left: (self.top_left - d).max(Points::ZERO),
+            top_right: (self.top_right - d).max(Points::ZERO),
+            bottom_right: (self.bottom_right - d).max(Points::ZERO),
+            bottom_left: (self.bottom_left - d).max(Points::ZERO),
             ..self
         }
+    }
+}
+
+impl From<CornerRadii> for Corners<Points> {
+    fn from(radii: CornerRadii) -> Self {
+        radii.corners()
     }
 }
 
@@ -290,24 +357,24 @@ impl CornerRadii {
 pub struct Shadow {
     /// Shadow color; its alpha is multiplied by `opacity`.
     pub color: Color,
-    /// Horizontal offset in points.
-    pub offset_x: f32,
-    /// Vertical offset in points.
-    pub offset_y: f32,
+    /// Horizontal offset.
+    pub offset_x: Points,
+    /// Vertical offset.
+    pub offset_y: Points,
     /// Opacity in `0.0..=1.0`; 0 (the default) means no shadow.
     pub opacity: f32,
-    /// Blur radius in points.
-    pub radius: f32,
+    /// Blur radius.
+    pub radius: Points,
 }
 
 impl Shadow {
     /// React Native's defaults: black, offset `(0, -3)`, radius 3, opacity 0.
     pub const DEFAULT: Shadow = Shadow {
         color: Color::BLACK,
-        offset_x: 0.0,
-        offset_y: -3.0,
+        offset_x: Points(0.0),
+        offset_y: Points(-3.0),
         opacity: 0.0,
-        radius: 3.0,
+        radius: Points(3.0),
     };
 
     /// True if the shadow draws anything.
@@ -338,8 +405,8 @@ pub enum BorderStyle {
 /// Border widths and colors, per side.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Borders {
-    /// Widths in points: top, right, bottom, left.
-    pub widths: [f32; 4],
+    /// Widths.
+    pub widths: Edges<Points>,
     /// Colors: top, right, bottom, left.
     pub colors: [Color; 4],
     /// Line style.
@@ -349,22 +416,48 @@ pub struct Borders {
 impl Borders {
     /// No border.
     pub const NONE: Borders = Borders {
-        widths: [0.0; 4],
+        widths: Edges {
+            top: Points::ZERO,
+            right: Points::ZERO,
+            bottom: Points::ZERO,
+            left: Points::ZERO,
+        },
         colors: [Color::BLACK; 4],
         style: BorderStyle::Solid,
     };
 
     /// True if some side draws something.
     pub fn is_visible(&self) -> bool {
-        (0..4).any(|i| self.widths[i] > 0.0 && !self.colors[i].is_transparent())
+        let widths = self.widths.to_array();
+        (0..4).any(|i| widths[i] > Points::ZERO && !self.colors[i].is_transparent())
     }
 
     /// `(width, color)` when every side is the same.
-    pub fn uniform(&self) -> Option<(f32, Color)> {
-        let [w, ..] = self.widths;
+    pub fn uniform(&self) -> Option<(Points, Color)> {
+        let widths = self.widths.to_array();
+        let [w, ..] = widths;
         let [c, ..] = self.colors;
-        (self.widths.iter().all(|&x| x == w) && self.colors.iter().all(|&x| x == c))
-            .then_some((w, c))
+        (widths.iter().all(|&x| x == w) && self.colors.iter().all(|&x| x == c)).then_some((w, c))
+    }
+
+    /// The width of side `side`: 0 top, 1 right, 2 bottom, 3 left (the
+    /// order of `colors`).
+    pub fn width(&self, side: usize) -> Points {
+        match side {
+            0 => self.widths.top,
+            1 => self.widths.right,
+            2 => self.widths.bottom,
+            _ => self.widths.left,
+        }
+    }
+
+    fn width_mut(&mut self, side: usize) -> &mut Points {
+        match side {
+            0 => &mut self.widths.top,
+            1 => &mut self.widths.right,
+            2 => &mut self.widths.bottom,
+            _ => &mut self.widths.left,
+        }
     }
 }
 
@@ -380,10 +473,9 @@ pub struct ViewStyle {
     /// Background fill.
     pub background_color: Color,
     /// `borderRadius`: the radius of corners without their own.
-    pub border_radius: f32,
-    /// `borderTopLeftRadius` etc., clockwise from the top left; they
-    /// override `border_radius`.
-    pub corner_radius: [Option<f32>; 4],
+    pub border_radius: Points,
+    /// `borderTopLeftRadius` etc.; they override `border_radius`.
+    pub corner_radius: Corners<Option<Points>>,
     /// `borderCurve: "continuous"`.
     pub continuous_corners: bool,
     /// Borders (their widths also affect layout).
@@ -398,17 +490,24 @@ pub struct ViewStyle {
     pub transform: Transform,
     /// `tintColor`: recolors an image's opaque pixels.
     pub tint_color: Option<Color>,
-    /// Android's material shadow (points): the node's `android={{ elevation }}`
-    /// prop, not a style.
-    pub elevation: f32,
+    /// Android's material shadow: the node's `android={{ elevation }}` prop,
+    /// not a style.
+    pub elevation: Points,
     /// `transformOrigin`: the point transforms act around.
     pub transform_origin: TransformOrigin,
+    /// `objectPosition`: where an image sits in its box (image views; the
+    /// platforms take it from [`crate::mount::ImageOptions::position`]).
+    pub object_position: ObjectPosition,
     /// `backfaceVisibility: "hidden"`: invisible when turned away.
     pub backface_hidden: bool,
     /// Layered / inset shadows, gradients and filters.
     pub effects: Option<Arc<Effects>>,
     /// `mixBlendMode`.
     pub blend_mode: BlendMode,
+    /// The iOS material from `ios={{ backdropMaterial }}`, projected at mount time.
+    pub backdrop_material: BackdropMaterial,
+    /// `glassEffect`.
+    pub glass_effect: GlassEffect,
     /// `outline*`.
     pub outline: Outline,
     /// `visibility: "hidden"`: not drawn and not touchable, still laid out.
@@ -421,34 +520,15 @@ pub struct ViewStyle {
     pub animation: Option<KeyframeAnimation>,
 }
 
-/// A coordinate of [`TransformOrigin`].
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum OriginLen {
-    /// Points from the left / top edge.
-    Px(f32),
-    /// A fraction of the width / height.
-    Fraction(f32),
-}
-
-impl OriginLen {
-    /// The coordinate in a box `length` points long.
-    pub fn resolve(self, length: f32) -> f32 {
-        match self {
-            OriginLen::Px(v) => v,
-            OriginLen::Fraction(f) => f * length,
-        }
-    }
-}
-
 /// `transformOrigin`: the point transforms rotate and scale around.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TransformOrigin {
-    /// Horizontal position.
-    pub x: OriginLen,
-    /// Vertical position.
-    pub y: OriginLen,
-    /// Depth in points.
-    pub z: f32,
+    /// Horizontal position: from the left edge, or a fraction of the width.
+    pub x: DefiniteLength,
+    /// Vertical position: from the top edge, or a fraction of the height.
+    pub y: DefiniteLength,
+    /// Depth.
+    pub z: Points,
 }
 
 impl Default for TransformOrigin {
@@ -460,16 +540,19 @@ impl Default for TransformOrigin {
 impl TransformOrigin {
     /// The center (the default).
     pub const CENTER: Self = Self {
-        x: OriginLen::Fraction(0.5),
-        y: OriginLen::Fraction(0.5),
-        z: 0.0,
+        x: DefiniteLength::Fraction(Percentage(0.5)),
+        y: DefiniteLength::Fraction(Percentage(0.5)),
+        z: Points::ZERO,
     };
 
-    /// Offset of the origin from the center of a `width` × `height` box.
-    pub fn offset(&self, width: f32, height: f32) -> (f32, f32, f32) {
+    /// Offset of the origin from the center of a box of `size`, in the
+    /// plane, and its depth.
+    pub fn offset(&self, size: Size<Points>) -> (Point<Points>, Points) {
+        let at = |len: DefiniteLength, side: Points| {
+            len.to_points(AbsoluteLength::Points(side), REM_SIZE) - side / 2.0
+        };
         (
-            self.x.resolve(width) - width / 2.0,
-            self.y.resolve(height) - height / 2.0,
+            point(at(self.x, size.width), at(self.y, size.height)),
             self.z,
         )
     }
@@ -482,30 +565,27 @@ impl TransformOrigin {
         if parts.is_empty() || parts.len() > 3 {
             return None;
         }
-        let len = |p: &str| -> Option<OriginLen> {
+        let fraction = |f: f32| DefiniteLength::Fraction(percentage(f));
+        let len = |p: &str| -> Option<DefiniteLength> {
             if let Some(pct) = p.strip_suffix('%') {
-                return pct
-                    .trim()
-                    .parse::<f32>()
-                    .ok()
-                    .map(|v| OriginLen::Fraction(v / 100.0));
+                return pct.trim().parse::<f32>().ok().map(|v| fraction(v / 100.0));
             }
             p.strip_suffix("px")
                 .unwrap_or(p)
                 .parse::<f32>()
                 .ok()
-                .map(OriginLen::Px)
+                .map(|v| px(v).into())
         };
         let mut x = None;
         let mut y = None;
         let mut free = Vec::new();
         for &p in parts.iter().take(2) {
             match p {
-                "left" => x = Some(OriginLen::Fraction(0.0)),
-                "right" => x = Some(OriginLen::Fraction(1.0)),
-                "top" => y = Some(OriginLen::Fraction(0.0)),
-                "bottom" => y = Some(OriginLen::Fraction(1.0)),
-                "center" => free.push(OriginLen::Fraction(0.5)),
+                "left" => x = Some(fraction(0.0)),
+                "right" => x = Some(fraction(1.0)),
+                "top" => y = Some(fraction(0.0)),
+                "bottom" => y = Some(fraction(1.0)),
+                "center" => free.push(fraction(0.5)),
                 p => free.push(len(p)?),
             }
         }
@@ -520,14 +600,129 @@ impl TransformOrigin {
             }
         }
         let z = match parts.get(2) {
-            Some(p) => p.strip_suffix("px").unwrap_or(p).parse::<f32>().ok()?,
-            None => 0.0,
+            Some(p) => px(p.strip_suffix("px").unwrap_or(p).parse::<f32>().ok()?),
+            None => Points::ZERO,
         };
         Some(Self {
-            x: x.unwrap_or(OriginLen::Fraction(0.5)),
-            y: y.unwrap_or(OriginLen::Fraction(0.5)),
+            x: x.unwrap_or(fraction(0.5)),
+            y: y.unwrap_or(fraction(0.5)),
             z,
         })
+    }
+}
+
+/// One axis of a CSS `<position>`: a distance from the start edge (left,
+/// top) or the end edge (right, bottom). Percentages are fractions of the
+/// free space: the box's size less the content's (negative when the
+/// content overflows), as CSS's `object-position` resolves them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct PositionAxis {
+    /// Measured from the end edge (right, bottom) instead of the start.
+    pub from_end: bool,
+    /// The distance from that edge.
+    pub offset: DefiniteLength,
+}
+
+impl Default for PositionAxis {
+    /// The center.
+    fn default() -> Self {
+        Self::CENTER
+    }
+}
+
+impl PositionAxis {
+    /// The start edge (`left`, `top`, `0%`).
+    pub const START: Self = Self::start(DefiniteLength::Fraction(Percentage(0.0)));
+    /// The center (`center`, `50%`).
+    pub const CENTER: Self = Self::start(DefiniteLength::Fraction(Percentage(0.5)));
+    /// The end edge (`right`, `bottom`, `100%`).
+    pub const END: Self = Self::start(DefiniteLength::Fraction(Percentage(1.0)));
+
+    /// `offset` from the start edge.
+    pub const fn start(offset: DefiniteLength) -> Self {
+        Self {
+            from_end: false,
+            offset,
+        }
+    }
+
+    /// `offset` from the end edge.
+    pub const fn end(offset: DefiniteLength) -> Self {
+        Self {
+            from_end: true,
+            offset,
+        }
+    }
+
+    /// Where content starts along this axis, from the box's start edge,
+    /// given the `free` space (the box's size less the content's).
+    pub fn resolve(&self, free: Points) -> Points {
+        let d = self
+            .offset
+            .to_points(AbsoluteLength::Points(free), REM_SIZE);
+        if self.from_end { free - d } else { d }
+    }
+}
+
+/// `objectPosition`: where an image sits in its box once
+/// `resizeMode` / `object-fit` has sized it, as CSS's `object-position`
+/// places it (the center by default). The parts of a covering image
+/// outside the box are cropped.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
+pub struct ObjectPosition {
+    /// Horizontal.
+    pub x: PositionAxis,
+    /// Vertical.
+    pub y: PositionAxis,
+}
+
+impl ObjectPosition {
+    /// The center (the default).
+    pub const CENTER: Self = Self {
+        x: PositionAxis::CENTER,
+        y: PositionAxis::CENTER,
+    };
+
+    /// A position of two axes.
+    pub const fn new(x: PositionAxis, y: PositionAxis) -> Self {
+        Self { x, y }
+    }
+
+    /// Parses CSS's `<position>` as `object-position` takes it: one or two
+    /// keywords, percentages or lengths (`top`, `left bottom`, `25% 75%`,
+    /// `10px 0`), or edges with offsets (`right 10px bottom 20%`).
+    pub fn parse(s: &str) -> Option<Self> {
+        css::object_position(s)
+    }
+
+    /// The top left corner of content of `content` size placed in a box of
+    /// `size`.
+    pub fn place(&self, size: Size<Points>, content: Size<Points>) -> Point<Points> {
+        point(
+            self.x.resolve(size.width - content.width),
+            self.y.resolve(size.height - content.height),
+        )
+    }
+}
+
+impl std::fmt::Display for ObjectPosition {
+    /// CSS's four-value form (`left 50% top 10px`), which every position
+    /// can be written in.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let length = |l: DefiniteLength| match l {
+            DefiniteLength::Absolute(a) => format!("{}px", a.to_points(REM_SIZE).0),
+            DefiniteLength::Fraction(p) => format!("{}%", p.0 * 100.0),
+        };
+        write!(
+            f,
+            "{} {} {} {}",
+            if self.x.from_end { "right" } else { "left" },
+            length(self.x.offset),
+            if self.y.from_end { "bottom" } else { "top" },
+            length(self.y.offset),
+        )
     }
 }
 
@@ -603,15 +798,12 @@ impl ViewStyle {
     /// The radius of each corner (before fitting them to a size with
     /// [`CornerRadii::fit`]).
     pub fn radii(&self) -> CornerRadii {
-        let [tl, tr, br, bl] = self
+        let radii = self
             .corner_radius
-            .map(|r| r.unwrap_or(self.border_radius).max(0.0));
+            .map(|r| r.unwrap_or(self.border_radius).max(Points::ZERO));
         CornerRadii {
-            top_left: tl,
-            top_right: tr,
-            bottom_right: br,
-            bottom_left: bl,
             continuous: self.continuous_corners,
+            ..CornerRadii::circular(radii)
         }
     }
 }
@@ -620,8 +812,13 @@ impl Default for ViewStyle {
     fn default() -> Self {
         Self {
             background_color: Color::TRANSPARENT,
-            border_radius: 0.0,
-            corner_radius: [None; 4],
+            border_radius: Points::ZERO,
+            corner_radius: Corners {
+                top_left: None,
+                top_right: None,
+                bottom_right: None,
+                bottom_left: None,
+            },
             continuous_corners: false,
             borders: Borders::NONE,
             opacity: 1.0,
@@ -629,11 +826,14 @@ impl Default for ViewStyle {
             shadow: Shadow::DEFAULT,
             transform: Transform::IDENTITY,
             tint_color: None,
-            elevation: 0.0,
+            elevation: Points::ZERO,
             transform_origin: TransformOrigin::CENTER,
+            object_position: ObjectPosition::CENTER,
             backface_hidden: false,
             effects: None,
             blend_mode: BlendMode::Normal,
+            backdrop_material: BackdropMaterial::UltraThin,
+            glass_effect: GlassEffect::None,
             outline: Outline::NONE,
             hidden: false,
             cursor: Cursor::Auto,
@@ -648,12 +848,12 @@ impl Default for ViewStyle {
 pub struct TextShadow {
     /// Color.
     pub color: Color,
-    /// Horizontal offset in points.
-    pub offset_x: f32,
-    /// Vertical offset in points.
-    pub offset_y: f32,
-    /// Blur radius in points.
-    pub radius: f32,
+    /// Horizontal offset.
+    pub offset_x: Points,
+    /// Vertical offset.
+    pub offset_y: Points,
+    /// Blur radius.
+    pub radius: Points,
 }
 
 /// Text properties as written on a node; unset values are inherited from
@@ -662,34 +862,39 @@ pub struct TextShadow {
 pub struct TextStyle {
     /// Foreground color.
     pub color: Option<Color>,
-    /// Font size in points.
-    pub font_size: Option<f32>,
+    /// Font size.
+    pub font_size: Option<Points>,
     /// Font weight, `100..=900`.
     pub font_weight: Option<u16>,
-    /// Line height in points.
-    pub line_height: Option<f32>,
+    /// Line height.
+    pub line_height: Option<Points>,
     /// Block alignment (only meaningful on a text block).
     pub text_align: Option<TextAlign>,
+    /// Physical class alignment, preserved across direction changes in descendants.
+    pub text_align_physical: bool,
     /// Font family; `None` inherits (the system font at the root).
     pub font_family: Option<FontFamily>,
     /// Italic (`fontStyle`).
     pub italic: Option<bool>,
-    /// Extra space between characters in points.
-    pub letter_spacing: Option<f32>,
+    /// Extra space between characters.
+    pub letter_spacing: Option<Points>,
     /// Extra space between characters in ems of this node's font size
     /// (`"0.05em"`); overrides `letter_spacing` when set after it.
     pub letter_spacing_em: Option<f32>,
-    /// Line height as a multiple of the font size (`"1.5"`, `"1.5em"`),
+    /// A line-height length relative to this node's font size (`em` or
+    /// a percentage), resolved before inheritance.
+    pub line_height_em: Option<f32>,
+    /// Line height as a multiple of the font size (`"1.5"`),
     /// inherited as a multiple.
     pub line_height_multiple: Option<f32>,
     /// Underline / strikethrough.
     pub decoration: Option<TextDecoration>,
     /// `textDecorationStyle`.
     pub decoration_style: Option<DecorationStyle>,
-    /// `textDecorationThickness` in points.
-    pub decoration_thickness: Option<f32>,
-    /// `textUnderlineOffset` in points below the baseline.
-    pub underline_offset: Option<f32>,
+    /// `textDecorationThickness`.
+    pub decoration_thickness: Option<Points>,
+    /// `textUnderlineOffset`: below the baseline.
+    pub underline_offset: Option<Points>,
     /// Color of the decoration lines; the text color by default.
     pub decoration_color: Option<Color>,
     /// Case transform.
@@ -697,17 +902,22 @@ pub struct TextStyle {
     /// `textShadowColor`.
     pub shadow_color: Option<Color>,
     /// `textShadowOffset`.
-    pub shadow_offset: Option<(f32, f32)>,
+    pub shadow_offset: Option<Point<Points>>,
     /// `textShadowRadius`.
-    pub shadow_radius: Option<f32>,
+    pub shadow_radius: Option<Points>,
     /// `fontVariant`.
     pub font_variant: Option<FontVariant>,
     /// `writingDirection`: right to left (`Some(true)`), left to right, or
     /// the layout's direction (`None`, `auto`).
     pub writing_direction: Option<bool>,
-    /// `textAlignVertical`: where text shorter than its box sits, 0 top
-    /// (`auto`, `top`), 0.5 `center`, 1 `bottom`.
-    pub align_vertical: Option<f32>,
+    /// `textAlignVertical`: where text shorter than its box sits, 0% top
+    /// (`auto`, `top`), 50% `center`, 100% `bottom`.
+    pub align_vertical: Option<Percentage>,
+    /// `placeholderColor`: an input's placeholder (not inherited).
+    pub placeholder_color: Option<Color>,
+    /// `selectionColor`: an input's caret and selection, a selectable
+    /// text's selection highlight (not inherited).
+    pub selection_color: Option<Color>,
 }
 
 impl TextStyle {
@@ -724,13 +934,59 @@ impl TextStyle {
         if color.is_transparent() {
             return None;
         }
-        let (offset_x, offset_y) = self.shadow_offset.unwrap_or((0.0, 0.0));
+        let offset = self.shadow_offset.unwrap_or_default();
         Some(TextShadow {
             color,
-            offset_x,
-            offset_y,
-            radius: self.shadow_radius.unwrap_or(0.0).max(0.0),
+            offset_x: offset.x,
+            offset_y: offset.y,
+            radius: self.shadow_radius.unwrap_or_default().max(Points::ZERO),
         })
+    }
+}
+
+/// What `fill` or `stroke` paints with (CSS's and SVG's `<paint>`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SvgPaint {
+    /// `none`: nothing.
+    None,
+    /// `currentColor`: the element's text color (`color`, inherited).
+    CurrentColor,
+    /// A color.
+    Color(Color),
+}
+
+/// SVG's paint properties, as CSS has them on any element and inherits
+/// them (`fill`, `stroke`, `strokeWidth`, `strokeDasharray`; `fill-*` /
+/// `stroke-*`): what the shapes a Rust component draws paint with (the
+/// marks of `nsh/base/plot`), read through a drawing's
+/// [`crate::canvas::ViewPaint`]s. Unset values inherit; at the root they
+/// are CSS's initial values, which the drawing names.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub struct PaintStyle {
+    /// `fill`.
+    pub fill: Option<SvgPaint>,
+    /// `stroke`.
+    pub stroke: Option<SvgPaint>,
+    /// `strokeWidth`.
+    pub stroke_width: Option<Points>,
+    /// `strokeDasharray`: the dashes and gaps, empty for `none`.
+    pub stroke_dasharray: Option<Arc<[Points]>>,
+}
+
+impl PaintStyle {
+    /// These properties where set, `parent`'s (the inherited ones) where
+    /// not.
+    pub fn inherit(&self, parent: &PaintStyle) -> PaintStyle {
+        PaintStyle {
+            fill: self.fill.or(parent.fill),
+            stroke: self.stroke.or(parent.stroke),
+            stroke_width: self.stroke_width.or(parent.stroke_width),
+            stroke_dasharray: self
+                .stroke_dasharray
+                .clone()
+                .or_else(|| parent.stroke_dasharray.clone()),
+        }
     }
 }
 
@@ -743,16 +999,87 @@ pub struct Style {
     pub view: ViewStyle,
     /// Text properties.
     pub text: TextStyle,
+    /// SVG's paint properties (inherited, as text properties are).
+    pub paint: PaintStyle,
     /// Visual properties driven by native animation nodes; they override
     /// the static values while bound.
-    pub animated: Vec<(nsh_animation::AnimationProp, nsh_animation::NodeId)>,
+    pub animated: Vec<(crate::animation::AnimationProp, crate::animation::NodeId)>,
     /// `zIndex`: stacking order among siblings (higher on top).
     pub z_index: i32,
+    /// `verticalAlign`: where the element sits in its line when it is
+    /// inside a `<Text>`.
+    pub vertical_align: VerticalAlign,
     /// `direction`: right to left (`Some(true)`), left to right, or
     /// inherited (`None`).
     pub direction: Option<bool>,
     /// Start / end properties, placed by the resolved direction.
     pub logical: Logical,
+    /// Values that only show together with another property.
+    pub(crate) pending: Pending,
+    /// CSS's `perspective` (`perspective-*`, `Styled::perspective`): the
+    /// depth the view gives its children's 3D transforms, seen from its
+    /// center; the core composes it into their transforms.
+    pub perspective: Option<Points>,
+}
+
+/// Values of properties that take effect only together with another one,
+/// kept so that the result does not depend on the order they are set in:
+/// `outlineWidth` under `outlineStyle: "none"` and the border widths under
+/// `borderStyle: "none"` (no outline, no border, as in CSS),
+/// `animationDuration` and the other `animation*` keys before
+/// `animationName`.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Pending {
+    /// `outlineWidth` as set.
+    outline_width: Points,
+    /// `outlineStyle: "none"` / `"hidden"`.
+    outline_hidden: bool,
+    /// The border widths as set: top, right, bottom, left.
+    border_widths: [Points; 4],
+    /// `borderStartWidth`, `borderEndWidth` as set.
+    border_logical: [Option<Points>; 2],
+    /// `borderStyle: "none"` / `"hidden"`: every used width is 0.
+    border_hidden: bool,
+    /// `position: "fixed"`: laid out and mounted in its root view's box.
+    pub(crate) fixed_position: bool,
+    /// `position: "sticky"`: laid out as `relative`, its insets where it
+    /// sticks in the viewport of the scroll view around it.
+    pub(crate) sticky_position: bool,
+    /// `animationDuration`.
+    animation_duration: Option<f32>,
+    /// `animationDelay`.
+    animation_delay: Option<f32>,
+    /// `animationTimingFunction`.
+    animation_easing: Option<[f32; 4]>,
+    /// `animationIterationCount` (`None` inside: forever).
+    animation_iterations: Option<Option<u32>>,
+}
+
+/// Bookkeeping, not what the style shows: styles that look the same print
+/// the same (tests compare typed styles and classes so).
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Pending")
+    }
+}
+
+impl Pending {
+    /// `animation` with the `animation*` values set.
+    fn animation(&self, mut animation: KeyframeAnimation) -> KeyframeAnimation {
+        if let Some(ms) = self.animation_duration {
+            animation.duration = ms;
+        }
+        if let Some(ms) = self.animation_delay {
+            animation.delay = ms;
+        }
+        if let Some(easing) = self.animation_easing {
+            animation.easing = easing;
+        }
+        if let Some(count) = self.animation_iterations {
+            animation.iterations = count;
+        }
+        animation
+    }
 }
 
 /// Properties named by start and end (`marginStart`, `borderTopEndRadius`
@@ -767,12 +1094,12 @@ pub struct Logical {
     /// `start`, `end`.
     pub inset: [Option<LengthPercentageAuto>; 2],
     /// `borderStartWidth`, `borderEndWidth`.
-    pub border_width: [Option<f32>; 2],
+    pub border_width: [Option<Points>; 2],
     /// `borderStartColor`, `borderEndColor`.
     pub border_color: [Option<Color>; 2],
     /// `borderTopStartRadius`, `borderTopEndRadius`,
     /// `borderBottomEndRadius`, `borderBottomStartRadius`.
-    pub radius: [Option<f32>; 4],
+    pub radius: [Option<Points>; 4],
 }
 
 impl Logical {
@@ -800,11 +1127,23 @@ pub(crate) fn swap_sides(layout: &mut taffy::Style, view: &mut ViewStyle) {
     swap(&mut layout.padding);
     swap(&mut layout.inset);
     swap(&mut layout.border);
-    view.borders.widths.swap(1, 3);
+    let (w, r) = (&mut view.borders.widths, &mut view.corner_radius);
+    std::mem::swap(&mut w.left, &mut w.right);
     view.borders.colors.swap(1, 3);
-    // top left, top right, bottom right, bottom left
-    view.corner_radius.swap(0, 1);
-    view.corner_radius.swap(2, 3);
+    std::mem::swap(&mut r.top_left, &mut r.top_right);
+    std::mem::swap(&mut r.bottom_left, &mut r.bottom_right);
+}
+
+/// Gives an unset `alignContent` (taffy's `normal`) its meaning for the
+/// node's display: React Native's `flex-start` for flex (and block)
+/// containers, where taffy's `normal` would stretch wrapped lines, and
+/// CSS's `normal` for grids, whose auto tracks then stretch to fill the
+/// container. (`justifyContent`'s `normal` is already `flex-start` in
+/// flex containers.)
+pub(crate) fn resolve_normal_alignment(layout: &mut taffy::Style) {
+    if layout.display != Display::Grid && layout.align_content == AlignContent::NORMAL {
+        layout.align_content = AlignContent::FLEX_START;
+    }
 }
 
 /// Lays a node out in direction `rtl`: swaps its left and right
@@ -839,18 +1178,29 @@ pub(crate) fn apply_direction(
         }
         let side = if left { 3 } else { 1 };
         if let Some(w) = logical.border_width[i] {
-            set_side(&mut layout.border, left, LengthPercentage::length(w));
-            view.borders.widths[side] = w;
+            set_side(&mut layout.border, left, LengthPercentage::length(w.0));
+            *view.borders.width_mut(side) = w;
         }
         if let Some(c) = logical.border_color[i] {
             view.borders.colors[side] = c;
         }
     }
     // Corners: top start, top end, bottom end, bottom start.
-    let corners = if rtl { [1, 0, 3, 2] } else { [0, 1, 2, 3] };
-    for (i, &corner) in corners.iter().enumerate() {
-        if let Some(r) = logical.radius[i] {
-            view.corner_radius[corner] = Some(r);
+    let [top_start, top_end, bottom_end, bottom_start] = logical.radius;
+    let c = &mut view.corner_radius;
+    let (top_left, top_right, bottom_right, bottom_left) = if rtl {
+        (top_end, top_start, bottom_start, bottom_end)
+    } else {
+        (top_start, top_end, bottom_end, bottom_start)
+    };
+    for (corner, r) in [
+        (&mut c.top_left, top_left),
+        (&mut c.top_right, top_right),
+        (&mut c.bottom_right, bottom_right),
+        (&mut c.bottom_left, bottom_left),
+    ] {
+        if r.is_some() {
+            *corner = r;
         }
     }
 }
@@ -863,7 +1213,9 @@ impl Default for Style {
             position: Position::Relative,
             flex_direction: FlexDirection::Column,
             flex_shrink: 0.0,
-            align_content: AlignContent::FLEX_START,
+            // Unset: `flex-start` (React Native) outside grids, CSS's
+            // `normal` in grids (`resolve_normal_alignment`).
+            align_content: AlignContent::NORMAL,
             // Yoga has no automatic minimum size (see `min_len`).
             min_size: taffy::Size {
                 width: LengthPercentageAuto::length(0.0),
@@ -875,10 +1227,14 @@ impl Default for Style {
             layout,
             view: ViewStyle::default(),
             text: TextStyle::default(),
+            paint: PaintStyle::default(),
             animated: Vec::new(),
             z_index: 0,
+            vertical_align: VerticalAlign::Baseline,
             direction: None,
             logical: Logical::default(),
+            pending: Pending::default(),
+            perspective: None,
         }
     }
 }
@@ -966,29 +1322,30 @@ macro_rules! style_keys {
 }
 
 style_keys! {
-    Display = "display": Layout "\"flex\" | \"grid\" | \"block\" | \"none\"",
-    Position = "position": Layout "\"relative\" | \"absolute\"",
+    Display = "display": Layout "\"flex\" | \"grid\" | \"block\" | \"flow-root\" | \"none\"",
+    BoxSizing = "boxSizing": Layout "\"border-box\" | \"content-box\"" "The box that width and height include.",
+    Position = "position": Layout "\"relative\" | \"absolute\" | \"static\" | \"fixed\" | \"sticky\"" "`static` stays in flow and lets absolute descendants use the nearest positioned ancestor as their containing block. `fixed` lays an element out in its root view and mounts it above that root view's children. `sticky`: in the flow, and while its parent shows it stays `top` (in a horizontal scroll view `left`) from the start of the viewport of the scroll view around it, as far as the end of its parent's content box; it draws above its siblings of the same `zIndex`.",
     FlexDirection = "flexDirection": Layout "\"row\" | \"column\" | \"row-reverse\" | \"column-reverse\"",
     FlexWrap = "flexWrap": Layout "\"wrap\" | \"nowrap\" | \"wrap-reverse\"",
     Flex = "flex": Layout "number",
     FlexGrow = "flexGrow": Layout "number",
     FlexShrink = "flexShrink": Layout "number",
-    FlexBasis = "flexBasis": Layout "DimensionValue",
+    FlexBasis = "flexBasis": Layout "DimensionValue | \"min-content\" | \"max-content\" | \"fit-content\"",
     JustifyContent = "justifyContent": Layout "Exclude<Distribute, \"stretch\"> | \"stretch\"",
     AlignItems = "alignItems": Layout "Align",
     AlignSelf = "alignSelf": Layout "Align | \"auto\"",
     AlignContent = "alignContent": Layout "Distribute",
-    Width = "width": Layout "DimensionValue",
-    Height = "height": Layout "DimensionValue",
+    Width = "width": Layout "DimensionValue | \"min-content\" | \"max-content\" | \"fit-content\"",
+    Height = "height": Layout "DimensionValue | \"min-content\" | \"max-content\" | \"fit-content\"",
     MinWidth = "minWidth": Layout "LengthValue",
     MinHeight = "minHeight": Layout "LengthValue",
     MaxWidth = "maxWidth": Layout "LengthValue",
     MaxHeight = "maxHeight": Layout "LengthValue",
     AspectRatio = "aspectRatio": Layout "number",
-    Top = "top": Layout "DimensionValue",
+    Top = "top": Layout "DimensionValue | AnimatedNode" "An animated value only for a `position: \"sticky\"` view: how far from the top of the scroll view's viewport it sticks, following the value (below a header that moves).",
     Right = "right": Layout "DimensionValue",
     Bottom = "bottom": Layout "DimensionValue",
-    Left = "left": Layout "DimensionValue",
+    Left = "left": Layout "DimensionValue | AnimatedNode" "An animated value only for a `position: \"sticky\"` view in a horizontal scroll view, as `top`.",
     Margin = "margin": Layout "DimensionValue",
     MarginHorizontal = "marginHorizontal": Layout "DimensionValue",
     MarginVertical = "marginVertical": Layout "DimensionValue",
@@ -1014,13 +1371,14 @@ style_keys! {
     ZIndex = "zIndex": Layout "number" "Order among siblings (stable); also the native stacking order.",
     BoxShadow = "boxShadow": View "string" "CSS `box-shadow`: offsets, blur, spread and color, several separated by commas, `inset` for inner shadows.",
     BackgroundImage = "backgroundImage": View "string" "CSS gradients drawn over the background color: `linear-gradient(...)`, `radial-gradient(...)`, `conic-gradient(...)`, several separated by commas.",
-    ExperimentalBackgroundImage = "experimental_backgroundImage": View "string" "React Native's name of `backgroundImage`.",
     Filter = "filter": View "string" "CSS filters of the view and its content: `brightness()`, `contrast()`, `grayscale()`, `hue-rotate()`, `invert()`, `saturate()`, `sepia()`, `opacity()`, `blur()`, `drop-shadow()`.",
     BackdropFilter = "backdropFilter": View "string" "CSS filters of what is behind the view (`blur(10px)`).",
+    MaskImage = "maskImage": View "string" "A CSS gradient whose alpha decides how much of the view is drawn, fully where opaque and not at all where transparent: `linear-gradient(...)`, `radial-gradient(...)`, `conic-gradient(...)`. Masks everything the view draws, its backdrop filter included.",
+    GlassEffect = "glassEffect": View "\"none\" | \"regular\" | \"clear\"" "A glass material behind the view's content (Apple's Liquid Glass). Drawn on iOS 26 and later; elsewhere the view's `backdropFilter` is drawn as before, so give a glass view a blur to fall back to.",
     MixBlendMode = "mixBlendMode": View "\"normal\" | \"multiply\" | \"screen\" | \"overlay\" | \"darken\" | \"lighten\" | \"color-dodge\" | \"color-burn\" | \"hard-light\" | \"soft-light\" | \"difference\" | \"exclusion\" | \"hue\" | \"saturation\" | \"color\" | \"luminosity\" | \"plus-darker\" | \"plus-lighter\"" "How the view blends with what is behind it.",
     OutlineWidth = "outlineWidth": View "number" "A line outside the border that takes no space.",
     OutlineColor = "outlineColor": View "ColorValue",
-    OutlineStyle = "outlineStyle": View "\"solid\" | \"double\" | \"dashed\" | \"dotted\" | \"none\" | \"hidden\"",
+    OutlineStyle = "outlineStyle": View "\"solid\" | \"dashed\" | \"dotted\" | \"none\" | \"hidden\"",
     OutlineOffset = "outlineOffset": View "number" "Distance from the border edge (negative: inside).",
     Visibility = "visibility": View "\"visible\" | \"hidden\" | \"collapse\"" "Hidden views keep their space.",
     Cursor = "cursor": View "\"auto\" | \"default\" | \"context-menu\" | \"alias\" | \"copy\" | \"cell\" | \"pointer\" | \"text\" | \"vertical-text\" | \"wait\" | \"progress\" | \"help\" | \"crosshair\" | \"move\" | \"all-scroll\" | \"grab\" | \"grabbing\" | \"not-allowed\" | \"no-drop\" | \"zoom-in\" | \"zoom-out\" | \"col-resize\" | \"e-resize\" | \"w-resize\" | \"ew-resize\" | \"row-resize\" | \"n-resize\" | \"s-resize\" | \"ns-resize\" | \"ne-resize\" | \"nw-resize\" | \"se-resize\" | \"sw-resize\" | \"nesw-resize\" | \"nwse-resize\" | \"none\"" "The pointer over the view (pointers and desktops).",
@@ -1036,12 +1394,12 @@ style_keys! {
     TextDecorationStyle = "textDecorationStyle": Text "\"solid\" | \"double\" | \"dotted\" | \"dashed\" | \"wavy\"",
     TextDecorationThickness = "textDecorationThickness": Text "number | \"auto\" | \"from-font\"",
     TextUnderlineOffset = "textUnderlineOffset": Text "number | \"auto\"",
-    GridTemplateColumns = "gridTemplateColumns": Layout "string" "CSS grid tracks: `\"repeat(3, 1fr)\"`, `\"200px 1fr\"`, `minmax()`, `auto-fill` / `auto-fit`, line names.",
+    GridTemplateColumns = "gridTemplateColumns": Layout "string" "CSS grid tracks: `\"repeat(3, 1fr)\"`, `\"200px 1fr\"`, `minmax()`, `auto-fill` / `auto-fit`, line names (`\"[full-start] 1fr [content-start] 2fr [content-end full-end]\"`).",
     GridTemplateRows = "gridTemplateRows": Layout "string",
     GridAutoColumns = "gridAutoColumns": Layout "string" "Tracks of implicitly created columns.",
     GridAutoRows = "gridAutoRows": Layout "string",
     GridAutoFlow = "gridAutoFlow": Layout "\"row\" | \"column\" | \"dense\" | \"row dense\" | \"column dense\"",
-    GridColumn = "gridColumn": Layout "number | string" "`\"1 / 3\"`, `\"span 2\"`, a line number or name.",
+    GridColumn = "gridColumn": Layout "number | string" "`\"1 / 3\"`, `\"span 2\"`, a line number or name (`\"content-start / full-end\"`, `\"span col\"`).",
     GridColumnStart = "gridColumnStart": Layout "number | string",
     GridColumnEnd = "gridColumnEnd": Layout "number | string",
     GridRow = "gridRow": Layout "number | string",
@@ -1064,28 +1422,29 @@ style_keys! {
     BorderTopEndRadius = "borderTopEndRadius": View "number",
     BorderBottomEndRadius = "borderBottomEndRadius": View "number",
     BorderBottomStartRadius = "borderBottomStartRadius": View "number",
-    BackgroundColor = "backgroundColor": View "ColorValue | NativeNode",
+    BackgroundColor = "backgroundColor": View "ColorValue | AnimatedNode",
     BorderRadius = "borderRadius": View "number",
     BorderTopLeftRadius = "borderTopLeftRadius": View "number",
     BorderTopRightRadius = "borderTopRightRadius": View "number",
     BorderBottomRightRadius = "borderBottomRightRadius": View "number",
     BorderBottomLeftRadius = "borderBottomLeftRadius": View "number",
-    ShadowColor = "shadowColor": View "ColorValue | NativeNode",
-    ShadowOpacity = "shadowOpacity": View "number | NativeNode",
-    ShadowRadius = "shadowRadius": View "number | NativeNode",
-    BorderColor = "borderColor": View "ColorValue | NativeNode",
+    ShadowColor = "shadowColor": View "ColorValue | AnimatedNode",
+    ShadowOpacity = "shadowOpacity": View "number | AnimatedNode",
+    ShadowRadius = "shadowRadius": View "number | AnimatedNode",
+    BorderColor = "borderColor": View "ColorValue | AnimatedNode",
     BorderTopColor = "borderTopColor": View "ColorValue",
     BorderRightColor = "borderRightColor": View "ColorValue",
     BorderBottomColor = "borderBottomColor": View "ColorValue",
     BorderLeftColor = "borderLeftColor": View "ColorValue",
-    BorderStyle = "borderStyle": View "\"solid\" | \"dashed\" | \"dotted\"",
+    BorderStyle = "borderStyle": View "\"solid\" | \"dashed\" | \"dotted\" | \"none\" | \"hidden\"" "`none` and `hidden`: no border whatever the widths (they take no space).",
     BorderCurve = "borderCurve": View "\"circular\" | \"continuous\"" "`continuous`: corners whose curvature eases into the edges (iOS app icons).",
     TintColor = "tintColor": Image "ColorValue" "Recolors a template image.",
+    ObjectPosition = "objectPosition": Image "string" "Where the image sits in its box once `resizeMode` has sized it, as CSS's `object-position`: keywords, percentages and lengths (`\"top\"`, `\"left bottom\"`, `\"25% 75%\"`, `\"right 10px bottom 20%\"`). A covering image is cropped around it. Default the center.",
     BackfaceVisibility = "backfaceVisibility": View "\"visible\" | \"hidden\"" "`\"hidden\"`: invisible while turned away (3D rotations).",
     TransformOrigin = "transformOrigin": View "string | (number | string)[]" "The point `transform` acts around: keywords, percentages and lengths (\"top left\", \"50% 0\", `[10, 20]`). Default the center.",
-    Opacity = "opacity": View "number | NativeNode",
+    Opacity = "opacity": View "number | AnimatedNode",
     Overflow = "overflow": View "\"visible\" | \"hidden\"",
-    Color = "color": Text "ColorValue | NativeNode",
+    Color = "color": Text "ColorValue | AnimatedNode",
     FontSize = "fontSize": Text "number",
     FontWeight = "fontWeight": Text "\"normal\" | \"bold\" | number | `${number}`" "`\"normal\"` (400), `\"bold\"` (700) or 100–900.",
     LineHeight = "lineHeight": Text "number",
@@ -1101,6 +1460,13 @@ style_keys! {
     TextShadowRadius = "textShadowRadius": Text "number",
     TextTransform = "textTransform": Text "\"none\" | \"uppercase\" | \"lowercase\" | \"capitalize\"",
     TextAlign = "textAlign": Text "\"auto\" | \"left\" | \"center\" | \"right\" | \"justify\"",
+    PlaceholderColor = "placeholderColor": Text "ColorValue" "An input's placeholder (`placeholder:text-*`).",
+    SelectionColor = "selectionColor": Text "ColorValue" "An input's caret and selection, a selectable text's selection highlight (`selection:bg-*`).",
+    Fill = "fill": View "\"none\" | \"currentColor\" | ColorValue" "What the shapes a component draws are filled with (CSS's and SVG's `fill`, inherited; `fill-*`): a chart's areas.",
+    Stroke = "stroke": View "\"none\" | \"currentColor\" | ColorValue" "What the outlines of the shapes a component draws are painted with (CSS's and SVG's `stroke`, inherited; `stroke-<color>`): a chart's lines and grid lines.",
+    StrokeWidth = "strokeWidth": View "number | string" "The width of those outlines, a length (CSS's and SVG's `stroke-width`, inherited, 1 by default; `stroke-<number>`).",
+    StrokeDasharray = "strokeDasharray": View "number | string" "The dashes and gaps of those outlines, lengths separated by spaces or commas, an odd list repeated, or `none` (CSS's and SVG's `stroke-dasharray`, inherited).",
+    VerticalAlign = "verticalAlign": View "\"baseline\" | \"text-top\" | \"text-bottom\" | \"middle\"" "Where a view or image inside a `<Text>` sits in its line (CSS `vertical-align`, `align-*`): its bottom on the baseline (the default), its top or bottom at the top or bottom of the text's font, or its middle half the font's x height above the baseline. The line grows to hold it.",
 }
 
 /// A style property value as read from JS.
@@ -1154,15 +1520,15 @@ pub enum StyleDecl {
     /// Starts the `transform` list over: a `transform` replaces the
     /// transforms set before it (by classes).
     ClearTransform,
-    /// Appends a `transform` entry, driven by a native value when given
+    /// Appends a `transform` entry, driven by an animated value when given
     /// (the amount is then the identity until it is bound).
-    Transform(TransformKind, f32, Option<nsh_animation::NodeId>),
+    Transform(TransformKind, f32, Option<crate::animation::NodeId>),
     /// `shadowOffset`; `None` restores the default.
-    ShadowOffset(Option<(f32, f32)>),
+    ShadowOffset(Option<Point<Points>>),
     /// `textShadowOffset`.
-    TextShadowOffset(Option<(f32, f32)>),
+    TextShadowOffset(Option<Point<Points>>),
     /// A property driven by a native animation node.
-    Animated(nsh_animation::AnimationProp, nsh_animation::NodeId),
+    Animated(crate::animation::AnimationProp, crate::animation::NodeId),
 }
 
 impl StyleDecl {
@@ -1173,7 +1539,7 @@ impl StyleDecl {
             StyleDecl::ClearTransform => {
                 style.view.transform = Transform::IDENTITY;
                 style.animated.retain(|(prop, _)| {
-                    !matches!(prop, nsh_animation::AnimationProp::Transform(_))
+                    !matches!(prop, crate::animation::AnimationProp::Transform(_))
                 });
                 Ok(())
             }
@@ -1186,7 +1552,7 @@ impl StyleDecl {
                 if let Some(node) = node {
                     style
                         .animated
-                        .push((nsh_animation::AnimationProp::Transform(index), *node));
+                        .push((crate::animation::AnimationProp::Transform(index), *node));
                 }
                 Ok(())
             }
@@ -1206,8 +1572,9 @@ impl StyleDecl {
     }
 }
 
-/// A style as written (`style={...}`): its declarations in order, kept so
-/// the core can apply them again over class styles when those change.
+/// A style as written (`style={...}`): its declarations in order (the
+/// shorthands of [`StylePatch::set`] before their longhands), kept so the
+/// core can apply them again over class styles when those change.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StylePatch {
     decls: Vec<StyleDecl>,
@@ -1221,7 +1588,13 @@ impl StylePatch {
         Ok(())
     }
 
-    /// Sets property `key` on `style` and records it.
+    /// Sets property `key` of the style object this patch records on
+    /// `style`, and records it. As in React Native, a longhand
+    /// (`borderTopWidth`, `marginHorizontal`, `flexGrow`, ...) wins over
+    /// its shorthand (`borderWidth`, `margin`, `flex`) in one object
+    /// whatever their order: a shorthand set after its longhands is
+    /// recorded before them, and they apply again; a `null` longhand is
+    /// unset, so its shorthand shows.
     pub fn set(
         &mut self,
         style: &mut Style,
@@ -1229,9 +1602,41 @@ impl StylePatch {
         value: StyleValue<'_>,
     ) -> Result<(), StyleError> {
         let key = StyleKey::parse(key).ok_or(StyleError::UnknownProperty)?;
+        if matches!(value, StyleValue::Null) && self.has_shorthand_of(key) {
+            return Ok(());
+        }
         style.set_key(key, value)?;
-        self.decls.push(StyleDecl::Set(key, value.into()));
+        let decl = StyleDecl::Set(key, value.into());
+        let longhands = key.longhands();
+        let Some(at) = self
+            .decls
+            .iter()
+            .position(|d| matches!(d, StyleDecl::Set(k, _) if longhands.contains(k)))
+        else {
+            self.decls.push(decl);
+            return Ok(());
+        };
+        // Nulls set before are dropped (the shorthand shows); the others
+        // apply again over it.
+        self.decls
+            .retain(|d| !matches!(d, StyleDecl::Set(k, PatchValue::Null) if longhands.contains(k)));
+        let at = at.min(self.decls.len());
+        self.decls.insert(at, decl);
+        for d in &self.decls[at + 1..] {
+            if let StyleDecl::Set(k, v) = d
+                && longhands.contains(k)
+            {
+                let _ = style.set_key(*k, v.as_value());
+            }
+        }
         Ok(())
+    }
+
+    /// Whether a shorthand of `key` is recorded.
+    fn has_shorthand_of(&self, key: StyleKey) -> bool {
+        self.decls
+            .iter()
+            .any(|d| matches!(d, StyleDecl::Set(k, _) if k.longhands().contains(&key)))
     }
 
     /// Applies every declaration to `style`, in order.
@@ -1250,6 +1655,54 @@ impl StylePatch {
     /// The declarations.
     pub fn decls(&self) -> &[StyleDecl] {
         &self.decls
+    }
+}
+
+impl StyleKey {
+    /// The properties that override this shorthand in a style object
+    /// whatever their order (Yoga takes an edge's own value before its
+    /// axis' and that of all edges, `flexGrow` before `flex`).
+    fn longhands(self) -> &'static [StyleKey] {
+        use StyleKey as K;
+        match self {
+            K::Margin => &[
+                K::MarginHorizontal,
+                K::MarginVertical,
+                K::MarginTop,
+                K::MarginRight,
+                K::MarginBottom,
+                K::MarginLeft,
+            ],
+            K::MarginHorizontal => &[K::MarginLeft, K::MarginRight],
+            K::MarginVertical => &[K::MarginTop, K::MarginBottom],
+            K::Padding => &[
+                K::PaddingHorizontal,
+                K::PaddingVertical,
+                K::PaddingTop,
+                K::PaddingRight,
+                K::PaddingBottom,
+                K::PaddingLeft,
+            ],
+            K::PaddingHorizontal => &[K::PaddingLeft, K::PaddingRight],
+            K::PaddingVertical => &[K::PaddingTop, K::PaddingBottom],
+            K::BorderWidth => &[
+                K::BorderTopWidth,
+                K::BorderRightWidth,
+                K::BorderBottomWidth,
+                K::BorderLeftWidth,
+            ],
+            K::BorderColor => &[
+                K::BorderTopColor,
+                K::BorderRightColor,
+                K::BorderBottomColor,
+                K::BorderLeftColor,
+            ],
+            K::Gap => &[K::RowGap, K::ColumnGap],
+            K::Flex => &[K::FlexGrow, K::FlexShrink, K::FlexBasis],
+            K::GridColumn => &[K::GridColumnStart, K::GridColumnEnd],
+            K::GridRow => &[K::GridRowStart, K::GridRowEnd],
+            _ => &[],
+        }
     }
 }
 
@@ -1307,6 +1760,16 @@ impl Len {
     }
 }
 
+/// Intrinsic sizes are delegated to Taffy's sizing algorithms.
+fn dimension(value: StyleValue<'_>) -> Result<Dimension, StyleError> {
+    Ok(match value {
+        StyleValue::Str("min-content") => Dimension::min_content(),
+        StyleValue::Str("max-content") => Dimension::max_content(),
+        StyleValue::Str("fit-content") => Dimension::fit_content(),
+        value => Len::parse(value)?.dim(),
+    })
+}
+
 /// A zero-default length: `null` resets to 0 rather than `auto`.
 fn lp_or_zero(v: StyleValue<'_>) -> Result<LengthPercentage, StyleError> {
     match v {
@@ -1362,12 +1825,62 @@ fn opt_number(v: StyleValue<'_>) -> Result<Option<f32>, StyleError> {
     }
 }
 
+fn opt_points(v: StyleValue<'_>) -> Result<Option<Points>, StyleError> {
+    Ok(opt_number(v)?.map(px))
+}
+
 fn color(v: StyleValue<'_>) -> Result<Option<Color>, StyleError> {
     match v {
         StyleValue::Str(s) => Color::parse(s).map(Some).ok_or(StyleError::InvalidValue),
         StyleValue::Null => Ok(None),
         StyleValue::Number(_) => Err(StyleError::InvalidValue),
     }
+}
+
+/// A `fill` / `stroke` value; `inherit` is unset, since they inherit.
+fn svg_paint(v: StyleValue<'_>) -> Result<Option<SvgPaint>, StyleError> {
+    let StyleValue::Str(s) = v else {
+        return match v {
+            StyleValue::Null => Ok(None),
+            _ => Err(StyleError::InvalidValue),
+        };
+    };
+    let s = s.trim();
+    Ok(if s.eq_ignore_ascii_case("none") {
+        Some(SvgPaint::None)
+    } else if s.eq_ignore_ascii_case("currentcolor") {
+        Some(SvgPaint::CurrentColor)
+    } else if s.eq_ignore_ascii_case("inherit") {
+        None
+    } else {
+        Some(SvgPaint::Color(
+            Color::parse(s).ok_or(StyleError::InvalidValue)?,
+        ))
+    })
+}
+
+/// A `strokeDasharray` value: lengths (no negatives) separated by commas
+/// and / or spaces, or `none` (empty); one whose lengths add up to zero is
+/// a solid line, as in SVG.
+fn dasharray(v: StyleValue<'_>) -> Result<Option<Arc<[Points]>>, StyleError> {
+    let lengths: Vec<Points> = match v {
+        StyleValue::Null => return Ok(None),
+        StyleValue::Number(n) if n >= 0.0 => vec![px(n)],
+        StyleValue::Number(_) => return Err(StyleError::InvalidValue),
+        StyleValue::Str(s) if s.trim().eq_ignore_ascii_case("none") => Vec::new(),
+        StyleValue::Str(s) => s
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|part| !part.is_empty())
+            .map(|part| match css::length(part) {
+                Some(n) if n >= 0.0 => Ok(px(n)),
+                _ => Err(StyleError::InvalidValue),
+            })
+            .collect::<Result<_, _>>()?,
+    };
+    if lengths.iter().all(|l| l.0 == 0.0) {
+        return Ok(Some(Arc::from([])));
+    }
+    Ok(Some(lengths.into()))
 }
 
 fn keyword<'a>(v: StyleValue<'a>) -> Result<Option<&'a str>, StyleError> {
@@ -1383,18 +1896,31 @@ fn align_items(v: StyleValue<'_>) -> Result<Option<AlignItems>, StyleError> {
         None => None,
         Some("flex-start") => Some(AlignItems::FLEX_START),
         Some("flex-end") => Some(AlignItems::FLEX_END),
+        // CSS's logical keywords: the writing direction's start and end
+        // (right to left, `start` is the right), not the flex direction's.
+        Some("start") => Some(AlignItems::START),
+        Some("end") => Some(AlignItems::END),
+        Some("self-start") => Some(AlignItems::SELF_START),
+        Some("self-end") => Some(AlignItems::SELF_END),
         Some("center") => Some(AlignItems::CENTER),
         Some("stretch") => Some(AlignItems::STRETCH),
         Some("baseline") => Some(AlignItems::BASELINE),
+        // CSS's `normal`: `stretch` for items without an aspect ratio.
+        Some("normal") => Some(AlignItems::NORMAL),
         Some(_) => return Err(StyleError::InvalidValue),
     })
 }
 
-fn align_content(v: StyleValue<'_>, default: AlignContent) -> Result<AlignContent, StyleError> {
+/// `alignContent` / `justifyContent`; unset (null, `normal`) is CSS's
+/// `normal`, which [`resolve_normal_alignment`] makes React Native's
+/// `flex-start` outside grids.
+fn align_content(v: StyleValue<'_>) -> Result<AlignContent, StyleError> {
     Ok(match keyword(v)? {
-        None => default,
+        None | Some("normal") => AlignContent::NORMAL,
         Some("flex-start") => AlignContent::FLEX_START,
         Some("flex-end") => AlignContent::FLEX_END,
+        Some("start") => AlignContent::START,
+        Some("end") => AlignContent::END,
         Some("center") => AlignContent::CENTER,
         Some("stretch") => AlignContent::STRETCH,
         Some("space-between") => AlignContent::SPACE_BETWEEN,
@@ -1517,6 +2043,13 @@ fn grid_value<T>(
     }
 }
 
+fn grid_template(v: StyleValue<'_>) -> Result<grid::Template, StyleError> {
+    match keyword(v)? {
+        None => Ok((Vec::new(), Vec::new())),
+        Some(s) => grid::template(s).ok_or(StyleError::InvalidValue),
+    }
+}
+
 fn grid_placement(v: StyleValue<'_>) -> Result<taffy::GridPlacement<String>, StyleError> {
     match v {
         StyleValue::Null => Ok(taffy::GridPlacement::Auto),
@@ -1595,14 +2128,15 @@ impl Style {
     }
 
     /// Sets `shadowOffset: { width, height }`; `None` restores the default.
-    pub fn set_shadow_offset(&mut self, offset: Option<(f32, f32)>) {
-        let (x, y) = offset.unwrap_or((Shadow::DEFAULT.offset_x, Shadow::DEFAULT.offset_y));
-        self.view.shadow.offset_x = x;
-        self.view.shadow.offset_y = y;
+    pub fn set_shadow_offset(&mut self, offset: Option<Point<Points>>) {
+        let offset =
+            offset.unwrap_or_else(|| point(Shadow::DEFAULT.offset_x, Shadow::DEFAULT.offset_y));
+        self.view.shadow.offset_x = offset.x;
+        self.view.shadow.offset_y = offset.y;
     }
 
     /// Sets `textShadowOffset: { width, height }`.
-    pub fn set_text_shadow_offset(&mut self, offset: Option<(f32, f32)>) {
+    pub fn set_text_shadow_offset(&mut self, offset: Option<Point<Points>>) {
         self.text.shadow_offset = offset;
     }
 
@@ -1611,17 +2145,38 @@ impl Style {
         sides: &[usize],
         value: StyleValue<'_>,
     ) -> Result<(), StyleError> {
-        let w = number(value, 0.0)?.max(0.0);
-        let v = LengthPercentage::length(w);
+        let w = px(number(value, 0.0)?.max(0.0));
         for &side in sides {
-            self.view.borders.widths[side] = w;
-            let b = &mut self.layout.border;
-            match side {
-                0 => b.top = v,
-                1 => b.right = v,
-                2 => b.bottom = v,
-                _ => b.left = v,
+            self.pending.border_widths[side] = w;
+            if !self.pending.border_hidden {
+                self.set_used_border_width(side, w);
             }
+        }
+        Ok(())
+    }
+
+    /// The width side `side` lays out and draws with.
+    fn set_used_border_width(&mut self, side: usize, w: Points) {
+        *self.view.borders.width_mut(side) = w;
+        let v = LengthPercentage::length(w.0);
+        let b = &mut self.layout.border;
+        match side {
+            0 => b.top = v,
+            1 => b.right = v,
+            2 => b.bottom = v,
+            _ => b.left = v,
+        }
+    }
+
+    fn set_logical_border_width(
+        &mut self,
+        i: usize,
+        value: StyleValue<'_>,
+    ) -> Result<(), StyleError> {
+        let w = opt_points(value)?.map(|w| w.max(Points::ZERO));
+        self.pending.border_logical[i] = w;
+        if !self.pending.border_hidden {
+            self.logical.border_width[i] = w;
         }
         Ok(())
     }
@@ -1636,6 +2191,24 @@ impl Style {
             self.view.borders.colors[side] = c;
         }
         Ok(())
+    }
+
+    /// Sets color property `key` (`borderColor`, `outlineColor`) to `color`;
+    /// other keys are left as they are.
+    pub(crate) fn set_color(&mut self, key: StyleKey, color: Color) {
+        match key {
+            StyleKey::BorderColor => self.view.borders.colors = [color; 4],
+            StyleKey::OutlineColor => self.view.outline.color = color,
+            StyleKey::BackgroundColor => self.view.background_color = color,
+            StyleKey::BorderTopColor => self.view.borders.colors[0] = color,
+            StyleKey::BorderRightColor => self.view.borders.colors[1] = color,
+            StyleKey::BorderBottomColor => self.view.borders.colors[2] = color,
+            StyleKey::BorderLeftColor => self.view.borders.colors[3] = color,
+            StyleKey::BorderStartColor => self.logical.border_color[0] = Some(color),
+            StyleKey::BorderEndColor => self.logical.border_color[1] = Some(color),
+            StyleKey::TextDecorationColor => self.text.decoration_color = Some(color),
+            _ => debug_assert!(false, "set_color({key:?})"),
+        }
     }
 
     /// Sets one property using its React Native name.
@@ -1656,16 +2229,30 @@ impl Style {
                     None | Some("flex") => Display::Flex,
                     Some("grid") => Display::Grid,
                     Some("block") => Display::Block,
+                    Some("flow-root") => Display::FlowRoot,
                     Some("none") => Display::None,
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
+            StyleKey::BoxSizing => {
+                l.box_sizing = match keyword(value)? {
+                    None | Some("border-box") => taffy::BoxSizing::BorderBox,
+                    Some("content-box") => taffy::BoxSizing::ContentBox,
+                    _ => return Err(StyleError::InvalidValue),
+                };
+            }
             StyleKey::Position => {
-                l.position = match keyword(value)? {
-                    None | Some("relative") => Position::Relative,
-                    Some("absolute") => Position::Absolute,
+                let (position, fixed, sticky) = match keyword(value)? {
+                    None | Some("relative") => (Position::Relative, false, false),
+                    Some("absolute") => (Position::Absolute, false, false),
+                    Some("fixed") => (Position::Fixed, true, false),
+                    Some("static") => (Position::Static, false, false),
+                    Some("sticky") => (Position::Relative, false, true),
                     Some(_) => return Err(StyleError::InvalidValue),
-                }
+                };
+                l.position = position;
+                self.pending.fixed_position = fixed;
+                self.pending.sticky_position = sticky;
             }
             StyleKey::FlexDirection => {
                 l.flex_direction = match keyword(value)? {
@@ -1703,10 +2290,8 @@ impl Style {
             }
             StyleKey::FlexGrow => l.flex_grow = number(value, 0.0)?,
             StyleKey::FlexShrink => l.flex_shrink = number(value, 0.0)?,
-            StyleKey::FlexBasis => l.flex_basis = Len::parse(value)?.dim(),
-            StyleKey::JustifyContent => {
-                l.justify_content = align_content(value, AlignContent::FLEX_START)?
-            }
+            StyleKey::FlexBasis => l.flex_basis = dimension(value)?,
+            StyleKey::JustifyContent => l.justify_content = align_content(value)?,
             StyleKey::AlignItems => {
                 l.align_items = align_items(value)?.unwrap_or(AlignItems::STRETCH)
             }
@@ -1716,11 +2301,9 @@ impl Style {
                     v => align_items(v)?,
                 }
             }
-            StyleKey::AlignContent => {
-                l.align_content = align_content(value, AlignContent::FLEX_START)?
-            }
-            StyleKey::Width => l.size.width = Len::parse(value)?.dim(),
-            StyleKey::Height => l.size.height = Len::parse(value)?.dim(),
+            StyleKey::AlignContent => l.align_content = align_content(value)?,
+            StyleKey::Width => l.size.width = dimension(value)?,
+            StyleKey::Height => l.size.height = dimension(value)?,
             StyleKey::MinWidth => l.min_size.width = min_len(value)?,
             StyleKey::MinHeight => l.min_size.height = min_len(value)?,
             StyleKey::MaxWidth => l.max_size.width = Len::parse(value)?.lpa(),
@@ -1787,6 +2370,12 @@ impl Style {
             StyleKey::BorderBottomWidth => self.set_border_width(&[2], value)?,
             StyleKey::BorderLeftWidth => self.set_border_width(&[3], value)?,
             StyleKey::ZIndex => self.z_index = number(value, 0.0)? as i32,
+            StyleKey::VerticalAlign => {
+                self.vertical_align = match keyword(value)? {
+                    None => VerticalAlign::Baseline,
+                    Some(k) => VerticalAlign::parse(k).ok_or(StyleError::InvalidValue)?,
+                }
+            }
             StyleKey::Direction => {
                 self.direction = match keyword(value)? {
                     None | Some("inherit") => None,
@@ -1801,28 +2390,30 @@ impl Style {
             StyleKey::PaddingEnd => self.logical.padding[1] = opt_lp(value)?,
             StyleKey::Start => self.logical.inset[0] = opt_lpa(value)?,
             StyleKey::End => self.logical.inset[1] = opt_lpa(value)?,
-            StyleKey::BorderStartWidth => {
-                self.logical.border_width[0] = opt_number(value)?.map(|w| w.max(0.0))
-            }
-            StyleKey::BorderEndWidth => {
-                self.logical.border_width[1] = opt_number(value)?.map(|w| w.max(0.0))
-            }
+            StyleKey::BorderStartWidth => self.set_logical_border_width(0, value)?,
+            StyleKey::BorderEndWidth => self.set_logical_border_width(1, value)?,
             StyleKey::BorderStartColor => self.logical.border_color[0] = color(value)?,
             StyleKey::BorderEndColor => self.logical.border_color[1] = color(value)?,
-            StyleKey::BorderTopStartRadius => self.logical.radius[0] = opt_number(value)?,
-            StyleKey::BorderTopEndRadius => self.logical.radius[1] = opt_number(value)?,
-            StyleKey::BorderBottomEndRadius => self.logical.radius[2] = opt_number(value)?,
-            StyleKey::BorderBottomStartRadius => self.logical.radius[3] = opt_number(value)?,
+            StyleKey::BorderTopStartRadius => self.logical.radius[0] = opt_points(value)?,
+            StyleKey::BorderTopEndRadius => self.logical.radius[1] = opt_points(value)?,
+            StyleKey::BorderBottomEndRadius => self.logical.radius[2] = opt_points(value)?,
+            StyleKey::BorderBottomStartRadius => self.logical.radius[3] = opt_points(value)?,
 
             // View
             StyleKey::BackgroundColor => {
                 self.view.background_color = color(value)?.unwrap_or(Color::TRANSPARENT)
             }
-            StyleKey::BorderRadius => self.view.border_radius = number(value, 0.0)?,
-            StyleKey::BorderTopLeftRadius => self.view.corner_radius[0] = opt_number(value)?,
-            StyleKey::BorderTopRightRadius => self.view.corner_radius[1] = opt_number(value)?,
-            StyleKey::BorderBottomRightRadius => self.view.corner_radius[2] = opt_number(value)?,
-            StyleKey::BorderBottomLeftRadius => self.view.corner_radius[3] = opt_number(value)?,
+            StyleKey::BorderRadius => self.view.border_radius = px(number(value, 0.0)?),
+            StyleKey::BorderTopLeftRadius => self.view.corner_radius.top_left = opt_points(value)?,
+            StyleKey::BorderTopRightRadius => {
+                self.view.corner_radius.top_right = opt_points(value)?
+            }
+            StyleKey::BorderBottomRightRadius => {
+                self.view.corner_radius.bottom_right = opt_points(value)?
+            }
+            StyleKey::BorderBottomLeftRadius => {
+                self.view.corner_radius.bottom_left = opt_points(value)?
+            }
             StyleKey::ShadowColor => {
                 self.view.shadow.color = color(value)?.unwrap_or(Shadow::DEFAULT.color)
             }
@@ -1830,7 +2421,7 @@ impl Style {
                 self.view.shadow.opacity = number(value, Shadow::DEFAULT.opacity)?.clamp(0.0, 1.0)
             }
             StyleKey::ShadowRadius => {
-                self.view.shadow.radius = number(value, Shadow::DEFAULT.radius)?.max(0.0)
+                self.view.shadow.radius = px(number(value, Shadow::DEFAULT.radius.0)?.max(0.0))
             }
             StyleKey::BorderColor => self.set_border_color(&[0, 1, 2, 3], value)?,
             StyleKey::BorderTopColor => self.set_border_color(&[0], value)?,
@@ -1838,11 +2429,32 @@ impl Style {
             StyleKey::BorderBottomColor => self.set_border_color(&[2], value)?,
             StyleKey::BorderLeftColor => self.set_border_color(&[3], value)?,
             StyleKey::BorderStyle => {
-                self.view.borders.style = match keyword(value)? {
-                    None | Some("solid") => BorderStyle::Solid,
-                    Some("dashed") => BorderStyle::Dashed,
-                    Some("dotted") => BorderStyle::Dotted,
+                // `none` (and `hidden`, the same outside tables) draws and
+                // lays out no border whatever the widths, set before or
+                // after it (CSS).
+                let (style, hidden) = match keyword(value)? {
+                    None | Some("solid") => (BorderStyle::Solid, false),
+                    Some("dashed") => (BorderStyle::Dashed, false),
+                    Some("dotted") => (BorderStyle::Dotted, false),
+                    Some("none") | Some("hidden") => (BorderStyle::Solid, true),
                     Some(_) => return Err(StyleError::InvalidValue),
+                };
+                self.view.borders.style = style;
+                if hidden != self.pending.border_hidden {
+                    self.pending.border_hidden = hidden;
+                    for side in 0..4 {
+                        let w = if hidden {
+                            Points::ZERO
+                        } else {
+                            self.pending.border_widths[side]
+                        };
+                        self.set_used_border_width(side, w);
+                    }
+                    self.logical.border_width = if hidden {
+                        [None; 2]
+                    } else {
+                        self.pending.border_logical
+                    };
                 }
             }
             StyleKey::BorderCurve => {
@@ -1853,6 +2465,12 @@ impl Style {
                 }
             }
             StyleKey::TintColor => self.view.tint_color = color(value)?,
+            StyleKey::ObjectPosition => {
+                self.view.object_position = match keyword(value)? {
+                    None => ObjectPosition::CENTER,
+                    Some(s) => ObjectPosition::parse(s).ok_or(StyleError::InvalidValue)?,
+                }
+            }
             StyleKey::BackfaceVisibility => {
                 self.view.backface_hidden = match keyword(value)? {
                     None | Some("visible") => false,
@@ -1877,26 +2495,56 @@ impl Style {
 
             // Text
             StyleKey::Color => self.text.color = color(value)?,
-            StyleKey::FontSize => self.text.font_size = opt_number(value)?,
+            StyleKey::Fill => self.paint.fill = svg_paint(value)?,
+            StyleKey::Stroke => self.paint.stroke = svg_paint(value)?,
+            StyleKey::StrokeWidth => {
+                self.paint.stroke_width = match value {
+                    StyleValue::Null => None,
+                    StyleValue::Number(n) if n >= 0.0 => Some(px(n)),
+                    StyleValue::Str(s) => match css::length(s) {
+                        Some(n) if n >= 0.0 => Some(px(n)),
+                        _ => return Err(StyleError::InvalidValue),
+                    },
+                    StyleValue::Number(_) => return Err(StyleError::InvalidValue),
+                }
+            }
+            StyleKey::StrokeDasharray => self.paint.stroke_dasharray = dasharray(value)?,
+            StyleKey::FontSize => self.text.font_size = opt_points(value)?,
             StyleKey::FontWeight => self.text.font_weight = font_weight(value)?,
             StyleKey::LineHeight => {
                 // Numbers are points (React Native); strings may be a
                 // multiple of the font size (`"1.5"`, `"1.5em"`) or points.
-                let (points, multiple) = match value {
+                let (points, multiple, em) = match value {
                     StyleValue::Str(s)
                         if s.ends_with("px") || s.ends_with("pt") || s.ends_with("rem") =>
                     {
-                        (Some(css::length(s).ok_or(StyleError::InvalidValue)?), None)
+                        (
+                            Some(px(css::length(s).ok_or(StyleError::InvalidValue)?)),
+                            None,
+                            None,
+                        )
+                    }
+                    StyleValue::Str(s) if s.ends_with('%') || s.ends_with("em") => {
+                        let n = if let Some(n) = s.strip_suffix('%') {
+                            css::number(n).map(|n| n / 100.0)
+                        } else {
+                            css::number(s.strip_suffix("em").unwrap())
+                        }
+                        .filter(|n| *n >= 0.0)
+                        .ok_or(StyleError::InvalidValue)?;
+                        (None, None, Some(n))
                     }
                     StyleValue::Str(s) => {
-                        let n = css::number(s.strip_suffix("em").unwrap_or(s))
+                        let n = css::number(s)
+                            .filter(|n| *n >= 0.0)
                             .ok_or(StyleError::InvalidValue)?;
-                        (None, Some(n.max(0.0)))
+                        (None, Some(n), None)
                     }
-                    v => (opt_number(v)?, None),
+                    v => (opt_points(v)?, None, None),
                 };
                 self.text.line_height = points;
                 self.text.line_height_multiple = multiple;
+                self.text.line_height_em = em;
             }
             StyleKey::FontFamily => {
                 self.text.font_family = keyword(value)?.map(|name| FontFamily::new(name.trim()))
@@ -1915,10 +2563,11 @@ impl Style {
                         let n = css::number(&s[..s.len() - 2]).ok_or(StyleError::InvalidValue)?;
                         (None, Some(n))
                     }
-                    StyleValue::Str(s) => {
-                        (Some(css::length(s).ok_or(StyleError::InvalidValue)?), None)
-                    }
-                    v => (opt_number(v)?, None),
+                    StyleValue::Str(s) => (
+                        Some(px(css::length(s).ok_or(StyleError::InvalidValue)?)),
+                        None,
+                    ),
+                    v => (opt_points(v)?, None),
                 };
                 self.text.letter_spacing = points;
                 self.text.letter_spacing_em = em;
@@ -1941,12 +2590,14 @@ impl Style {
                 }
             }
             StyleKey::TextDecorationColor => self.text.decoration_color = color(value)?,
+            StyleKey::PlaceholderColor => self.text.placeholder_color = color(value)?,
+            StyleKey::SelectionColor => self.text.selection_color = color(value)?,
             StyleKey::TextAlignVertical => {
                 self.text.align_vertical = match keyword(value)? {
                     None => None,
-                    Some("auto" | "top") => Some(0.0),
-                    Some("center") => Some(0.5),
-                    Some("bottom") => Some(1.0),
+                    Some("auto" | "top") => Some(percentage(0.0)),
+                    Some("center") => Some(percentage(0.5)),
+                    Some("bottom") => Some(percentage(1.0)),
                     Some(_) => return Err(StyleError::InvalidValue),
                 }
             }
@@ -1965,7 +2616,7 @@ impl Style {
                 }
             }
             StyleKey::TextShadowColor => self.text.shadow_color = color(value)?,
-            StyleKey::TextShadowRadius => self.text.shadow_radius = opt_number(value)?,
+            StyleKey::TextShadowRadius => self.text.shadow_radius = opt_points(value)?,
             StyleKey::TextTransform => {
                 self.text.transform = match keyword(value)? {
                     None => None,
@@ -1977,6 +2628,7 @@ impl Style {
                 }
             }
             StyleKey::TextAlign => {
+                self.text.text_align_physical = false;
                 self.text.text_align = match keyword(value)? {
                     None => None,
                     Some("auto") => Some(TextAlign::Auto),
@@ -1996,12 +2648,20 @@ impl Style {
                 };
                 self.edit_effects(|e| e.box_shadows = list);
             }
-            StyleKey::BackgroundImage | StyleKey::ExperimentalBackgroundImage => {
+            StyleKey::BackgroundImage => {
                 let list = match keyword(value)? {
                     None => Vec::new(),
                     Some(s) => css::gradients(s).ok_or(StyleError::InvalidValue)?,
                 };
                 self.edit_effects(|e| e.background_images = list);
+            }
+            StyleKey::MaskImage => {
+                let list = match keyword(value)? {
+                    None => Vec::new(),
+                    Some("none") => Vec::new(),
+                    Some(s) => css::gradients(s).ok_or(StyleError::InvalidValue)?,
+                };
+                self.edit_effects(|e| e.mask_images = list);
             }
             StyleKey::Filter => {
                 let list = match keyword(value)? {
@@ -2017,28 +2677,46 @@ impl Style {
                 };
                 self.edit_effects(|e| e.backdrop_filters = list);
             }
+            StyleKey::GlassEffect => {
+                self.view.glass_effect = match keyword(value)? {
+                    None => GlassEffect::None,
+                    Some(s) => GlassEffect::parse(s).ok_or(StyleError::InvalidValue)?,
+                }
+            }
             StyleKey::MixBlendMode => {
                 self.view.blend_mode = match keyword(value)? {
                     None => BlendMode::Normal,
                     Some(s) => BlendMode::parse(s).ok_or(StyleError::InvalidValue)?,
                 }
             }
-            StyleKey::OutlineWidth => self.view.outline.width = length_value(value, 0.0)?.max(0.0),
+            StyleKey::OutlineWidth => {
+                let width = px(length_value(value, 0.0)?.max(0.0));
+                self.pending.outline_width = width;
+                if !self.pending.outline_hidden {
+                    self.view.outline.width = width;
+                }
+            }
             StyleKey::OutlineColor => {
                 self.view.outline.color = color(value)?.unwrap_or(Outline::NONE.color)
             }
-            StyleKey::OutlineOffset => self.view.outline.offset = length_value(value, 0.0)?,
+            StyleKey::OutlineOffset => self.view.outline.offset = px(length_value(value, 0.0)?),
             StyleKey::OutlineStyle => {
-                self.view.outline.style = match keyword(value)? {
-                    None | Some("solid") | Some("double") => BorderStyle::Solid,
-                    Some("dashed") => BorderStyle::Dashed,
-                    Some("dotted") => BorderStyle::Dotted,
-                    Some("none") | Some("hidden") => {
-                        self.view.outline.width = 0.0;
-                        BorderStyle::Solid
-                    }
+                // `none` draws no outline whatever the width, set before
+                // or after it (CSS).
+                let (style, hidden) = match keyword(value)? {
+                    None | Some("solid") => (BorderStyle::Solid, false),
+                    Some("dashed") => (BorderStyle::Dashed, false),
+                    Some("dotted") => (BorderStyle::Dotted, false),
+                    Some("none") | Some("hidden") => (BorderStyle::Solid, true),
                     Some(_) => return Err(StyleError::InvalidValue),
-                }
+                };
+                self.view.outline.style = style;
+                self.pending.outline_hidden = hidden;
+                self.view.outline.width = if hidden {
+                    Points::ZERO
+                } else {
+                    self.pending.outline_width
+                };
             }
             StyleKey::Visibility => {
                 self.view.hidden = match keyword(value)? {
@@ -2081,31 +2759,34 @@ impl Style {
                     Some("bounce") => Some(Keyframes::Bounce),
                     Some(_) => return Err(StyleError::InvalidValue),
                 };
+                // An animation already running (a class's) keeps its
+                // values; a new one takes those set before its name.
+                let pending = self.pending;
                 self.view.animation = keyframes.map(|keyframes| {
-                    let base = self.view.animation.unwrap_or(KeyframeAnimation {
-                        keyframes,
-                        duration: 1000.0,
-                        delay: 0.0,
-                        easing: [0.0, 0.0, 1.0, 1.0],
-                        iterations: None,
-                    });
+                    let base = self
+                        .view
+                        .animation
+                        .unwrap_or_else(|| pending.animation(KeyframeAnimation::new(keyframes)));
                     KeyframeAnimation { keyframes, ..base }
                 });
             }
             StyleKey::AnimationDuration => {
                 let ms = duration(value)?;
+                self.pending.animation_duration = Some(ms);
                 if let Some(a) = self.view.animation.as_mut() {
                     a.duration = ms;
                 }
             }
             StyleKey::AnimationDelay => {
                 let ms = duration(value)?;
+                self.pending.animation_delay = Some(ms);
                 if let Some(a) = self.view.animation.as_mut() {
                     a.delay = ms;
                 }
             }
             StyleKey::AnimationTimingFunction => {
                 let easing = timing_function(value)?;
+                self.pending.animation_easing = Some(easing);
                 if let Some(a) = self.view.animation.as_mut() {
                     a.easing = easing;
                 }
@@ -2115,6 +2796,7 @@ impl Style {
                     StyleValue::Str("infinite") | StyleValue::Null => None,
                     v => Some(number(v, 1.0)?.max(0.0) as u32),
                 };
+                self.pending.animation_iterations = Some(count);
                 if let Some(a) = self.view.animation.as_mut() {
                     a.iterations = count;
                 }
@@ -2135,22 +2817,22 @@ impl Style {
                     StyleValue::Null | StyleValue::Str("auto") | StyleValue::Str("from-font") => {
                         None
                     }
-                    v => Some(length_value(v, 1.0)?.max(0.0)),
+                    v => Some(px(length_value(v, 1.0)?.max(0.0))),
                 }
             }
             StyleKey::TextUnderlineOffset => {
                 self.text.underline_offset = match value {
                     StyleValue::Null | StyleValue::Str("auto") => None,
-                    v => Some(length_value(v, 0.0)?),
+                    v => Some(px(length_value(v, 0.0)?)),
                 }
             }
 
             // Grid
             StyleKey::GridTemplateColumns => {
-                l.grid_template_columns = grid_value(value, grid::template)?;
+                (l.grid_template_columns, l.grid_template_column_names) = grid_template(value)?;
             }
             StyleKey::GridTemplateRows => {
-                l.grid_template_rows = grid_value(value, grid::template)?;
+                (l.grid_template_rows, l.grid_template_row_names) = grid_template(value)?;
             }
             StyleKey::GridAutoColumns => {
                 l.grid_auto_columns = grid_value(value, grid::auto_tracks)?;
@@ -2187,6 +2869,40 @@ impl Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::{relative, size};
+
+    /// `fill`, `stroke`, `strokeWidth` and `strokeDasharray` take what CSS
+    /// takes for them.
+    #[test]
+    fn svg_paint_properties() {
+        let mut s = Style::default();
+        s.set("fill", StyleValue::Str("#ff0000")).unwrap();
+        s.set("stroke", StyleValue::Str("currentColor")).unwrap();
+        s.set("strokeWidth", StyleValue::Str("2px")).unwrap();
+        s.set("strokeDasharray", StyleValue::Str("4, 2 1")).unwrap();
+        assert_eq!(s.paint.fill, Some(SvgPaint::Color(Color(0xff00_00ff))));
+        assert_eq!(s.paint.stroke, Some(SvgPaint::CurrentColor));
+        assert_eq!(s.paint.stroke_width, Some(px(2.0)));
+        assert_eq!(
+            s.paint.stroke_dasharray.as_deref(),
+            Some(&[px(4.0), px(2.0), px(1.0)][..])
+        );
+        s.set("strokeDasharray", StyleValue::Number(3.0)).unwrap();
+        assert_eq!(s.paint.stroke_dasharray.as_deref(), Some(&[px(3.0)][..]));
+        // `none`, and dashes that add up to nothing: a solid line.
+        for none in ["none", "0 0"] {
+            s.set("strokeDasharray", StyleValue::Str(none)).unwrap();
+            assert_eq!(s.paint.stroke_dasharray.as_deref(), Some(&[][..]));
+        }
+        s.set("fill", StyleValue::Str("none")).unwrap();
+        assert_eq!(s.paint.fill, Some(SvgPaint::None));
+        // Negative lengths are invalid, as in CSS.
+        assert!(s.set("strokeWidth", StyleValue::Number(-1.0)).is_err());
+        assert!(s.set("strokeDasharray", StyleValue::Str("4 -2")).is_err());
+        assert!(s.set("fill", StyleValue::Str("nope")).is_err());
+        s.set("stroke", StyleValue::Null).unwrap();
+        assert_eq!(s.paint.stroke, None);
+    }
 
     #[test]
     fn parse_colors() {
@@ -2207,22 +2923,63 @@ mod tests {
         assert_eq!(s.layout.flex_direction, FlexDirection::Column);
         assert_eq!(s.layout.flex_shrink, 0.0);
         assert_eq!(s.layout.position, Position::Relative);
-        assert_eq!(s.layout.align_content, AlignContent::FLEX_START);
+        // Unset: `flex-start` once laid out outside grids.
+        assert_eq!(s.layout.align_content, AlignContent::NORMAL);
+        let mut layout = s.layout.clone();
+        resolve_normal_alignment(&mut layout);
+        assert_eq!(layout.align_content, AlignContent::FLEX_START);
         assert_eq!(s.layout.min_size.width, LengthPercentageAuto::length(0.0));
+    }
+
+    #[test]
+    fn css_alignment_keywords() {
+        let mut s = Style::default();
+        let k = StyleValue::Str;
+        for key in ["alignItems", "alignSelf", "justifyItems", "justifySelf"] {
+            for v in ["start", "end", "self-start", "self-end"] {
+                s.set(key, k(v)).unwrap();
+            }
+        }
+        assert_eq!(s.layout.justify_self, Some(AlignItems::SELF_END));
+        for key in ["alignContent", "justifyContent"] {
+            s.set(key, k("end")).unwrap();
+            assert_eq!(s.set(key, k("self-end")), Err(StyleError::InvalidValue));
+        }
+        assert_eq!(s.layout.align_content, AlignContent::END);
+        s.set("alignContent", k("normal")).unwrap();
+        assert_eq!(s.layout.align_content, AlignContent::NORMAL);
+        s.set("justifyContent", StyleValue::Null).unwrap();
+        assert_eq!(s.layout.justify_content, AlignContent::NORMAL);
+        // A grid keeps CSS's `normal`; other containers take `flex-start`.
+        s.set("display", k("grid")).unwrap();
+        let mut grid = s.layout.clone();
+        resolve_normal_alignment(&mut grid);
+        assert_eq!(grid.align_content, AlignContent::NORMAL);
+        assert_eq!(
+            s.set("gridTemplateColumns", k("[a] 40px [b")),
+            Err(StyleError::InvalidValue)
+        );
+        s.set("gridTemplateRows", k("[a] 40px [b] 1fr")).unwrap();
+        assert_eq!(s.layout.grid_template_row_names.len(), 3);
+        s.set("gridTemplateRows", StyleValue::Null).unwrap();
+        assert!(s.layout.grid_template_row_names.is_empty());
     }
 
     #[test]
     fn transform_origins() {
         let p = |s| TransformOrigin::parse(s).unwrap();
-        assert_eq!(p("top left").x, OriginLen::Fraction(0.0));
-        assert_eq!(p("top left").y, OriginLen::Fraction(0.0));
-        assert_eq!(p("bottom").y, OriginLen::Fraction(1.0));
-        assert_eq!(p("bottom").x, OriginLen::Fraction(0.5));
-        assert_eq!(p("10px 25%").x, OriginLen::Px(10.0));
-        assert_eq!(p("10px 25%").y, OriginLen::Fraction(0.25));
-        assert_eq!(p("right 5 3").z, 3.0);
-        assert_eq!(p("center top").y, OriginLen::Fraction(0.0));
-        assert_eq!(p("0 0").offset(100.0, 50.0), (-50.0, -25.0, 0.0));
+        assert_eq!(p("top left").x, relative(0.0));
+        assert_eq!(p("top left").y, relative(0.0));
+        assert_eq!(p("bottom").y, relative(1.0));
+        assert_eq!(p("bottom").x, relative(0.5));
+        assert_eq!(p("10px 25%").x, DefiniteLength::from(px(10.0)));
+        assert_eq!(p("10px 25%").y, relative(0.25));
+        assert_eq!(p("right 5 3").z, px(3.0));
+        assert_eq!(p("center top").y, relative(0.0));
+        assert_eq!(
+            p("0 0").offset(size(px(100.0), px(50.0))),
+            (point(px(-50.0), px(-25.0)), Points::ZERO)
+        );
         assert!(TransformOrigin::parse("sideways").is_none());
     }
 
@@ -2242,6 +2999,256 @@ mod tests {
         assert_eq!(s.layout.flex_basis, Dimension::length(0.0));
     }
 
+    /// Every order of `decls`.
+    fn permutations<T: Clone>(decls: &[T]) -> Vec<Vec<T>> {
+        if decls.len() <= 1 {
+            return vec![decls.to_vec()];
+        }
+        let mut out = Vec::new();
+        for i in 0..decls.len() {
+            let mut rest = decls.to_vec();
+            let first = rest.remove(i);
+            for mut tail in permutations(&rest) {
+                tail.insert(0, first.clone());
+                out.push(tail);
+            }
+        }
+        out
+    }
+
+    /// Checks the style of one style object with `decls` in every order:
+    /// as recorded, and replayed from the patch (over classes).
+    fn in_any_order(decls: &[(&str, StyleValue<'_>)], check: impl Fn(&Style)) {
+        for order in permutations(decls) {
+            let mut style = Style::default();
+            let mut patch = StylePatch::default();
+            for &(key, value) in &order {
+                patch.set(&mut style, key, value).unwrap();
+            }
+            let keys: Vec<_> = order.iter().map(|(k, _)| *k).collect();
+            println!("{keys:?}");
+            check(&style);
+            let mut replayed = Style::default();
+            patch.apply(&mut replayed);
+            check(&replayed);
+        }
+    }
+
+    #[test]
+    fn border_longhands_override_the_shorthand_in_any_order() {
+        use StyleValue::{Null, Number, Str};
+        in_any_order(
+            &[
+                ("borderTopWidth", Number(5.0)),
+                ("borderWidth", Number(2.0)),
+                ("borderLeftColor", Str("red")),
+                ("borderColor", Str("blue")),
+            ],
+            |s| {
+                assert_eq!(
+                    s.view.borders.widths.to_array().map(|w| w.0),
+                    [5.0, 2.0, 2.0, 2.0]
+                );
+                assert_eq!(s.layout.border.top, LengthPercentage::length(5.0));
+                assert_eq!(s.layout.border.left, LengthPercentage::length(2.0));
+                let (red, blue) = (Color(0xff00_00ff), Color(0x0000_ffff));
+                assert_eq!(s.view.borders.colors, [blue, blue, blue, red]);
+            },
+        );
+        // A null longhand is unset: the shorthand shows.
+        in_any_order(
+            &[("borderTopWidth", Null), ("borderWidth", Number(2.0))],
+            |s| assert_eq!(s.view.borders.widths.to_array().map(|w| w.0), [2.0; 4]),
+        );
+        // Without its shorthand, null still resets the longhand (a class's).
+        let mut s = Style::default();
+        s.set("borderTopWidth", Number(4.0)).unwrap();
+        StylePatch::default()
+            .set(&mut s, "borderTopWidth", Null)
+            .unwrap();
+        assert_eq!(s.view.borders.widths.top, Points::ZERO);
+    }
+
+    #[test]
+    fn edge_longhands_override_their_shorthands_in_any_order() {
+        use StyleValue::Number;
+        let len = LengthPercentageAuto::length;
+        in_any_order(
+            &[
+                ("marginTop", Number(1.0)),
+                ("marginVertical", Number(2.0)),
+                ("margin", Number(3.0)),
+                ("marginLeft", Number(4.0)),
+                ("marginHorizontal", Number(5.0)),
+            ],
+            |s| {
+                let m = s.layout.margin;
+                assert_eq!(
+                    [m.top, m.bottom, m.left, m.right],
+                    [len(1.0), len(2.0), len(4.0), len(5.0)]
+                );
+            },
+        );
+        let len = LengthPercentage::length;
+        in_any_order(
+            &[
+                ("paddingRight", Number(1.0)),
+                ("padding", Number(3.0)),
+                ("paddingVertical", Number(2.0)),
+            ],
+            |s| {
+                let p = s.layout.padding;
+                assert_eq!(
+                    [p.top, p.bottom, p.left, p.right],
+                    [len(2.0), len(2.0), len(3.0), len(1.0)]
+                );
+            },
+        );
+        in_any_order(&[("rowGap", Number(4.0)), ("gap", Number(8.0))], |s| {
+            assert_eq!(s.layout.gap.height, len(4.0));
+            assert_eq!(s.layout.gap.width, len(8.0));
+        });
+    }
+
+    #[test]
+    fn flex_and_grid_longhands_override_their_shorthands_in_any_order() {
+        use StyleValue::{Number, Str};
+        in_any_order(&[("flexGrow", Number(2.0)), ("flex", Number(1.0))], |s| {
+            assert_eq!(s.layout.flex_grow, 2.0);
+            assert_eq!(s.layout.flex_shrink, 1.0);
+            assert_eq!(s.layout.flex_basis, Dimension::length(0.0));
+        });
+        in_any_order(
+            &[
+                ("gridColumnStart", Number(2.0)),
+                ("gridColumn", Str("1 / 4")),
+            ],
+            |s| {
+                assert_eq!(
+                    Some(&s.layout.grid_column.start),
+                    grid::placement("2").as_ref()
+                );
+                assert_eq!(
+                    Some(&s.layout.grid_column.end),
+                    grid::placement("4").as_ref()
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn outline_style_none_hides_the_outline_in_any_order() {
+        use StyleValue::{Null, Number, Str};
+        in_any_order(
+            &[("outlineStyle", Str("none")), ("outlineWidth", Number(3.0))],
+            |s| assert!(!s.view.outline.is_visible()),
+        );
+        in_any_order(
+            &[
+                ("outlineStyle", Str("dashed")),
+                ("outlineWidth", Number(3.0)),
+            ],
+            |s| {
+                assert_eq!(s.view.outline.width, px(3.0));
+                assert_eq!(s.view.outline.style, BorderStyle::Dashed);
+            },
+        );
+        // A later style (inline over classes) showing it again gets the
+        // width back.
+        let mut s = Style::default();
+        s.set("outlineWidth", Number(3.0)).unwrap();
+        s.set("outlineStyle", Str("none")).unwrap();
+        s.set("outlineStyle", Null).unwrap();
+        assert_eq!(s.view.outline.width, px(3.0));
+    }
+
+    #[test]
+    fn border_style_none_hides_the_border_in_any_order() {
+        use StyleValue::{Null, Number, Str};
+        for none in ["none", "hidden"] {
+            in_any_order(
+                &[
+                    ("borderStyle", Str(none)),
+                    ("borderWidth", Number(3.0)),
+                    ("borderTopWidth", Number(4.0)),
+                    ("borderStartWidth", Number(5.0)),
+                ],
+                |s| {
+                    assert!(!s.view.borders.is_visible());
+                    assert_eq!(s.view.borders.widths.to_array(), [Points::ZERO; 4]);
+                    assert_eq!(s.layout.border.top, LengthPercentage::length(0.0));
+                    assert_eq!(s.layout.border.left, LengthPercentage::length(0.0));
+                    assert_eq!(s.logical.border_width, [None; 2]);
+                },
+            );
+        }
+        // A later style showing it again gets the widths back.
+        let mut s = Style::default();
+        s.set("borderWidth", Number(3.0)).unwrap();
+        s.set("borderEndWidth", Number(1.0)).unwrap();
+        s.set("borderStyle", Str("none")).unwrap();
+        s.set("borderStyle", Str("dashed")).unwrap();
+        assert_eq!(s.view.borders.widths.to_array(), [px(3.0); 4]);
+        assert_eq!(s.layout.border.right, LengthPercentage::length(3.0));
+        assert_eq!(s.logical.border_width, [None, Some(px(1.0))]);
+        assert_eq!(s.view.borders.style, BorderStyle::Dashed);
+        s.set("borderStyle", Str("hidden")).unwrap();
+        s.set("borderStyle", Null).unwrap();
+        assert_eq!(s.view.borders.widths.to_array(), [px(3.0); 4]);
+    }
+
+    #[test]
+    fn animation_keys_apply_in_any_order() {
+        use StyleValue::{Number, Str};
+        in_any_order(
+            &[
+                ("animationDuration", Number(500.0)),
+                ("animationIterationCount", Number(2.0)),
+                ("animationName", Str("spin")),
+                ("animationDelay", Str("0.1s")),
+                ("animationTimingFunction", Str("ease-in")),
+            ],
+            |s| {
+                let a = s.view.animation.unwrap();
+                assert_eq!(a.keyframes, Keyframes::Spin);
+                assert_eq!(a.duration, 500.0);
+                assert_eq!(a.iterations, Some(2));
+                assert_eq!(a.delay, 100.0);
+                assert_eq!(a.easing, [0.42, 0.0, 1.0, 1.0]);
+            },
+        );
+        // Without a name nothing runs.
+        in_any_order(&[("animationDuration", Number(500.0))], |s| {
+            assert_eq!(s.view.animation, None)
+        });
+        // Over a running (class) animation, the values change it.
+        let mut s = Style::default();
+        s.set("animationName", Str("ping")).unwrap();
+        s.set("animationDuration", Number(300.0)).unwrap();
+        s.set("animationName", Str("spin")).unwrap();
+        assert_eq!(s.view.animation.unwrap().duration, 300.0);
+    }
+
+    #[test]
+    fn transition_keys_apply_in_any_order() {
+        use StyleValue::{Number, Str};
+        in_any_order(
+            &[
+                ("transitionDuration", Number(300.0)),
+                ("transitionDelay", Number(50.0)),
+                ("transitionTimingFunction", Str("linear")),
+                ("transitionProperty", Str("opacity")),
+            ],
+            |s| {
+                let t = s.view.transition.unwrap();
+                assert_eq!(t.properties, TransitionProps(TransitionProps::OPACITY));
+                assert_eq!(t.duration, 300.0);
+                assert_eq!(t.delay, 50.0);
+                assert_eq!(t.easing, [0.0, 0.0, 1.0, 1.0]);
+            },
+        );
+    }
+
     #[test]
     fn corner_radii_override_the_shorthand_in_any_order() {
         let mut s = Style::default();
@@ -2249,21 +3256,21 @@ mod tests {
             .unwrap();
         s.set("borderRadius", StyleValue::Number(10.0)).unwrap();
         let r = s.view.radii();
-        assert_eq!(r.to_array(), [4.0, 10.0, 10.0, 10.0]);
+        assert_eq!(r.to_array(), [px(4.0), px(10.0), px(10.0), px(10.0)]);
         assert_eq!(r.shared(), None);
         s.set("borderTopLeftRadius", StyleValue::Null).unwrap();
-        assert_eq!(s.view.radii().shared(), Some(10.0));
+        assert_eq!(s.view.radii().shared(), Some(px(10.0)));
     }
 
     #[test]
     fn shared_radius_ignores_square_corners() {
         let r = CornerRadii {
-            top_left: 12.0,
-            top_right: 12.0,
+            top_left: px(12.0),
+            top_right: px(12.0),
             ..CornerRadii::default()
         };
-        assert_eq!(r.shared(), Some(12.0));
-        assert_eq!(CornerRadii::default().shared(), Some(0.0));
+        assert_eq!(r.shared(), Some(px(12.0)));
+        assert_eq!(CornerRadii::default().shared(), Some(px(0.0)));
         assert!(CornerRadii::default().is_zero());
     }
 
@@ -2271,18 +3278,18 @@ mod tests {
     fn radii_fit_the_box() {
         // 100 + 300 on a 200 wide box: everything scales by 0.5.
         let r = CornerRadii {
-            top_left: 100.0,
-            top_right: 300.0,
-            bottom_right: 0.0,
-            bottom_left: 0.0,
+            top_left: px(100.0),
+            top_right: px(300.0),
+            bottom_right: px(0.0),
+            bottom_left: px(0.0),
             continuous: false,
         }
-        .fit(200.0, 1000.0);
-        assert_eq!(r.to_array(), [50.0, 150.0, 0.0, 0.0]);
-        let fits = CornerRadii::all(10.0);
-        assert_eq!(fits.fit(100.0, 100.0), fits);
-        assert_eq!(fits.inset(4.0), CornerRadii::all(6.0));
-        assert_eq!(fits.inset(40.0), CornerRadii::all(0.0));
+        .fit(size(px(200.0), px(1000.0)));
+        assert_eq!(r.to_array(), [px(50.0), px(150.0), px(0.0), px(0.0)]);
+        let fits = CornerRadii::all(px(10.0));
+        assert_eq!(fits.fit(size(px(100.0), px(100.0))), fits);
+        assert_eq!(fits.inset(px(4.0)), CornerRadii::all(px(6.0)));
+        assert_eq!(fits.inset(px(40.0)), CornerRadii::all(px(0.0)));
     }
 
     #[test]
@@ -2291,14 +3298,14 @@ mod tests {
         assert!(!s.view.shadow.is_visible());
         s.set("shadowOpacity", StyleValue::Number(0.3)).unwrap();
         s.set("shadowRadius", StyleValue::Number(8.0)).unwrap();
-        s.set_shadow_offset(Some((0.0, 4.0)));
+        s.set_shadow_offset(Some(point(px(0.0), px(4.0))));
         assert!(s.view.shadow.is_visible());
-        assert_eq!(s.view.shadow.offset_y, 4.0);
+        assert_eq!(s.view.shadow.offset_y, px(4.0));
         s.set("shadowColor", StyleValue::Str("transparent"))
             .unwrap();
         assert!(!s.view.shadow.is_visible());
         s.set_shadow_offset(None);
-        assert_eq!(s.view.shadow.offset_y, -3.0);
+        assert_eq!(s.view.shadow.offset_y, px(-3.0));
     }
 
     #[test]
@@ -2329,6 +3336,67 @@ mod tests {
         );
         assert_eq!(
             s.set("fontStyle", StyleValue::Str("oblique")),
+            Err(StyleError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn mask_image_parses() {
+        let mut s = Style::default();
+        assert!(s.view.effects.is_none());
+        s.set(
+            "maskImage",
+            StyleValue::Str("linear-gradient(black 70%, transparent)"),
+        )
+        .unwrap();
+        let masks = &s.view.effects.as_ref().unwrap().mask_images;
+        assert_eq!(masks.len(), 1);
+        // `none`, and the null of a style that was taken off, both clear it.
+        s.set("maskImage", StyleValue::Str("none")).unwrap();
+        assert!(
+            s.view
+                .effects
+                .as_ref()
+                .is_none_or(|e| e.mask_images.is_empty())
+        );
+        s.set(
+            "maskImage",
+            StyleValue::Str("linear-gradient(black, transparent)"),
+        )
+        .unwrap();
+        s.set("maskImage", StyleValue::Null).unwrap();
+        assert!(
+            s.view
+                .effects
+                .as_ref()
+                .is_none_or(|e| e.mask_images.is_empty())
+        );
+        assert_eq!(
+            s.set("maskImage", StyleValue::Str("url(a.png)")),
+            Err(StyleError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn glass_effect_parses() {
+        let mut s = Style::default();
+        assert_eq!(s.view.glass_effect, GlassEffect::None);
+        s.set("glassEffect", StyleValue::Str("regular")).unwrap();
+        assert_eq!(s.view.glass_effect, GlassEffect::Regular);
+        s.set("glassEffect", StyleValue::Str("clear")).unwrap();
+        assert_eq!(s.view.glass_effect, GlassEffect::Clear);
+        // `none`, and the null of a style that was taken off, both clear it.
+        s.set("glassEffect", StyleValue::Str("none")).unwrap();
+        assert_eq!(s.view.glass_effect, GlassEffect::None);
+        s.set("glassEffect", StyleValue::Str("clear")).unwrap();
+        s.set("glassEffect", StyleValue::Null).unwrap();
+        assert_eq!(s.view.glass_effect, GlassEffect::None);
+        assert_eq!(
+            s.set("glassEffect", StyleValue::Str("frosted")),
+            Err(StyleError::InvalidValue)
+        );
+        assert_eq!(
+            s.set("glassEffect", StyleValue::Number(1.0)),
             Err(StyleError::InvalidValue)
         );
     }

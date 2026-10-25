@@ -382,6 +382,17 @@ pub(super) fn open(
     surface.invalidate();
 }
 
+/// A menu of the menu bar is open.
+pub(super) fn bar_open(surface: &Surface) -> bool {
+    matches!(
+        surface.chrome.open.borrow().as_ref(),
+        Some(Open {
+            kind: Kind::Bar(_),
+            ..
+        })
+    )
+}
+
 /// Closes the open menu, if any.
 pub(super) fn close(surface: &Surface) {
     let open = surface.chrome.open.borrow_mut().take();
@@ -457,6 +468,7 @@ pub(crate) fn popup_actions(surface: &Surface, items: Vec<LocalItem>) {
                     enabled,
                     checked: None,
                     role: None,
+                    when: nsh_core::keymap::When::Always,
                 })
             }
         })
@@ -522,6 +534,34 @@ fn open_submenu(open: &mut Open, level: usize, row: usize, keyboard: bool) {
     });
 }
 
+/// Chooses the item of the open menu at the end of `path` (the labels of
+/// the submenus on the way, then its own), as clicks on them do (`nsh test
+/// --target gpui`).
+#[cfg(feature = "dev")]
+pub(crate) fn choose_path(surface: &Rc<Surface>, path: &[String]) -> Result<(), String> {
+    for (level, wanted) in path.iter().enumerate() {
+        let row = {
+            let open = surface.chrome.open.borrow();
+            let open = open.as_ref().ok_or("no context menu is open")?;
+            let items = &open
+                .levels
+                .get(level)
+                .ok_or_else(|| format!("{wanted:?}'s submenu did not open"))?
+                .items;
+            items
+                .iter()
+                .position(|item| match item {
+                    MenuItem::Action(action) => label(action) == *wanted,
+                    MenuItem::Submenu { label, .. } => label == wanted,
+                    MenuItem::Separator => false,
+                })
+                .ok_or_else(|| format!("the menu has no item {wanted:?}"))?
+        };
+        activate(surface, level, row, false);
+    }
+    Ok(())
+}
+
 /// Item (`level`, `row`) is chosen: a submenu opens, an action closes the
 /// menu and is carried out.
 fn activate(surface: &Rc<Surface>, level: usize, row: usize, keyboard: bool) {
@@ -573,7 +613,7 @@ pub(super) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
         let plain = !m.ctrl && !m.alt && !m.shift && !m.meta;
         return event.vk == VK_F10
             && plain
-            && super::bar_shown(surface)
+            && super::bar_available(surface)
             && open_bar(surface, 0, true);
     }
     let (kind_bar, level, highlight, items) = {
@@ -684,7 +724,12 @@ pub(super) fn mnemonic(surface: &Rc<Surface>, pressed: &Shortcut) -> bool {
     let Key::Char(letter) = pressed.key else {
         return false;
     };
-    if !pressed.alt || pressed.ctrl || pressed.meta || pressed.shift || !super::bar_shown(surface) {
+    if !pressed.alt
+        || pressed.ctrl
+        || pressed.meta
+        || pressed.shift
+        || !super::bar_available(surface)
+    {
         return false;
     }
     let index = {
@@ -912,7 +957,7 @@ pub(super) fn bar(surface: &Rc<Surface>, _window: &mut Window, theme: &Theme) ->
 }
 
 /// Lays out the levels drawn for the first time.
-fn lay_out(surface: &Surface, open: &mut Open, window: &Window) {
+fn lay_out(surface: &Surface, open: &mut Open, window: &mut Window) {
     let viewport = window.viewport_size();
     let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
     for i in 0..open.levels.len() {
@@ -930,7 +975,15 @@ fn lay_out(surface: &Surface, open: &mut Open, window: &Window) {
             }
             Anchor::Bar(j) => {
                 let item = surface.chrome.bar_items.borrow().get(j).map(Rect::of);
-                Place::Below(item.unwrap_or_default())
+                match item {
+                    Some(item) if item.w > 0.0 => Place::Below(item),
+                    // The bar was hidden: it is placed in this frame, the
+                    // menu below it in the next.
+                    _ => {
+                        window.refresh();
+                        continue;
+                    }
+                }
             }
             Anchor::Item(l, r) => match open.levels.get(l).and_then(|l| l.geom.as_ref()) {
                 Some(g) => Place::Beside(g.row(r)),
@@ -1150,6 +1203,7 @@ mod tests {
             enabled,
             checked: None,
             role: None,
+            when: nsh_core::keymap::When::Always,
         })
     }
 

@@ -11,6 +11,7 @@ import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputConnectionWrapper;
@@ -35,6 +36,19 @@ final class InputBox extends FrameLayout implements Node {
     private int submit = SUBMIT_AND_BLUR;
     private boolean applying;
     private boolean configured;
+    /** The composition last seen (`onCompositionChange` reports its changes). */
+    private boolean inComposition;
+    private String composed = "";
+    /**
+     * A value JS set during a composition, applied when it ends: setting the
+     * text restarts the input method, which commits the pre-edit text.
+     */
+    private String pendingText;
+    private int pendingCount;
+    /** Inside the text watcher, where replacing the text would corrupt the IME's edit. */
+    private boolean watching;
+    /** `pasteBehavior` is `"insert"`: a paste inserts its text. */
+    boolean pasteInserts = true;
 
     InputBox(Context context, Mounter mounter, int id) {
         super(context);
@@ -42,6 +56,17 @@ final class InputBox extends FrameLayout implements Node {
         this.id = id;
         setBackground(decor);
         edit = new EditText(context) {
+            @Override
+            protected void onAttachedToWindow() {
+                super.onAttachedToWindow();
+                // A detached navigation screen may already have a text layout,
+                // with Editor's selection controllers disabled for lack of a window.
+                // Reapplying the current break strategy discards that layout so the
+                // next measure refreshes the controllers under the attached window,
+                // without replacing editable text or changing textIsSelectable.
+                if (getLayout() != null) setBreakStrategy(getBreakStrategy());
+            }
+
             @Override
             public boolean onKeyUp(int code, android.view.KeyEvent event) {
                 // The up of an Enter whose down submitted another field (focus
@@ -75,6 +100,35 @@ final class InputBox extends FrameLayout implements Node {
                     mounter.eventMap(InputBox.this.id, Native.SELECTION_CHANGE, new String[] {"start", "end"},
                             new Object[] {(double) start, (double) end});
                 }
+                // Called while the EditText is made, before `edit` is set.
+                reportCaret(this);
+            }
+
+            @Override
+            public boolean onTextContextMenuItem(int item) {
+                // Before Android 12 a paste comes here (the menu, Ctrl+V);
+                // from then on `receiveContent` hears it.
+                if (Build.VERSION.SDK_INT < 31
+                        && (item == android.R.id.paste || item == android.R.id.pasteAsPlainText)) {
+                    android.content.ClipboardManager board = (android.content.ClipboardManager)
+                            getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+                    android.content.ClipData clip = board == null ? null : board.getPrimaryClip();
+                    if (clip != null && pasted(clip) && !pasteInserts) return true;
+                }
+                return super.onTextContextMenuItem(item);
+            }
+
+            @Override
+            protected void onScrollChanged(int left, int top, int oldLeft, int oldTop) {
+                super.onScrollChanged(left, top, oldLeft, oldTop);
+                reportCaret(this);
+            }
+
+            @Override
+            protected void onSizeChanged(int w, int h, int oldW, int oldH) {
+                super.onSizeChanged(w, h, oldW, oldH);
+                // The text wraps again once laid out at the new size.
+                post(() -> reportCaret(this));
             }
         };
         edit.setBackground(new ColorDrawable(0));
@@ -93,10 +147,22 @@ final class InputBox extends FrameLayout implements Node {
                 // Reconfiguring (filters, input type) sets the same text
                 // again: only real edits count.
                 String text = s.toString();
-                if (text.equals(known)) return;
-                known = text;
-                InputBox.this.count++;
-                mounter.event(id, Native.CHANGE_TEXT, s.toString(), InputBox.this.count, 0, 0);
+                // A composition that starts or changes is reported before
+                // the text holding it, one that ends after the text it
+                // committed, as browsers order them.
+                boolean composingNow = BaseInputConnection.getComposingSpanStart(s) >= 0;
+                watching = true;
+                try {
+                    if (composingNow) syncComposition();
+                    if (!text.equals(known)) {
+                        known = text;
+                        InputBox.this.count++;
+                        mounter.event(id, Native.CHANGE_TEXT, text, InputBox.this.count, 0, 0);
+                    }
+                    if (!composingNow) syncComposition();
+                } finally {
+                    watching = false;
+                }
             }
         });
         edit.setOnEditorActionListener((v, action, event) -> {
@@ -113,6 +179,12 @@ final class InputBox extends FrameLayout implements Node {
             return true;
         });
         edit.setOnFocusChangeListener((v, focused) -> {
+            if (!focused) {
+                // A composition does not outlive the focus: what was composed
+                // stays, committed (the keyboard may not say so).
+                edit.clearComposingText();
+                syncComposition();
+            }
             mounter.inputFocused(this, focused);
             mounter.reportState(id, Mounter.STATE_FOCUSED, focused);
             if (mounter.wants(id, focused ? Native.FOCUS : Native.BLUR)) {
@@ -120,6 +192,82 @@ final class InputBox extends FrameLayout implements Node {
             }
         });
         addView(edit, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+        if (Build.VERSION.SDK_INT >= 31) {
+            // Pastes and keyboards' images (GIFs, stickers) come here; the
+            // types tell keyboards that images are welcome.
+            edit.setOnReceiveContentListener(new String[] {"image/*"}, this::receiveContent);
+        }
+    }
+
+    /**
+     * A paste or a keyboard's content (Android 12 on): reported (`onPaste`), and
+     * its text left to the EditText while `pasteBehavior` inserts it. Images and
+     * files are never inserted.
+     */
+    @android.annotation.TargetApi(31)
+    private android.view.ContentInfo receiveContent(View view, android.view.ContentInfo payload) {
+        int source = payload.getSource();
+        if (source != android.view.ContentInfo.SOURCE_CLIPBOARD
+                && source != android.view.ContentInfo.SOURCE_INPUT_METHOD) return payload;
+        // Without a listener a paste that inserts is the EditText's own.
+        if (!pasted(payload.getClip()) && pasteInserts) return payload;
+        if (!pasteInserts) return null;
+        // The text goes on to the EditText; what else there was is consumed.
+        android.content.ClipData clip = payload.getClip();
+        android.content.ClipData text = null;
+        for (int i = 0; i < clip.getItemCount(); i++) {
+            android.content.ClipData.Item item = clip.getItemAt(i);
+            if (item.getUri() != null) continue;
+            if (text == null) text = new android.content.ClipData(clip.getDescription(), item);
+            else text.addItem(item);
+        }
+        return text == null ? null : new android.view.ContentInfo.Builder(payload).setClip(text).build();
+    }
+
+    /**
+     * Reports what {@code clip} holds (`onPaste`), if the app listens: its text,
+     * its images' bytes (read from their content URIs as the user pastes) and local
+     * files' URLs. True when it reported.
+     */
+    private boolean pasted(android.content.ClipData clip) {
+        if (!mounter.wants(id, Native.PASTE)) return false;
+        StringBuilder text = new StringBuilder();
+        java.util.ArrayList<byte[]> images = new java.util.ArrayList<>();
+        java.util.ArrayList<String> uris = new java.util.ArrayList<>();
+        android.content.ContentResolver resolver = getContext().getContentResolver();
+        for (int i = 0; i < clip.getItemCount(); i++) {
+            android.content.ClipData.Item item = clip.getItemAt(i);
+            android.net.Uri uri = item.getUri();
+            if (uri == null) {
+                CharSequence t = item.coerceToText(getContext());
+                if (t != null) text.append(t);
+                continue;
+            }
+            if ("file".equals(uri.getScheme())) {
+                uris.add(uri.toString());
+                continue;
+            }
+            String type = resolver.getType(uri);
+            if (type != null && type.startsWith("image/")) {
+                try (java.io.InputStream in = resolver.openInputStream(uri)) {
+                    if (in != null) images.add(readAll(in));
+                } catch (java.io.IOException | SecurityException e) {
+                    android.util.Log.w("nsh", "a pasted image could not be read: " + e);
+                }
+            } else {
+                CharSequence t = item.coerceToText(getContext());
+                if (t != null) text.append(t);
+            }
+        }
+        mounter.paste(id, text.toString(), images.toArray(new byte[0][]), uris.toArray(new String[0]));
+        return true;
+    }
+
+    private static byte[] readAll(java.io.InputStream in) throws java.io.IOException {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buffer = new byte[64 * 1024];
+        for (int n; (n = in.read(buffer)) > 0; ) out.write(buffer, 0, n);
+        return out.toByteArray();
     }
 
     void configure(float fontSizeDp, int weight, boolean italic, int color, String family, float letterSpacingDp,
@@ -213,11 +361,78 @@ final class InputBox extends FrameLayout implements Node {
         if (submit == SUBMIT_AND_BLUR) blur();
     }
 
+    /** The caret as last reported (`onCaretMove`): x, y, width, height in dp. */
+    private final float[] caret = new float[4];
+
+    /**
+     * `onCaretMove` while the input edits, if its caret moved: the caret at the
+     * selection's end, in the input's coordinates (dp; the EditText's padding,
+     * gravity and scrolling applied).
+     */
+    private void reportCaret(android.widget.TextView view) {
+        if (mounter == null || !mounter.wants(id, Native.CARET_MOVE) || !view.hasFocus()) return;
+        android.text.Layout layout = view.getLayout();
+        int end = view.getSelectionEnd();
+        if (layout == null || end < 0) return;
+        int line = layout.getLineForOffset(end);
+        float d = mounter.density;
+        // The EditText sits in the container's padding (the content box).
+        float left = view.getLeft() + view.getTotalPaddingLeft() - view.getScrollX();
+        float top = view.getTop() + view.getTotalPaddingTop() - view.getScrollY();
+        float[] now = {
+            (left + layout.getPrimaryHorizontal(end)) / d,
+            (top + layout.getLineTop(line)) / d,
+            // The cursor drawable is 2dp wide (`selectionColor`'s too).
+            2,
+            (layout.getLineBottom(line) - layout.getLineTop(line)) / d,
+        };
+        if (java.util.Arrays.equals(now, caret)) return;
+        System.arraycopy(now, 0, caret, 0, 4);
+        mounter.eventMap(id, Native.CARET_MOVE, new String[] {"caretX", "caretY", "caretWidth", "caretHeight"},
+                new Object[] {(double) now[0], (double) now[1], (double) now[2], (double) now[3]});
+    }
+
     /** `onKeyPress`. */
     private void key(String key) {
         if (mounter.wants(id, Native.KEY_PRESS)) {
             mounter.eventMap(id, Native.KEY_PRESS, new String[] {"key"}, new Object[] {key});
         }
+    }
+
+    /**
+     * Reports a change of the composition (`onCompositionChange`) and applies
+     * the value JS set during it once it ends. Read from the composing span
+     * after every edit rather than from the connection's calls: keyboards
+     * start, change and end compositions in many ways (`setComposingText`,
+     * `setComposingRegion`, commits, batch edits, focus changes).
+     */
+    private void syncComposition() {
+        Editable text = edit.getText();
+        int start = text == null ? -1 : BaseInputConnection.getComposingSpanStart(text);
+        int end = text == null ? -1 : BaseInputConnection.getComposingSpanEnd(text);
+        boolean now = start >= 0 && end >= 0 && start != end;
+        String composedNow = now ? text.subSequence(Math.min(start, end), Math.max(start, end)).toString() : "";
+        if (now == inComposition && composedNow.equals(composed)) return;
+        inComposition = now;
+        composed = composedNow;
+        if (mounter.wants(id, Native.COMPOSITION_CHANGE)) {
+            mounter.eventMap(id, Native.COMPOSITION_CHANGE, new String[] {"composing", "text"},
+                    new Object[] {now, composedNow});
+        }
+        if (!now && pendingText != null) {
+            // Not from inside the text watcher: the edit that ended the
+            // composition is still in progress there.
+            if (watching) post(this::applyPending);
+            else applyPending();
+        }
+    }
+
+    /** The value JS set during the composition, unless the user typed since (or composes again). */
+    private void applyPending() {
+        if (inComposition || pendingText == null) return;
+        String text = pendingText;
+        pendingText = null;
+        setValue(text, pendingCount);
     }
 
     /**
@@ -238,13 +453,24 @@ final class InputBox extends FrameLayout implements Node {
             if (text.length() > before) key(text.subSequence(text.length() - 1, text.length()).toString());
             else if (text.length() < before) key("Backspace");
             composing = text;
-            return super.setComposingText(text, position);
+            boolean done = super.setComposingText(text, position);
+            syncComposition();
+            return done;
+        }
+
+        @Override
+        public boolean setComposingRegion(int start, int end) {
+            boolean done = super.setComposingRegion(start, end);
+            syncComposition();
+            return done;
         }
 
         @Override
         public boolean finishComposingText() {
             composing = null;
-            return super.finishComposingText();
+            boolean done = super.finishComposingText();
+            syncComposition();
+            return done;
         }
 
         @Override
@@ -261,13 +487,30 @@ final class InputBox extends FrameLayout implements Node {
                 submit();
                 return true;
             }
-            return super.commitText(text, position);
+            boolean done = super.commitText(text, position);
+            syncComposition();
+            return done;
         }
 
         @Override
         public boolean deleteSurroundingText(int before, int after) {
             if (before > 0 || after > 0) key("Backspace");
-            return super.deleteSurroundingText(before, after);
+            boolean done = super.deleteSurroundingText(before, after);
+            syncComposition();
+            return done;
+        }
+
+        @Override
+        public boolean endBatchEdit() {
+            boolean more = super.endBatchEdit();
+            syncComposition();
+            return more;
+        }
+
+        @Override
+        public void closeConnection() {
+            super.closeConnection();
+            syncComposition();
         }
     }
 
@@ -291,8 +534,19 @@ final class InputBox extends FrameLayout implements Node {
         }
     }
 
-    /** Sets the text from JS unless the user typed since JS saw `count`. */
+    /**
+     * Sets the text from JS unless the user typed since JS saw `count`. During
+     * a composition the newest value waits for its end (see
+     * {@link #syncComposition}), where `count` is checked again.
+     */
     void setValue(String text, int count) {
+        if (inComposition) {
+            pendingText = text;
+            pendingCount = count;
+            return;
+        }
+        // A newer value replaces one still waiting for the composition's end.
+        pendingText = null;
         if (count != this.count || text.contentEquals(edit.getText())) return;
         applying = true;
         known = text;

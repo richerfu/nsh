@@ -1,5 +1,64 @@
 //! Native-plane inversion and surface-relative window geometry.
 
+use nsh_core::{Bounds, Point, Points, Size as CoreSize};
+
+/// Logical rectangle in vp (points).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Rect {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+}
+
+impl From<Bounds<Points>> for Rect {
+    fn from(b: Bounds<Points>) -> Self {
+        Self {
+            x: b.origin.x.0,
+            y: b.origin.y.0,
+            width: b.size.width.0,
+            height: b.size.height.0,
+        }
+    }
+}
+
+impl From<Rect> for Bounds<Points> {
+    fn from(r: Rect) -> Self {
+        Bounds::new(
+            Point::new(Points(r.x), Points(r.y)),
+            CoreSize::new(Points(r.width), Points(r.height)),
+        )
+    }
+}
+
+/// Logical size in vp (points).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Size {
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+}
+
+impl Size {
+    pub(crate) const fn new(width: f32, height: f32) -> Self {
+        Self { width, height }
+    }
+}
+
+impl From<CoreSize<Points>> for Size {
+    fn from(s: CoreSize<Points>) -> Self {
+        Self {
+            width: s.width.0,
+            height: s.height.0,
+        }
+    }
+}
+
+impl From<Size> for CoreSize<Points> {
+    fn from(s: Size) -> Self {
+        Self::new(Points(s.width), Points(s.height))
+    }
+}
+
 /// One window-space rectangle in physical pixels.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct WindowRect {

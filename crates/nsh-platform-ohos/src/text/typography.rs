@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use nsh_core::{AttributedText, Color, Size, TextAlign, TextEngine, TextLayout};
+use nsh_core::{AttributedText, Color, Point, Points, Size, TextAlign, TextEngine, TextLayout};
 use ohos_drawing_binding::{
     Bitmap, BitmapFormat, Canvas, FontCollection, FontSlant, FontStyle, FontWeight, FontWidth,
     TextDirection, TextStyle, Typography, TypographyBuilder, TypographyStyle,
@@ -28,7 +28,7 @@ pub(crate) struct RasterText {
     pub(crate) scale: f32,
     pub(crate) lines: Vec<nsh_core::TextLine>,
     pub(crate) links: Vec<(nsh_core::TextLink, Vec<[f32; 4]>)>,
-    pub(crate) attachments: Vec<Option<(f32, f32)>>,
+    pub(crate) attachments: Vec<Option<Point<Points>>>,
     pub(crate) exhausted: bool,
     pub(crate) selection: Option<crate::text::selection::layout::Layout>,
     pub(crate) selection_color: Option<Color>,
@@ -85,7 +85,7 @@ impl TextEngine for OhosTextEngine {
             .downcast_ref::<RasterText>()
             .map_or_else(Vec::new, |raster| raster.lines.clone())
     }
-    fn attachments(&self, layout: &TextLayout) -> Vec<Option<(f32, f32)>> {
+    fn attachments(&self, layout: &TextLayout) -> Vec<Option<Point<Points>>> {
         layout
             .0
             .downcast_ref::<RasterText>()
@@ -186,11 +186,11 @@ impl TextEngine for OhosTextEngine {
             if let Some(shadow) = text.shadow {
                 style.add_shadow(&ohos_drawing_binding::TextShadow::new(
                     argb(shadow.color),
-                    &ohos_drawing_binding::Point::new(shadow.offset_x, shadow.offset_y),
-                    shadow.radius as f64,
+                    &ohos_drawing_binding::Point::new(shadow.offset_x.0, shadow.offset_y.0),
+                    shadow.radius.0 as f64,
                 ));
             }
-            style.set_font_size(span.style.font_size as f64);
+            style.set_font_size(span.style.font_size.0 as f64);
             style.set_font_style(FontStyle::new(
                 FontWeight::from_css(span.style.font_weight),
                 FontWidth::Normal,
@@ -200,7 +200,7 @@ impl TextEngine for OhosTextEngine {
                     FontSlant::Normal
                 },
             ));
-            style.set_letter_spacing(span.style.letter_spacing as f64);
+            style.set_letter_spacing(span.style.letter_spacing.0 as f64);
             for tag in span.style.font_variant.tags() {
                 style.add_font_feature(tag, 1);
             }
@@ -210,10 +210,11 @@ impl TextEngine for OhosTextEngine {
                     style.set_font_families(&[&family]);
                 }
             }
-            if span.style.line_height > 0.0
-                && span.style.font_size > 0.0
-                && let Err(error) = style
-                    .set_font_height(span.style.line_height as f64 / span.style.font_size as f64)
+            if span.style.line_height.0 > 0.0
+                && span.style.font_size.0 > 0.0
+                && let Err(error) = style.set_font_height(
+                    span.style.line_height.0 as f64 / span.style.font_size.0 as f64,
+                )
             {
                 log::warn!("OHOS text line height: {error}");
             }
@@ -228,8 +229,8 @@ impl TextEngine for OhosTextEngine {
                 builder.add_text(&String::from_utf16_lossy(&utf16[start..at]));
                 if let Err(error) =
                     builder.add_placeholder(&ohos_drawing_binding::PlaceholderSpan {
-                        width: attachment.width as f64,
-                        height: attachment.height as f64,
+                        width: attachment.width.0 as f64,
+                        height: attachment.height.0 as f64,
                         // The drawing ABI's above-baseline/alphabetic alignment
                         // preserves the existing inline attachment placement.
                         alignment: ohos_drawing_binding::PlaceholderAlignment::AboveBaseline.into(),
@@ -259,17 +260,18 @@ impl TextEngine for OhosTextEngine {
         }
     }
 
-    fn measure(&self, prepared: &Prepared, max_width: Option<f32>) -> Size {
+    fn measure(&self, prepared: &Prepared, max_width: Option<Points>) -> Size<Points> {
         let mut paragraph = prepared.paragraph.borrow_mut();
         let width = if prepared.no_wrap { None } else { max_width };
-        paragraph.layout(width.unwrap_or(1_000_000.0).max(0.0) as f64);
+        paragraph.layout(width.map_or(1_000_000.0, |w| w.0).max(0.0) as f64);
         Size::new(
-            paragraph.longest_line().ceil() as f32,
-            paragraph.height().ceil() as f32,
+            Points(paragraph.longest_line().ceil() as f32),
+            Points(paragraph.height().ceil() as f32),
         )
     }
 
-    fn layout(&self, prepared: &Prepared, size: Size) -> TextLayout {
+    fn layout(&self, prepared: &Prepared, size: Size<Points>) -> TextLayout {
+        let size = crate::render::geometry::Size::from(size);
         let mut paragraph = prepared.paragraph.borrow_mut();
         paragraph.layout(if prepared.no_wrap {
             1_000_000.0
@@ -307,14 +309,14 @@ impl TextEngine for OhosTextEngine {
                 text: String::new(),
                 start: line.start_index as u32,
                 end: line.end_index as u32,
-                x: line.x as f32,
-                y: line.y as f32,
-                width: line.width as f32,
-                height: line.height as f32,
-                ascender: line.ascender as f32,
-                descender: line.descender as f32,
-                cap_height: line.cap_height as f32,
-                x_height: line.x_height as f32,
+                x: Points(line.x as f32),
+                y: Points(line.y as f32),
+                width: Points(line.width as f32),
+                height: Points(line.height as f32),
+                ascender: Points(line.ascender as f32),
+                descender: Points(line.descender as f32),
+                cap_height: Points(line.cap_height as f32),
+                x_height: Points(line.x_height as f32),
             })
             .collect();
         raster.links = prepared
@@ -332,7 +334,7 @@ impl TextEngine for OhosTextEngine {
             .into_iter()
             .map(|rect| {
                 (rect[3] > rect[1] && rect[1] < size.height && rect[0] < size.width)
-                    .then_some((rect[0], rect[1]))
+                    .then_some(Point::new(Points(rect[0]), Points(rect[1])))
             })
             .collect();
         if width > 0 && height > 0 {

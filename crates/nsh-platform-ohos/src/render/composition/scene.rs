@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
-use nsh_core::{Matrix, Size, ViewKind};
+use nsh_core::{Matrix, ViewKind};
 use ohos_arkui_binding::types::advanced::NodeDirtyFlag;
 use ohos_drawing_binding::{Bitmap, BitmapFormat, Canvas};
 
@@ -15,6 +15,7 @@ use crate::render::{
         geometry::{Bounds, requires_scene},
         worker::SceneShared,
     },
+    geometry::Size,
     node::{Error, Node, Result},
 };
 

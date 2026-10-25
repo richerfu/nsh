@@ -1,7 +1,7 @@
 //! `<canvas>` drawings: what a `draw` callback recorded through the 2D
 //! context (an HTML Canvas 2D subset), decoded in Rust into an immutable
 //! list of operations that platforms replay natively (CGContext, Android
-//! Canvas). Numbers may be native values ([`Num::Slot`]): the platform
+//! Canvas). Numbers may be animated values ([`Num::Slot`]): the platform
 //! reads them while replaying, so animations redraw on the UI thread
 //! without JS.
 
@@ -11,22 +11,27 @@ mod hit;
 use std::sync::Arc;
 
 pub use self::{
-    damage::{Damage, DamageScan},
+    damage::{Damage, DamageScan, first_animated, prefix_path_needed},
     hit::{point_in_path, point_in_stroke},
 };
 use crate::{
-    js::{canvas::*, ops::JsOps},
+    geometry::{Bounds, Corners, Percentage, Point, Points, Radians, ScaledPixels, Size, px},
+    js::{
+        canvas::*,
+        host::{HostInput, HostList},
+        ops::{JsOps, OpArg, OpReader, OpsError},
+    },
     style::{Color, FontVariant},
-    ui::PropEnum,
+    ui::{PropEnum, TsTypes},
 };
 
-/// A number of a drawing: a constant or the value of native value slot
+/// A number of a drawing: a constant or the value of animated value slot
 /// `n` of the drawing ([`Drawing::slots`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Num {
     /// A constant.
     Const(f32),
-    /// The current value of a native value.
+    /// The current value of an animated value.
     Slot(u16),
 }
 
@@ -166,11 +171,30 @@ pub enum LineJoin {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GradientShape {
     /// `createLinearGradient(x0, y0, x1, y1)`.
-    Linear([f32; 4]),
+    Linear {
+        /// Where it starts (`x0`, `y0`).
+        start: Point<Points>,
+        /// Where it ends (`x1`, `y1`).
+        end: Point<Points>,
+    },
     /// `createRadialGradient(x0, y0, r0, x1, y1, r1)`.
-    Radial([f32; 6]),
+    Radial {
+        /// The center of the start circle (`x0`, `y0`).
+        start: Point<Points>,
+        /// Its radius (`r0`).
+        start_radius: Points,
+        /// The center of the end circle (`x1`, `y1`).
+        end: Point<Points>,
+        /// Its radius (`r1`).
+        end_radius: Points,
+    },
     /// `createConicGradient(startAngle, x, y)`.
-    Conic([f32; 3]),
+    Conic {
+        /// Where it starts, clockwise from the x axis.
+        start_angle: Radians,
+        /// What it turns around.
+        center: Point<Points>,
+    },
 }
 
 /// A `CanvasGradient`.
@@ -179,7 +203,7 @@ pub struct CanvasGradient {
     /// Where it runs.
     pub shape: GradientShape,
     /// Offsets (0..1, ascending) and colors.
-    pub stops: Vec<(f32, Color)>,
+    pub stops: Vec<(Percentage, Color)>,
 }
 
 impl CanvasGradient {
@@ -190,30 +214,42 @@ impl CanvasGradient {
         }
     }
 
-    /// Along the line from (`x0`, `y0`) to (`x1`, `y1`)
-    /// (`createLinearGradient`).
-    pub fn linear(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
-        Self::new(GradientShape::Linear([x0, y0, x1, y1]))
+    /// Along the line from `start` to `end` (`createLinearGradient`).
+    pub fn linear(start: Point<Points>, end: Point<Points>) -> Self {
+        Self::new(GradientShape::Linear { start, end })
     }
 
-    /// From the circle at (`x0`, `y0`) of radius `r0` to the one at (`x1`,
-    /// `y1`) of radius `r1` (`createRadialGradient`).
-    pub fn radial(x0: f32, y0: f32, r0: f32, x1: f32, y1: f32, r1: f32) -> Self {
-        Self::new(GradientShape::Radial([x0, y0, r0, x1, y1, r1]))
+    /// From the circle around `start` of `start_radius` to the one around
+    /// `end` of `end_radius` (`createRadialGradient`).
+    pub fn radial(
+        start: Point<Points>,
+        start_radius: Points,
+        end: Point<Points>,
+        end_radius: Points,
+    ) -> Self {
+        Self::new(GradientShape::Radial {
+            start,
+            start_radius,
+            end,
+            end_radius,
+        })
     }
 
-    /// Around (`x`, `y`), from `start_angle` (radians, clockwise from the x
-    /// axis; `createConicGradient`).
-    pub fn conic(start_angle: f32, x: f32, y: f32) -> Self {
-        Self::new(GradientShape::Conic([start_angle, x, y]))
+    /// Around `center`, from `start_angle` (clockwise from the x axis;
+    /// `createConicGradient`).
+    pub fn conic(start_angle: Radians, center: Point<Points>) -> Self {
+        Self::new(GradientShape::Conic {
+            start_angle,
+            center,
+        })
     }
 
     /// Adds `color` at `offset` (0..1, clamped; `addColorStop`): stops
     /// apply in offset order, equal ones in the order added.
-    pub fn add_color_stop(mut self, offset: f32, color: Color) -> Self {
-        let offset = offset.clamp(0.0, 1.0);
+    pub fn add_color_stop(mut self, offset: Percentage, color: impl Into<crate::Hsla>) -> Self {
+        let offset = offset.clamp(Percentage(0.0), Percentage(1.0));
         let at = self.stops.partition_point(|(o, _)| *o <= offset);
-        self.stops.insert(at, (offset, color));
+        self.stops.insert(at, (offset, Color::from(color.into())));
         self
     }
 }
@@ -223,7 +259,7 @@ impl CanvasGradient {
 pub enum Paint {
     /// A color.
     Color(Color),
-    /// The current value of a native value interpolating colors.
+    /// The current value of an animated value interpolating colors.
     Slot(u16),
     /// A gradient.
     Gradient(Arc<CanvasGradient>),
@@ -301,8 +337,8 @@ impl Composite {
 /// `font` (the CSS shorthand).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CanvasFont {
-    /// Size in points.
-    pub size: f32,
+    /// Size.
+    pub size: Points,
     /// 100..900.
     pub weight: u16,
     /// Italic.
@@ -320,7 +356,7 @@ impl Default for CanvasFont {
     /// The canvas default, `10px sans-serif`.
     fn default() -> Self {
         Self {
-            size: 10.0,
+            size: px(10.0),
             weight: 400,
             italic: false,
             family: None,
@@ -335,7 +371,7 @@ impl CanvasFont {
     /// it is invalid (canvas keeps the previous font then).
     pub fn parse(s: &str) -> Option<CanvasFont> {
         let mut font = CanvasFont {
-            size: 0.0,
+            size: Points::ZERO,
             ..CanvasFont::default()
         };
         let mut rest = s.trim();
@@ -379,8 +415,8 @@ impl CanvasFont {
     }
 }
 
-/// `14px` / `14px/1.2` / `1.5rem` / `12pt`: the size in points.
-fn font_size(word: &str) -> Option<f32> {
+/// `14px` / `14px/1.2` / `1.5rem` / `12pt`: the size.
+fn font_size(word: &str) -> Option<Points> {
     let word = word.split('/').next()?;
     let (num, scale) = if let Some(n) = word.strip_suffix("px") {
         (n, 1.0)
@@ -392,7 +428,7 @@ fn font_size(word: &str) -> Option<f32> {
     num.parse::<f32>()
         .ok()
         .filter(|v| *v > 0.0)
-        .map(|v| v * scale)
+        .map(|v| Points(v * scale))
 }
 
 impl CanvasFont {
@@ -420,7 +456,11 @@ impl CanvasFont {
 }
 
 /// The width of `text` on one line in `font` (canvas `measureText`).
-pub fn measure_line(engine: &impl crate::text::TextEngine, font: &CanvasFont, text: &str) -> f32 {
+pub fn measure_line(
+    engine: &impl crate::text::TextEngine,
+    font: &CanvasFont,
+    text: &str,
+) -> Points {
     let mut attributed = crate::text::AttributedText {
         no_wrap: true,
         max_lines: 1,
@@ -428,10 +468,65 @@ pub fn measure_line(engine: &impl crate::text::TextEngine, font: &CanvasFont, te
     };
     attributed.push(text, font.text_style());
     if attributed.text.is_empty() {
-        return 0.0;
+        return Points::ZERO;
     }
     let prepared = engine.prepare(&attributed);
     engine.measure(&prepared, None).width
+}
+
+/// How `text` sits on one line in a canvas font ([`line_metrics`]): its
+/// width, and the font's extent above and below the baseline, so a
+/// component can center text in a box or place a caret over it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
+pub struct TextMetrics {
+    /// The advance width (canvas `measureText(text).width`).
+    pub width: Points,
+    /// Above the baseline (`fontBoundingBoxAscent`).
+    pub ascent: Points,
+    /// Below the baseline (`fontBoundingBoxDescent`).
+    pub descent: Points,
+    /// The line's height: ascent, descent and the font's leading.
+    pub height: Points,
+}
+
+/// [`TextMetrics`] of `text` on one line in `font`, by `engine`. Engines
+/// that do not report their lines give the em box's split of the size
+/// (0.8 above the baseline, 0.2 below) and the measured height.
+pub fn line_metrics(
+    engine: &impl crate::text::TextEngine,
+    font: &CanvasFont,
+    text: &str,
+) -> TextMetrics {
+    let mut attributed = crate::text::AttributedText {
+        no_wrap: true,
+        max_lines: 1,
+        ..Default::default()
+    };
+    // An empty line still has the font's extent.
+    attributed.push(if text.is_empty() { " " } else { text }, font.text_style());
+    let prepared = engine.prepare(&attributed);
+    let size = engine.measure(&prepared, None);
+    let width = if text.is_empty() {
+        Points::ZERO
+    } else {
+        size.width
+    };
+    let layout = engine.layout(&prepared, size);
+    match engine.lines(&layout).first() {
+        Some(line) => TextMetrics {
+            width,
+            ascent: line.ascender,
+            descent: line.descender,
+            height: line.height,
+        },
+        None => TextMetrics {
+            width,
+            ascent: Points(font.size.0 * 0.8),
+            descent: Points(font.size.0 * 0.2),
+            height: size.height,
+        },
+    }
 }
 
 /// Where text sits horizontally relative to its x (`textAlign`).
@@ -552,7 +647,7 @@ pub enum CanvasOp {
     MiterLimit(f32),
     /// `setLineDash(segments)`: an odd count is repeated, as in canvas.
     #[op(code = CV_LINE_DASH, with = crate::js::canvas::line_dash)]
-    LineDash(Arc<[f32]>),
+    LineDash(Arc<[Points]>),
     /// `lineDashOffset`: where the dash pattern starts.
     #[op(code = CV_LINE_DASH_OFFSET, property = "lineDashOffset", initial = "0")]
     LineDashOffset(Num),
@@ -572,10 +667,10 @@ pub enum CanvasOp {
     ShadowColor(Color),
     /// `shadowBlur`: shadow blur in points.
     #[op(code = CV_SHADOW_BLUR, property = "shadowBlur", initial = "0", min = 0.0)]
-    ShadowBlur(f32),
+    ShadowBlur(Points),
     /// `shadowOffsetX` / `shadowOffsetY`.
     #[op(code = CV_SHADOW_OFFSET)]
-    ShadowOffset(f32, f32),
+    ShadowOffset(Point<Points>),
     /// `font`: CSS `font` shorthand, e.g. `"600 14px Inter"` (sizes in px, pt
     /// or rem).
     #[op(code = CV_FONT, property = "font", initial = "\"10px sans-serif\"")]
@@ -606,7 +701,7 @@ pub enum CanvasOp {
         /// Its baseline.
         y: Num,
         /// Narrowed to fit.
-        max_width: Option<f32>,
+        max_width: Option<Points>,
     },
     /// `strokeText(text, x, y, maxWidth?)`.
     #[op(code = CV_STROKE_TEXT)]
@@ -618,18 +713,36 @@ pub enum CanvasOp {
         /// Its baseline.
         y: Num,
         /// Narrowed to fit.
-        max_width: Option<f32>,
+        max_width: Option<Points>,
     },
     /// `drawImage(image, [sx, sy, sw, sh,] dx, dy, dw, dh)`.
     #[op(code = CV_DRAW_IMAGE)]
     DrawImage {
         /// The image.
         image: CanvasImage,
-        /// The part of it, in image pixels.
-        source: Option<[f32; 4]>,
+        /// The part of it, in the image's pixels.
+        source: Option<Bounds<ScaledPixels>>,
         /// Where it goes.
         dest: [Num; 4],
     },
+}
+
+impl CanvasOp {
+    /// Whether it paints (rather than setting the state: transforms,
+    /// styles, paths, clips).
+    pub fn paints(&self) -> bool {
+        matches!(
+            self,
+            CanvasOp::Fill(..)
+                | CanvasOp::Stroke(_)
+                | CanvasOp::FillRect(_)
+                | CanvasOp::StrokeRect(_)
+                | CanvasOp::ClearRect(_)
+                | CanvasOp::FillText { .. }
+                | CanvasOp::StrokeText { .. }
+                | CanvasOp::DrawImage { .. }
+        )
+    }
 }
 
 /// One `draw` of a canvas.
@@ -637,13 +750,130 @@ pub enum CanvasOp {
 pub struct Drawing {
     /// The operations, in order.
     pub ops: Vec<CanvasOp>,
-    /// The native values the operations read, by slot.
-    pub slots: Vec<nsh_animation::NodeId>,
+    /// The animated values the operations read, by slot.
+    pub slots: Vec<crate::animation::NodeId>,
+    /// The parts of what it draws that are elements of their own to
+    /// assistive technologies and UI tests ([`CanvasNode`]), in reading
+    /// order.
+    pub nodes: Vec<CanvasNode>,
+    /// The operations whose value is the canvas view's style rather than
+    /// one of their own, by index in `ops`: the core gives them the
+    /// view's paint properties ([`crate::style::PaintStyle`], inherited
+    /// from the views around it) before a platform gets the drawing
+    /// ([`Drawing::painted`]), so what a Rust component draws follows the
+    /// app's `fill-*` / `stroke-*` classes and the appearance without
+    /// being recorded again.
+    pub view_paints: Vec<(u32, ViewPaint)>,
+}
+
+/// An operation of a [`Drawing`] that takes its value from the canvas
+/// view's paint properties ([`Drawing::view_paints`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ViewPaint {
+    /// `fillStyle` is the view's `fill`; where nothing sets one, this.
+    Fill(crate::style::SvgPaint),
+    /// `strokeStyle` is the view's `stroke`; where nothing sets one, this.
+    Stroke(crate::style::SvgPaint),
+    /// `lineWidth` is the view's `strokeWidth` (1 where nothing sets one,
+    /// CSS's initial value).
+    StrokeWidth,
+    /// The line dash is the view's `strokeDasharray` (solid where nothing
+    /// sets one).
+    StrokeDasharray,
+}
+
+/// A part of a canvas's drawing that assistive technologies and UI tests
+/// see as an element of its own: a cell of a grid, a bar of a chart. It
+/// is the canvas's child at `bounds` (points from the canvas's top left),
+/// with its own role, name and test id; a press on it is a press at its
+/// center, as a pointer there makes it, which goes to whatever view is
+/// under that point and takes presses. The GPUI backend and the headless
+/// driver show them; the other backends do not yet.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub struct CanvasNode {
+    /// Where it is in the canvas.
+    pub bounds: Bounds<Points>,
+    /// What it is to assistive technologies.
+    pub role: crate::AccessibilityRole,
+    /// Its accessible name: the text it shows.
+    pub label: Arc<str>,
+    /// `testID`: an identifier for UI tests.
+    pub test_id: Option<Arc<str>>,
+    /// It is selected (a grid's selected cells).
+    pub selected: bool,
+}
+
+impl CanvasNode {
+    /// A node at `bounds` with `role`, named `label`.
+    pub fn new(
+        bounds: Bounds<Points>,
+        role: crate::AccessibilityRole,
+        label: impl Into<Arc<str>>,
+    ) -> Self {
+        Self {
+            bounds,
+            role,
+            label: label.into(),
+            ..Self::default()
+        }
+    }
+
+    /// With the test id `id`.
+    pub fn test_id(mut self, id: impl Into<Arc<str>>) -> Self {
+        self.test_id = Some(id.into());
+        self
+    }
+
+    /// Selected, or not.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
 }
 
 impl Drawing {
-    /// The slot of native value `node`, adding it if new.
-    pub fn slot(&mut self, node: nsh_animation::NodeId) -> u16 {
+    /// The drawing as a platform replays it: its [`Drawing::view_paints`]
+    /// given the paint properties `paint` of its view, whose text color is
+    /// `current` (`currentColor`). `none` paints nothing (a transparent
+    /// paint).
+    pub fn painted(&self, paint: &crate::style::PaintStyle, current: Color) -> Drawing {
+        use crate::style::SvgPaint;
+        let color = |p: SvgPaint| {
+            Paint::Color(match p {
+                SvgPaint::None => Color::TRANSPARENT,
+                SvgPaint::CurrentColor => current,
+                SvgPaint::Color(c) => c,
+            })
+        };
+        let mut out = self.clone();
+        for &(at, view) in &self.view_paints {
+            let Some(op) = out.ops.get_mut(at as usize) else {
+                continue;
+            };
+            *op = match view {
+                ViewPaint::Fill(initial) => {
+                    CanvasOp::FillStyle(color(paint.fill.unwrap_or(initial)))
+                }
+                ViewPaint::Stroke(initial) => {
+                    CanvasOp::StrokeStyle(color(paint.stroke.unwrap_or(initial)))
+                }
+                ViewPaint::StrokeWidth => {
+                    CanvasOp::LineWidth(Num::Const(paint.stroke_width.map_or(1.0, |w| w.0)))
+                }
+                ViewPaint::StrokeDasharray => CanvasOp::LineDash(
+                    paint
+                        .stroke_dasharray
+                        .clone()
+                        .unwrap_or_else(|| Arc::from([])),
+                ),
+            };
+        }
+        out
+    }
+
+    /// The slot of animated value `node`, adding it if new.
+    pub fn slot(&mut self, node: crate::animation::NodeId) -> u16 {
         match self.slots.iter().position(|&n| n == node) {
             Some(i) => i as u16,
             None => {
@@ -662,11 +892,61 @@ impl Drawing {
     }
 }
 
-/// The signed sweep of `arc` / `ellipse` from `start` to `end` (radians),
-/// as the Canvas spec defines it: a full turn when the angles are a turn
-/// or more apart in the drawing direction, else the angle between them
-/// going that way.
-pub fn arc_sweep(start: f32, end: f32, ccw: bool) -> f32 {
+/// A length: values of another type are zero (as `f32`'s).
+impl<Cx> OpArg<Cx> for Points {
+    fn read<L: HostList<Item: HostInput>>(
+        r: &mut OpReader<'_, L>,
+        cx: &mut Cx,
+    ) -> Result<Option<Self>, OpsError> {
+        Ok(<f32 as OpArg<Cx>>::read(r, cx)?.map(Points))
+    }
+
+    fn ts(types: &mut TsTypes) -> String {
+        <f32 as OpArg<Cx>>::ts(types)
+    }
+}
+
+/// A length, or nothing (`maxWidth`).
+impl<Cx> OpArg<Cx> for Option<Points> {
+    fn read<L: HostList<Item: HostInput>>(
+        r: &mut OpReader<'_, L>,
+        cx: &mut Cx,
+    ) -> Result<Option<Self>, OpsError> {
+        Ok(<Option<f32> as OpArg<Cx>>::read(r, cx)?.map(|v| v.map(Points)))
+    }
+
+    fn ts(types: &mut TsTypes) -> String {
+        <Option<f32> as OpArg<Cx>>::ts(types)
+    }
+}
+
+/// A point: two arguments, `x` then `y`.
+impl<Cx> OpArg<Cx> for Point<Points> {
+    const ARITY: usize = 2;
+
+    fn read<L: HostList<Item: HostInput>>(
+        r: &mut OpReader<'_, L>,
+        cx: &mut Cx,
+    ) -> Result<Option<Self>, OpsError> {
+        let x = <Points as OpArg<Cx>>::read(r, cx)?;
+        let y = <Points as OpArg<Cx>>::read(r, cx)?;
+        Ok(x.zip(y).map(|(x, y)| Point { x, y }))
+    }
+
+    fn ts(types: &mut TsTypes) -> String {
+        <Points as OpArg<Cx>>::ts(types)
+    }
+}
+
+/// The signed sweep of `arc` / `ellipse` from `start` to `end`, as the
+/// Canvas spec defines it: a full turn when the angles are a turn or more
+/// apart in the drawing direction, else the angle between them going that
+/// way.
+pub fn arc_sweep(start: Radians, end: Radians, ccw: bool) -> Radians {
+    Radians(sweep(start.0, end.0, ccw))
+}
+
+pub(crate) fn sweep(start: f32, end: f32, ccw: bool) -> f32 {
     use std::f32::consts::TAU;
     if !ccw {
         if end - start >= TAU {
@@ -681,9 +961,31 @@ pub fn arc_sweep(start: f32, end: f32, ccw: bool) -> f32 {
     }
 }
 
-/// Corner radii of `roundRect` scaled down to fit the box (CSS rule: all
-/// by the same factor when two on one side overlap).
-pub fn fit_radii(w: f32, h: f32, radii: [f32; 4]) -> [f32; 4] {
+/// Corner radii of `roundRect` scaled down to fit a box of `size` (CSS
+/// rule: all by the same factor when two on one side overlap); a negative
+/// size is a box drawn the other way.
+pub fn fit_radii(size: Size<Points>, radii: Corners<Points>) -> Corners<Points> {
+    let [tl, tr, br, bl] = fit(
+        size.width.0,
+        size.height.0,
+        [
+            radii.top_left.0,
+            radii.top_right.0,
+            radii.bottom_right.0,
+            radii.bottom_left.0,
+        ],
+    );
+    Corners {
+        top_left: Points(tl),
+        top_right: Points(tr),
+        bottom_right: Points(br),
+        bottom_left: Points(bl),
+    }
+}
+
+/// [`fit_radii`] on bare numbers: top left, top right, bottom right,
+/// bottom left.
+pub(crate) fn fit(w: f32, h: f32, radii: [f32; 4]) -> [f32; 4] {
     let r = radii.map(|r| r.max(0.0));
     let (w, h) = (w.abs(), h.abs());
     let sides = [r[0] + r[1], r[2] + r[3], r[0] + r[3], r[1] + r[2]];
@@ -1049,26 +1351,35 @@ mod tests {
     #[test]
     fn arc_sweeps_follow_the_canvas_spec() {
         use std::f32::consts::{PI, TAU};
-        assert_eq!(arc_sweep(0.0, PI, false), PI);
+
+        use crate::geometry::{radians, size};
+        let sweep = |a, b, ccw| arc_sweep(radians(a), radians(b), ccw).0;
+        assert_eq!(sweep(0.0, PI, false), PI);
         // Backwards clockwise: the long way round.
-        assert!((arc_sweep(PI, 0.0, false) - PI).abs() < 1e-6);
-        assert!((arc_sweep(0.0, -PI / 2.0, false) - 1.5 * PI).abs() < 1e-5);
-        assert_eq!(arc_sweep(0.0, 3.0 * TAU, false), TAU);
-        assert!((arc_sweep(0.0, PI / 2.0, true) + 1.5 * PI).abs() < 1e-5);
-        assert_eq!(arc_sweep(TAU, 0.0, true), -TAU);
+        assert!((sweep(PI, 0.0, false) - PI).abs() < 1e-6);
+        assert!((sweep(0.0, -PI / 2.0, false) - 1.5 * PI).abs() < 1e-5);
+        assert_eq!(sweep(0.0, 3.0 * TAU, false), TAU);
+        assert!((sweep(0.0, PI / 2.0, true) + 1.5 * PI).abs() < 1e-5);
+        assert_eq!(sweep(TAU, 0.0, true), -TAU);
+        let corners = |[top_left, top_right, bottom_right, bottom_left]: [f32; 4]| Corners {
+            top_left: px(top_left),
+            top_right: px(top_right),
+            bottom_right: px(bottom_right),
+            bottom_left: px(bottom_left),
+        };
         assert_eq!(
-            fit_radii(10.0, 100.0, [8.0, 8.0, 0.0, 0.0]),
-            [5.0, 5.0, 0.0, 0.0]
+            fit_radii(size(px(10.0), px(100.0)), corners([8.0, 8.0, 0.0, 0.0])),
+            corners([5.0, 5.0, 0.0, 0.0])
         );
     }
 
     #[test]
     fn fonts_parse_the_css_shorthand() {
         let f = CanvasFont::parse("italic bold 14px \"Inter\", sans-serif").unwrap();
-        assert_eq!((f.size, f.weight, f.italic), (14.0, 700, true));
+        assert_eq!((f.size, f.weight, f.italic), (px(14.0), 700, true));
         assert_eq!(f.family.as_deref(), Some("Inter"));
         let f = CanvasFont::parse("600 12px/1.5 system-ui").unwrap();
-        assert_eq!((f.size, f.weight, f.family), (12.0, 600, None));
+        assert_eq!((f.size, f.weight, f.family), (px(12.0), 600, None));
         let f = CanvasFont::parse("small-caps tabular-nums 13px system-ui").unwrap();
         assert_eq!(
             f.variant.0,

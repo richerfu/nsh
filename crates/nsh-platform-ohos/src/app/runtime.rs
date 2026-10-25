@@ -10,13 +10,14 @@ use napi_ohos::{
     bindgen_prelude::Function,
     threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
-use nsh_core::{MountBatch, Size};
+use nsh_core::MountBatch;
 use nsh_engine::{Bundle, Engine, EngineConfig, Environment, MountSink, Os};
 use ohos_vsync_binding::Vsync;
 
 use crate::{
     app::{environment::NshEnvironment, options::Config},
     render::{
+        geometry::Size,
         mount::Mounter,
         node::{Error, NativeNode, Result},
     },
@@ -542,7 +543,7 @@ impl Runtime {
         let environment = Environment {
             os: Os::Ohos,
             pixel_ratio: scale,
-            window: (size.width, size.height),
+            window: size.into(),
             ..Environment::default()
         };
         let environment = config.host.environment().apply(environment)?;
@@ -557,15 +558,26 @@ impl Runtime {
         let assets = app.assets.clone();
         let engine_config = EngineConfig {
             app: app.bundle.into(),
-            viewport: size,
+            viewport: size.into(),
             trace: false,
             network: Some(crate::services::net::network()),
+            websocket: None,
+            filesystem: None,
             assets: Some(app.assets),
             environment,
-            header_heights: (52.0, 52.0),
+            header_heights: (nsh_core::Points(52.0), nsh_core::Points(52.0)),
             limits: config.limits,
-            ui_sets: vec![nsh_ui_mobile::registry()],
+            ui_sets: vec![nsh_base::registry()],
             runtime: None,
+            data_dir: None,
+            cache: Default::default(),
+            storage: None,
+            clock: Default::default(),
+            context: Default::default(),
+            pinned: Default::default(),
+            clipboard: None,
+            host: Default::default(),
+            picker: None,
         };
         let engine = Engine::start(
             engine_config,
@@ -614,7 +626,7 @@ impl Runtime {
     }
     pub(crate) fn resize(&self, size: Size) -> napi_ohos::Result<()> {
         let mut state = self.state.try_borrow_mut().map_err(reentry)?;
-        state.environment.window = (size.width, size.height);
+        state.environment.window = size.into();
         if let Some(mounter) = &state.mounter {
             mounter.resize(size).map_err(napi_error)?;
         }

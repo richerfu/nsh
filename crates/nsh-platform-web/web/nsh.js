@@ -9,15 +9,24 @@
 //   const player = await createPlayer(container, { wasm: "nsh.wasm" });
 //   player.run(await (await fetch("app.js")).text());
 //
-// Options: `wasm` (its URL, or a `Response` promise), `assetBase` (where
-// `asset:/<path>` is served) or `assets` (a map from `<path>` to its URL,
-// as `nsh package --target web` writes it), `readAsset(uri)` (the bytes
-// of an asset the engine needs at once, a font: a `Uint8Array` or null),
-// `chunks` / `chunkBase` (see `run`), `prepareChunk(id)` (a promise for
-// what chunk `id` needs once it runs, such as fonts for `readAsset`;
-// awaited with the chunk's download), `dark`, `idiom` ("phone", "pad" or
-// "desktop" instead of the one the pointer and the viewport suggest),
-// `overlay` (false: no error box), `onError`, `onLog`.
+// Options: `wasm` (its URL, or a `Response` promise), `glue` (the URL of
+// the wasm-bindgen glue of a runtime whose crates call JS through
+// wasm-bindgen, which the CLI writes next to it; each player imports an
+// instance of its own), `assetBase` (where `asset:/<path>` is served) or
+// `assets` (a map from `<path>` to its URL, as `nsh package --target web`
+// writes it), `readAsset(uri)` (the bytes of an asset the engine needs at
+// once, a font: a `Uint8Array` or null), `chunks` / `chunkBase` (see
+// `run`), `prepareChunk(id)` (a promise for what chunk `id` needs once it
+// runs, such as fonts for `readAsset`; awaited with the chunk's download),
+// `dark`, `idiom` ("phone", "pad" or "desktop" instead of the one the
+// pointer and the viewport suggest), `overlay` (false: no error box),
+// `onError`, `onLog`, `host` (the functions `nsh/host`'s
+// `host.call(name, args)` reaches: an object whose `call(name, args)`
+// returns the result or a promise of it; a throw or a rejection rejects
+// the app's call; without it `host.available()` is false). The page sends
+// `host.on` listeners events with `player.hostEvent(event, payload)`
+// (JSON; it throws when the payload is not); events sent before the app
+// runs are delivered, in order, once it starts.
 //
 // A split bundle (`nsh build --split`) loads its chunks on demand: from
 // `chunks[id]` when given (`app.<digest>.js` on a CDN), else `id` relative
@@ -30,6 +39,15 @@ const PRESSED = 1;
 const HOVERED = 2;
 const FOCUSED = 4;
 const PRESS_EVENTS = ["onPress", "onLongPress", "onPressIn", "onPressOut"];
+const HOVER_EVENTS = ["onHoverIn", "onHoverOut", "onHoverMove"];
+// What lays out a field's text, copied to the hidden copy that finds its
+// caret (`caretBounds`).
+const CARET_STYLE = [
+  "direction", "boxSizing", "width", "height", "borderTopWidth", "borderRightWidth", "borderBottomWidth",
+  "borderLeftWidth", "borderStyle", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "fontStyle",
+  "fontVariant", "fontWeight", "fontStretch", "fontSize", "lineHeight", "fontFamily", "textAlign",
+  "textTransform", "textIndent", "letterSpacing", "wordSpacing", "tabSize",
+];
 /** `accessibilityRole`s whose ARIA role has another name; others are the same. */
 const ARIA_ROLES = {
   none: null, header: "heading", image: "img", imagebutton: "button", keyboardkey: "button", adjustable: "slider",
@@ -57,13 +75,8 @@ const SLIDE_MS = 300;
 const FADE_MS = 200;
 const PARALLAX = 0.3;
 const EASE_OUT_CUBIC = "cubic-bezier(0.333,1,0.667,1)";
-/** Press feedback (`activeOpacity`): in and out, easing out
- * quadratically (1 - (1 - t)^2, exactly), as the Linux backend. */
-const PRESS_IN_MS = 100;
 /** How far back a pointer's velocity is measured (ms). */
 const VELOCITY_WINDOW = 100;
-const PRESS_OUT_MS = 250;
-const EASE_OUT_QUAD = "cubic-bezier(0.333,0.667,0.667,1)";
 
 /** View kinds whose frames, appearing and disappearing are navigation's. */
 const NAVIGATED = new Set(["stack", "screen", "modal", "header", "accessory"]);
@@ -123,6 +136,7 @@ const KEYFRAMES = `
 .nsh-bar > div { position: absolute; border-radius: 2px; background: rgba(0,0,0,.45); transition: opacity .3s; }
 .nsh-dark .nsh-bar > div { background: rgba(255,255,255,.55); }
 .nsh-run { position: absolute; white-space: pre; }
+.nsh-run-bg { position: absolute; pointer-events: none; }
 .nsh-border { position: absolute; inset: 0; pointer-events: none; }
 .nsh-pointer { cursor: pointer; }
 /* The mounter's own styles: no element has an inline style but its frame
@@ -132,16 +146,25 @@ const KEYFRAMES = `
 .nsh-scheme-dark { color-scheme: dark; }
 .nsh-hidden { visibility: hidden; }
 .nsh-gone { display: none; }
-.nsh-inert { pointer-events: none; }
+/* \`pointerEvents\`: "none" takes the whole subtree out; "box-none" the view only, its child views stay targets (its
+   own layers, which take no pointer events, keep theirs). */
+:where(.nsh-box-none > *) { pointer-events: auto; }
+.nsh-box-none { pointer-events: none; }
+.nsh-inert, .nsh-inert * { pointer-events: none !important; }
 .nsh-clip { overflow: clip; }
-.nsh-stuck { z-index: 5; }
-.nsh-v.nsh-slotted { position: relative; }
+/* A sticky list cell's range of travel (op_sticky): it lifts the cell above the other cells, and with no breadth
+   across it takes no pointer events. The cell sticks inside it, at its left in either direction. */
+.nsh-track { position: absolute; z-index: 5; }
+.nsh-track > .nsh-v { position: sticky; margin-right: auto; }
+/* A list with sticky cells keeps their z-index to itself: above its other cells, never over the views after it. */
+.nsh-sticky { isolation: isolate; }
 .nsh-fill { position: absolute; left: 0; top: 0; width: 100%; height: 100%; border: 0; }
 img.nsh-fill { pointer-events: none; }
 .nsh-fit-cover { object-fit: cover; }
 .nsh-fit-contain { object-fit: contain; }
 .nsh-fit-fill { object-fit: fill; }
 .nsh-fit-scale-down { object-fit: scale-down; }
+.nsh-fit-none { object-fit: none; }
 .nsh-spacer { position: absolute; left: 0; top: 0; width: 1px; height: 1px; pointer-events: none; visibility: hidden; }
 /* Over the style's \`overflow: clip\`. */
 .nsh-scroll.nsh-ox.nsh-ox { overflow-x: auto; overflow-y: hidden; }
@@ -169,29 +192,19 @@ img.nsh-fill { pointer-events: none; }
 .nsh-desktop .nsh-press .nsh-autoselect, .nsh-desktop .nsh-press .nsh-autoselect *,
 .nsh-desktop .nsh-autoselect.nsh-press, .nsh-desktop .nsh-autoselect.nsh-press * { -webkit-user-select: none; user-select: none; }
 .nsh-autoselect ::selection { background: var(--nsh-selection, Highlight); }
-.nsh-header { position: absolute; left: 0; right: 0; top: 0; display: flex; align-items: center;
-  justify-content: center; font: 600 17px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  border-bottom: 0.5px solid rgba(0,0,0,.15); z-index: 10; }
-.nsh-header-back { position: absolute; left: 4px; top: 0; bottom: 0; display: flex; align-items: center;
-  padding: 0 8px; font-weight: 400; cursor: pointer; background: none; border: 0; color: inherit; font: inherit; font-weight: 400; }
-.nsh-header-right { position: absolute; right: 8px; top: 0; bottom: 0; display: flex; align-items: center; }
+/* A selection area (nsh-area) is selectable as a whole, with every idiom
+   and inside views that take presses too: one browser selection spans its
+   texts, and a drag may start between them. Texts set off (nsh-noselect),
+   images and videos are not. Repeated classes outweigh the rules above. */
+.nsh-root .nsh-area.nsh-area, .nsh-root .nsh-area.nsh-area * {
+  -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+.nsh-root .nsh-area .nsh-noselect.nsh-noselect, .nsh-root .nsh-area .nsh-noselect.nsh-noselect *,
+.nsh-root .nsh-area.nsh-area img, .nsh-root .nsh-area.nsh-area video { -webkit-user-select: none; user-select: none; }
+/* A page's header (the app's view): above the page's content. */
+.nsh-page-header { z-index: 1; }
 .nsh-screen { isolation: isolate; }
+/* Modals: transparent layers over the root; what shows is the app's. */
 .nsh-modal { transition: transform .35s cubic-bezier(.2,.8,.2,1), opacity .25s ease; z-index: 100; }
-/* Modals: opaque ones cover the root; sheets are cards over a scrim that
-   dims what is behind (the desktop backends' and iOS's colors). */
-.nsh-modal-opaque { background: #fff; }
-.nsh-dark .nsh-modal-opaque { background: #000; }
-.nsh-modal-scrim { position: absolute; inset: 0; z-index: 100; background: rgba(0,0,0,.32); transition: opacity .3s ease; }
-.nsh-dark .nsh-modal-scrim { background: rgba(0,0,0,.5); }
-.nsh-modal-sheet { background: #fff; border-radius: 12px; overflow: clip; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
-/* The hairline edge, over the content. */
-.nsh-modal-sheet::after { content: ""; position: absolute; inset: 0; border: 1px solid rgba(0,0,0,.1); border-radius: inherit;
-  pointer-events: none; z-index: 2147483647; }
-.nsh-dark .nsh-modal-sheet { background: #242426; }
-.nsh-dark .nsh-modal-sheet::after { border-color: rgba(255,255,255,.1); }
-.nsh-modal-sheet.nsh-modal-top { border-radius: 10px 10px 0 0; box-shadow: none; }
-.nsh-modal-sheet.nsh-modal-top::after { content: none; }
-.nsh-dark .nsh-modal-sheet.nsh-modal-top { background: #1c1c1e; }
 .nsh-dialog-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.35); display: flex;
   align-items: center; justify-content: center; z-index: 1000; }
 .nsh-dialog { width: 270px; border-radius: 14px; background: rgba(245,245,245,.97); color: #000; text-align: center;
@@ -310,6 +323,21 @@ const CODE_CHARS = {
 };
 
 /**
+ * The browser's offset of local time from UTC at `ms` (ms since the epoch),
+ * in seconds east, as `struct tm`'s `tm_gmtoff` holds it (`local_time.rs`):
+ * daylight saving time included; 0 for a time the browser cannot place.
+ */
+function localOffset(ms) {
+  const west = new Date(ms).getTimezoneOffset();
+  return Number.isFinite(west) ? 0 - west * 60 : 0;
+}
+
+/** The browser's time zone (`Asia/Shanghai`), Intl's default; "" when unknown. */
+function timeZoneName() {
+  return new Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
+}
+
+/**
  * The key of a key event as `nsh_key` takes it (-1: none): the character
  * it types without modifiers, or, when Shift or Option change it or the
  * layout types no ASCII there, the US layout's character of the same key
@@ -396,9 +424,26 @@ function swapClass(el, slot, name) {
 
 let players = 0;
 
+/** How many players imported each wasm-bindgen glue, by URL. */
+const glueImports = new Map();
+
+/**
+ * Imports the wasm-bindgen glue at `url` for one player. The glue keeps its
+ * module's state (memory views, wasm-bindgen's heap) at its top level, so
+ * every player after the first imports it under a URL of its own: another
+ * instance of the module. The first keeps the URL the page preloads.
+ */
+function importGlue(url) {
+  const href = new URL(String(url), document.baseURI);
+  const imported = glueImports.get(href.href) ?? 0;
+  glueImports.set(href.href, imported + 1);
+  if (imported > 0) href.searchParams.set("player", String(imported));
+  return import(href.href);
+}
+
 /**
  * The script a web view's HTML starts with: the first message from the
- * player carrying `token` hands it the port `ReactNativeWebView.postMessage`
+ * player carrying `token` hands it the port `window.nsh.postMessage`
  * writes to, and which runs `injectJavaScript` and history steps. The
  * page's own `message` listeners never see that message.
  */
@@ -406,7 +451,7 @@ function webBridge(token) {
   return `(() => {
   let port = null;
   const queue = [];
-  window.ReactNativeWebView = { postMessage(data) { data = String(data); port ? port.postMessage(data) : queue.push(data); } };
+  window.nsh = { postMessage(data) { data = String(data); port ? port.postMessage(data) : queue.push(data); } };
   addEventListener("message", (e) => {
     if (port || e.source !== parent || e.data !== ${JSON.stringify(token)} || !e.ports[0]) return;
     e.stopImmediatePropagation();
@@ -421,11 +466,50 @@ function webBridge(token) {
 })();`;
 }
 
+/// Measurements between dropping the measuring context (see `measure_text`):
+/// 5000 ≈ 4 seconds for a table that measures on every frame, which holds
+/// Blink's shape cache around 5 MB.
+const MEASURE_ROUNDS = 5000;
+
 function measureContext() {
   const canvas = typeof OffscreenCanvas !== "undefined"
     ? new OffscreenCanvas(1, 1)
     : document.createElement("canvas");
   return canvas.getContext("2d");
+}
+
+/** The span `measureNumericText` measures in (one for the page's players). */
+let numericSpan = null;
+
+/**
+ * The width of `text` in CSS `font` with `font-variant-numeric: numeric`
+ * (`tabular-nums`, ...). Canvas text cannot have numeric variants: its
+ * `font` takes only `small-caps`, and the context has `fontVariantCaps`
+ * but no `fontVariantNumeric`, so `measureText` measures proportional
+ * digits, narrower than the tabular ones the run is drawn with. A hidden
+ * span with the run's CSS measures what the DOM draws (font-variant-numeric:
+ * Chrome 52, Firefox 34, Safari 9.1). Its layout is forced, so the engine
+ * asks only for text with a numeric variant, and caches the answers.
+ */
+function measureNumericText(font, numeric, text) {
+  if (typeof document === "undefined" || !document.body) return null;
+  if (!numericSpan?.isConnected) {
+    const box = document.createElement("div");
+    box.setAttribute("aria-hidden", "true");
+    box.style.cssText = "position:fixed;left:0;top:0;width:0;height:0;overflow:hidden;"
+      + "visibility:hidden;pointer-events:none;contain:strict";
+    numericSpan = document.createElement("span");
+    numericSpan.style.cssText = "position:absolute;left:0;top:0;white-space:pre;"
+      + "letter-spacing:normal;word-spacing:normal;text-transform:none;font-kerning:auto;"
+      + "font-feature-settings:normal";
+    box.append(numericSpan);
+    document.body.append(box);
+  }
+  // `font` resets the variant: set it first, as the run's CSS does.
+  numericSpan.style.font = font;
+  numericSpan.style.fontVariantNumeric = numeric;
+  numericSpan.textContent = text;
+  return numericSpan.getBoundingClientRect().width;
 }
 
 /** Whether `locale`'s script is written right to left. */
@@ -469,11 +553,15 @@ class Player {
     // right-to-left layout), which replaces its inline style.
     container.append(this.root);
     this.views = new Map();
+    this.mouseTracked = new Set();
     // Of the views' own style rules (`op_css`).
     this.classPrefix = `nsh-p${++players}-`;
     this.timer = 0;
+    // An `nsh_pump` is queued (`requestPump`).
+    this.pumpRequested = false;
     this.frame = 0;
     this.measure = measureContext();
+    this.measureUses = 0;
     this.metricsCache = new Map();
     this.layoutAnimation = null;
     // Views created and removed while a layout animation is configured.
@@ -483,28 +571,79 @@ class Player {
     // Views removed by the batch being applied (`finishRemovals`).
     this.removals = [];
     this.images = new Map();
+    // Browser blob URLs of the in-memory images (`data:` URIs, blobs) the
+    // views show, by the source's URI (`image_bytes`).
+    this.inlineImages = new Map();
     this.pointers = new Map();
     this.requests = new Map();
+    this.websockets = new Map();
+    this.fileOperations = new Map();
     this.dark = options.dark ?? matchMedia("(prefers-color-scheme: dark)").matches;
     // The navigation stacks and modals are the browser's history: by
     // default only when the app is the page (in an iframe each push would
     // be an entry of the embedding page's history too).
     this.history = options.history ?? window.top === window;
+    // Host events sent before the app runs (`begin`).
+    this.hostEvents = [];
     if (window.top === window) document.documentElement.classList.add("nsh-page");
   }
 
   async load(url) {
+    // An app's crates that call JS through wasm-bindgen (web-sys, js-sys):
+    // the CLI ran `wasm-bindgen --target web` on the runtime, and its glue
+    // provides the module's other imports. It loads while the module
+    // compiles; a failed compile does not leave its rejection unhandled.
+    const glueLoad = this.options.glue ? importGlue(this.options.glue) : null;
+    glueLoad?.catch(() => {});
     const imports = {
-      env: { __rquickjs_host_now_us: () => Date.now() * 1000 },
+      env: {
+        __rquickjs_host_now_us: () => Date.now() * 1000,
+        __nsh_random_fill: (ptr, len) => {
+          try {
+            const bytes = this.bytes(ptr, len);
+            for (let offset = 0; offset < len; offset += 65536) {
+              globalThis.crypto.getRandomValues(bytes.subarray(offset, Math.min(offset + 65536, len)));
+            }
+            return 0;
+          } catch { return -1; }
+        },
+      },
       nsh: {
         now_ms: () => performance.now(),
         date_now_ms: () => Date.now(),
+        // QuickJS' local time (`local_time.rs`) and Intl's default zone.
+        local_offset: (ms) => localOffset(ms),
+        time_zone: (p, cap) => {
+          const zone = encoder.encode(timeZoneName());
+          if (zone.length <= cap) this.bytes(p, cap).set(zone);
+          return zone.length;
+        },
         measure_text: (fp, fl, tp, tl) => {
+          // Blink keeps every shaped string in the measuring context's
+          // PlainTextPainter (a FrameShapeCache keyed by font), and drops it
+          // only under critical memory pressure: an app that measures strings
+          // it has not measured before — a price table measuring the numbers
+          // that changed, every frame — piles up `blink::PlainTextNode`s
+          // without bound (25 MB in 20s, 52 MB in 6 minutes for a 40-row
+          // table). A context is cheap, and a fresh one starts empty; the old
+          // one, its painter and its cache become unreachable and go.
+          if (++this.measureUses >= MEASURE_ROUNDS) {
+            this.measureUses = 0;
+            this.measure = measureContext();
+          }
           this.measure.font = this.str(fp, fl);
           return this.measure.measureText(this.str(tp, tl)).width;
         },
+        measure_numeric_text: (fp, fl, np, nl, tp, tl) => {
+          const font = this.str(fp, fl), text = this.str(tp, tl);
+          const width = measureNumericText(font, this.str(np, nl), text);
+          if (width != null) return width;
+          this.measure.font = font;
+          return this.measure.measureText(text).width;
+        },
         font_ascent: (fp, fl) => this.metrics(this.str(fp, fl))[0],
         font_descent: (fp, fl) => this.metrics(this.str(fp, fl))[1],
+        font_x_height: (fp, fl) => this.metrics(this.str(fp, fl))[2],
         register_font: (fp, fl, dp, dl, weight, italic) => {
           const family = this.str(fp, fl);
           const data = this.bytes(dp, dl).slice();
@@ -512,12 +651,29 @@ class Player {
           document.fonts.add(face);
           this.fontLoading(face.load());
         },
+        image_bytes: (up, ul, dp, dl) => {
+          const uri = this.str(up, ul);
+          const old = this.inlineImages.get(uri);
+          if (old) URL.revokeObjectURL(old);
+          // The key names the media type (`data:<type>;nsh-key=…`): browsers
+          // draw an SVG blob only with its type.
+          const type = uri.startsWith("data:") ? uri.slice(5, uri.indexOf(";")) : "";
+          this.inlineImages.set(uri, URL.createObjectURL(new Blob([this.bytes(dp, dl).slice()], { type })));
+        },
+        release_image: (p, l) => {
+          const uri = this.str(p, l);
+          const url = this.inlineImages.get(uri);
+          if (url) URL.revokeObjectURL(url);
+          this.inlineImages.delete(uri);
+        },
         submit: (p, l) => {
           const batch = JSON.parse(this.str(p, l));
           this.apply(batch);
         },
         request_frame: () => this.requestFrame(),
+        request_pump: () => this.requestPump(),
         report_error: (p, l) => this.showError(this.str(p, l)),
+        test_send: (p, l) => this.onTestSend?.(JSON.parse(this.str(p, l))),
         log: (level, p, l) => {
           const message = this.str(p, l);
           (level <= 1 ? console.error : level === 2 ? console.warn : console.log)("[nsh]", message);
@@ -536,18 +692,71 @@ class Player {
         fetch_finish: (id) => this.requests.get(id)?.finish?.(),
         fetch_pause: (id, paused) => this.fetchPause(id, paused !== 0),
         fetch_cancel: (id) => this.fetchCancel(id),
+        filesystem_start: (id, p, l, bp, bl) => this.filesystemStart(id, JSON.parse(this.str(p, l)), this.bytes(bp, bl).slice()),
+        filesystem_cancel: (id) => this.fileOperations.delete(id),
+        websocket_start: (id, p, l) => this.websocketOperation(() => this.websocketStart(id, JSON.parse(this.str(p, l)))),
+        websocket_send: (id, p, l, binary) => this.websocketOperation(() => {
+          const socket = this.websockets.get(id);
+          if (!socket) throw new Error("WebSocket is closed");
+          socket.send(binary ? this.bytes(p, l).slice() : this.str(p, l));
+        }),
+        websocket_close: (id, code, p, l) => this.websocketOperation(() => {
+          const socket = this.websockets.get(id);
+          if (socket) socket.close(code, this.str(p, l));
+        }),
+        websocket_buffered: (id) => this.websockets.get(id)?.bufferedAmount ?? 0,
+        websocket_cancel: (id) => this.websocketCancel(id),
         load_chunk: (p, l) => this.loadChunk(this.str(p, l)),
+        // The app's storage (`nsh/storage`): the entries of `localStorage`
+        // under the app's prefix. 1 when done, 0 when the browser refused
+        // (the error handed over with `nsh_storage_reply`).
+        storage_load: (pp, pl) => this.storage(() => {
+          const prefix = this.str(pp, pl);
+          const entries = Object.create(null);
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key?.startsWith(prefix)) entries[key.slice(prefix.length)] = localStorage.getItem(key);
+          }
+          return JSON.stringify(entries);
+        }),
+        storage_set: (pp, pl, kp, kl, vp, vl) =>
+          this.storage(() => localStorage.setItem(this.str(pp, pl) + this.str(kp, kl), this.str(vp, vl))),
+        storage_remove: (pp, pl, kp, kl) =>
+          this.storage(() => localStorage.removeItem(this.str(pp, pl) + this.str(kp, kl))),
+        storage_clear: (pp, pl) => this.storage(() => {
+          const prefix = this.str(pp, pl);
+          const keys = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key?.startsWith(prefix)) keys.push(key);
+          }
+          for (const key of keys) localStorage.removeItem(key);
+        }),
       },
     };
-    const response = () => (typeof url === "string" || url instanceof URL ? fetch(url) : url);
-    let module;
-    try {
-      module = await WebAssembly.compileStreaming(response());
-    } catch {
-      module = await WebAssembly.compile(await (await response()).arrayBuffer());
+    // One request either way: a host that does not serve exactly
+    // `application/wasm` (streaming compilation rejects any other type,
+    // parameters such as `; charset=utf-8` included) gets the body compiled
+    // whole instead of streamed.
+    const response = await (typeof url === "string" || url instanceof URL ? fetch(url) : url);
+    const type = response.headers.get("Content-Type")?.trim().toLowerCase();
+    const module = type === "application/wasm" && WebAssembly.compileStreaming
+      ? await WebAssembly.compileStreaming(response)
+      : await WebAssembly.compile(await response.arrayBuffer());
+    const glue = glueLoad && (await glueLoad);
+    if (glue) {
+      if (typeof glue.__nsh_imports !== "function" || typeof glue.__nsh_finalize !== "function") {
+        throw new Error(`the glue ${this.options.glue} exports no __nsh_imports / __nsh_finalize: it must be the glue the nsh CLI adapts (nsh-bindgen.js), not wasm-bindgen's own output`);
+      }
+      // NSH's own imports (`nsh`, `env`) stay these.
+      for (const [name, fields] of Object.entries(glue.__nsh_imports())) {
+        imports[name] = name in imports ? { ...fields, ...imports[name] } : fields;
+      }
     }
-    // The compiler's dependencies link wasm-bindgen glue they never call
-    // here (oxc-browserslist's dates): stubs that say so if they are.
+    // A module that links wasm-bindgen without calling JS through it (the
+    // compiler's dependencies, oxc-browserslist's dates; a crate's default
+    // features) imports intrinsics it never calls here: stubs that say so
+    // if they are.
     for (const { module: name, name: field, kind } of WebAssembly.Module.imports(module)) {
       if (kind !== "function" || imports[name]?.[field]) continue;
       imports[name] ??= {};
@@ -556,7 +765,11 @@ class Player {
       };
     }
     imports.__wbindgen_placeholder__ && (imports.__wbindgen_placeholder__.__wbindgen_describe = () => {});
-    this.wasm = (await WebAssembly.instantiate(module, imports)).exports;
+    const instance = await WebAssembly.instantiate(module, imports);
+    this.wasm = instance.exports;
+    // The glue's own setup (its view of the memory, wasm-bindgen's tables)
+    // before any of the app's code runs.
+    glue?.__nsh_finalize(instance, module);
     // An app's own runtime (Rust components: nsh.json "rust") registers
     // its UI sets before anything starts.
     this.wasm.nsh_app_init?.();
@@ -570,6 +783,109 @@ class Player {
     this.installInput();
   }
 
+  // Tests ---------------------------------------------------------------
+
+  /**
+   * A test session runs (`nsh test --target web`): the module keeps the
+   * model of the app its agent asks about, from the next bundle on.
+   */
+  testStart() {
+    this.wasm.nsh_test_start?.();
+  }
+
+  /**
+   * What the test sets the app up with (`ServerMessage::TestSetup`): the
+   * storage it starts with, whether it traces the app, and what it fixes of
+   * the environment and the clipboard. Its requests,
+   * and a traced app's batches, then go to the test through `onTestSend`
+   * (`{type: "fetch", id, request}`, `{type: "fetch_cancel", id}`,
+   * `{type: "trace", items}`).
+   */
+  testSetup(storage, trace, environment) {
+    if (!this.wasm.nsh_test_setup) return;
+    const setup = JSON.stringify({ storage: storage ?? [], trace: !!trace, environment: environment ?? {} });
+    this.withStrings([setup], (p, l) => this.wasm.nsh_test_setup(p, l));
+  }
+
+  /** The test's answer to the app's request `id` (`ServerMessage::Fetch`). */
+  testFetchReply(id, reply) {
+    if (!this.wasm.nsh_test_fetch_reply) return;
+    this.withStrings([JSON.stringify({ id, reply })], (p, l) => this.wasm.nsh_test_fetch_reply(p, l));
+  }
+
+  /** Whether this runtime answers test steps (the development host's). */
+  get takesTests() {
+    return typeof this.wasm?.nsh_test_answer === "function";
+  }
+
+  /**
+   * Answers a test step (`nsh_dev::protocol::TestStep`) as an
+   * `nsh_dev::protocol::StepOutcome`: the module's model answers what it
+   * knows of the app, the page's views where they are.
+   */
+  testStep(step) {
+    if (!this.takesTests) return { outcome: "failed", message: "this runtime takes no test steps" };
+    const len = this.withStrings([JSON.stringify(step)], (p, l) => this.wasm.nsh_test_answer(p, l));
+    const answer = JSON.parse(this.str(this.wasm.nsh_test_answer_ptr(), len));
+    if (step.query?.query === "animating" && "done" in answer) {
+      // The native graph's, or the page's own (a screen sliding in, a
+      // dialog fading): a finite animation still running.
+      return { outcome: "done", value: answer.done === true || this.pageAnimating() };
+    }
+    if ("done" in answer) return { outcome: "done", value: answer.done ?? null };
+    if ("failed" in answer) return { outcome: "failed", message: answer.failed };
+    try {
+      return { outcome: "done", value: this.testPage(step.query ?? {}) };
+    } catch (e) {
+      return { outcome: "failed", message: String(e?.message ?? e) };
+    }
+  }
+
+  /** Whether a finite CSS or Web Animations animation of the app runs. */
+  pageAnimating() {
+    return this.root.getAnimations({ subtree: true }).some((a) => {
+      if (a.playState !== "running") return false;
+      const end = a.effect?.getComputedTiming().endTime;
+      return end != null && Number.isFinite(Number(end));
+    });
+  }
+
+  /** What only the page's views answer of a test agent's question. */
+  testPage(query) {
+    switch (query.query) {
+      case "bounds": {
+        // CSS pixels from the viewport's top left: what the browser's input
+        // (the DevTools protocol's) takes.
+        const el = this.views.get(query.id);
+        if (!el?.isConnected) return null;
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) return null;
+        return [r.left, r.top, r.width, r.height];
+      }
+      case "viewport":
+        return [window.innerWidth, window.innerHeight];
+      case "input_text": {
+        const field = this.views.get(query.id)?._field;
+        return field ? field.value : null;
+      }
+      case "dialog_point": {
+        const backdrops = this.root.querySelectorAll(".nsh-dialog-backdrop");
+        const backdrop = backdrops[backdrops.length - 1];
+        if (!backdrop) throw new Error("no dialog is shown");
+        if (query.button == null) {
+          // Outside its card: the backdrop's corner.
+          const r = backdrop.getBoundingClientRect();
+          return [r.left + 2, r.top + 2];
+        }
+        const button = [...backdrop.querySelectorAll("button")].find((b) => b.textContent.trim() === query.button);
+        if (!button) throw new Error(`the dialog has no button ${JSON.stringify(query.button)}`);
+        const r = button.getBoundingClientRect();
+        return [r.left + r.width / 2, r.top + r.height / 2];
+      }
+    }
+    throw new Error(`the page cannot answer ${JSON.stringify(query)}`);
+  }
+
   // Memory --------------------------------------------------------------
 
   str(ptr, len) {
@@ -578,6 +894,23 @@ class Player {
 
   bytes(ptr, len) {
     return new Uint8Array(this.wasm.memory.buffer, ptr, len);
+  }
+
+  /**
+   * Runs a `localStorage` call for the app's storage: 1 and what `f`
+   * returned (a string) handed over, or 0 and the error.
+   */
+  storage(f) {
+    let reply, done;
+    try {
+      reply = f();
+      done = 1;
+    } catch (e) {
+      reply = String(e?.message ?? e);
+      done = 0;
+    }
+    if (typeof reply === "string") this.withStrings([reply], (p, l) => this.wasm.nsh_storage_reply(p, l));
+    return done;
   }
 
   /** Calls `f(ptr, len, ...)` for each string, freeing them afterwards. */
@@ -600,7 +933,8 @@ class Player {
     if (!m) {
       this.measure.font = font;
       const t = this.measure.measureText("Hg");
-      m = [t.fontBoundingBoxAscent ?? 0, t.fontBoundingBoxDescent ?? 0];
+      const x = this.measure.measureText("x");
+      m = [t.fontBoundingBoxAscent ?? 0, t.fontBoundingBoxDescent ?? 0, x.actualBoundingBoxAscent ?? 0];
       this.metricsCache.set(font, m);
     }
     return m;
@@ -648,7 +982,11 @@ class Player {
    * `release` (hardened, as packaged apps run; default: development
    * settings), `harden` (with bytecode: the hardening's bytecode the CLI
    * ships, `harden.nshc`), `capabilities` (the app's `capabilities.json`),
-   * `sourceMap` (JSON), and where a split bundle's chunks are: `chunks[id]`
+   * `sourceMap` (JSON), `appId` (`nsh.json` `"id"`: the app's storage is
+   * kept under it; without one, under the page's path), `limits` (the VM
+   * limits the page runs the app with, as an app embedding it sets them:
+   * `"memory=128MB,call=2s"`, `""` for the embedding defaults; without it
+   * the app runs on its own, with none), and where a split bundle's chunks are: `chunks[id]`
    * (a URL), else `id` relative to `chunkBase` (default: the page); the
    * chunks of a bytecode bundle are bytecode too.
    */
@@ -657,6 +995,8 @@ class Player {
     harden = null,
     capabilities = "",
     sourceMap = "",
+    appId = "",
+    limits = null,
     chunks = this.options.chunks,
     chunkBase = this.options.chunkBase,
   } = {}) {
@@ -664,9 +1004,10 @@ class Player {
     const bytecode = typeof code !== "string";
     const [width, height] = this.reset();
     this.chunks = { map: chunks ?? {}, base: chunkBase ?? document.baseURI, bytecode };
-    this.call(() => this.withStrings([capabilities ?? "", sourceMap ?? ""], (cp, cl, mp, ml) =>
-      this.wasm.nsh_bundle_options(release ? 1 : 0, cp, cl, mp, ml)));
+    this.call(() => this.withStrings([capabilities ?? "", sourceMap ?? "", appId ?? ""], (cp, cl, mp, ml, ip, il) =>
+      this.wasm.nsh_bundle_options(release ? 1 : 0, cp, cl, mp, ml, ip, il)));
     if (harden) this.call(() => this.withStrings([new Uint8Array(harden)], (p, l) => this.wasm.nsh_bundle_harden(p, l)));
+    if (limits != null) this.call(() => this.withStrings([limits], (p, l) => this.wasm.nsh_bundle_limits(p, l)));
     this.begin(width, (environment) => {
       this.withStrings([environment], (p, l) => this.wasm.nsh_environment(p, l));
       const start = bytecode ? this.wasm.nsh_start_bytecode : this.wasm.nsh_start;
@@ -699,6 +1040,7 @@ class Player {
     root.textContent = "";
     root.append(this.live);
     this.views.clear();
+    this.mouseTracked.clear();
     root._id = ROOT_ID;
     root._kind = "root";
     root._events = new Set();
@@ -715,13 +1057,25 @@ class Player {
     this.idiom = this.options.idiom ?? this.measureIdiom(width);
     const environment = (this.reported = JSON.stringify(this.environment()));
     this.updateRootClasses();
+    // Host events wait for this app's top-level `host.on` listeners, not
+    // the replaced app's; those queued after a failed start are dropped.
+    this.started = false;
+    this.hostEvents ??= [];
     // Fonts registered while it starts hold its first frame back (`fontLoading`).
     this.starting = true;
     try {
       this.call(() => start(environment));
+    } catch (err) {
+      // Only a trap (a panic) throws: no app runs to take events.
+      this.hostEvents = null;
+      throw err;
     } finally {
       this.starting = false;
     }
+    this.started = true;
+    const events = this.hostEvents;
+    this.hostEvents = [];
+    for (const json of events) this.eventJson(ROOT_ID, "onHost", json);
   }
 
   /** Fetches chunk `id` of the running bundle and hands it to the engine. */
@@ -758,11 +1112,11 @@ class Player {
     return ok ? { code: text } : { error: text };
   }
 
-  /** Compiles and runs `source`; the compile error, or null. */
-  runSource(source, name = "App.tsx") {
+  /** Compiles and runs `source` (with `run`'s `options`); the compile error, or null. */
+  runSource(source, name = "App.tsx", options = {}) {
     const result = this.compile(source, name);
     if (result.error) return result.error;
-    this.run(result.code);
+    this.run(result.code, options);
     return null;
   }
 
@@ -783,11 +1137,31 @@ class Player {
   }
 
   stop() {
+    // Host events wait for the next app (`begin`).
+    this.started = false;
+    this.hostEvents ??= [];
+    this.fileOperations.clear();
     for (const id of [...this.requests.keys()]) this.fetchCancel(id);
+    for (const id of [...this.websockets.keys()]) this.websocketCancel(id);
     clearTimeout(this.timer);
     cancelAnimationFrame(this.frame);
     this.frame = 0;
     this.wasm?.nsh_stop();
+  }
+
+  /**
+   * The engine has work that came outside a call into it (`request_pump`:
+   * a task a browser callback woke, or what a pump left for the next): one
+   * `nsh_pump` in a task of its own, however many ask before it runs;
+   * `call` defers it if the engine runs.
+   */
+  requestPump() {
+    if (this.pumpRequested) return;
+    this.pumpRequested = true;
+    setTimeout(() => {
+      this.pumpRequested = false;
+      this.call((w) => w.nsh_pump());
+    }, 0);
   }
 
   /** The engine is due again in `delay` ms (-1: only for input). */
@@ -917,6 +1291,7 @@ class Player {
       safeArea: this.safeArea(),
       keyboard: this.keyboardHeight(),
       appleKeyboard: APPLE,
+      host: Boolean(this.options.host),
     };
   }
 
@@ -937,7 +1312,12 @@ class Player {
   }
 
   event(id, name, payload = null) {
-    this.call(() => this.withStrings([name, JSON.stringify(payload)], (np, nl, pp, pl) =>
+    this.eventJson(id, name, JSON.stringify(payload));
+  }
+
+  /** {@link event} with its payload already serialized. */
+  eventJson(id, name, json) {
+    this.call(() => this.withStrings([name, json], (np, nl, pp, pl) =>
       this.wasm.nsh_event(id, np, nl, pp, pl)));
   }
 
@@ -970,7 +1350,8 @@ class Player {
       const path = uri.slice("asset:/".length).replace(/^\/+/, "");
       return this.options.assets?.[path] ?? this.assetBase + path;
     }
-    return uri;
+    // An in-memory image: its bytes came with `image_bytes`.
+    return this.inlineImages.get(uri) ?? uri;
   }
 
   // Mounting ------------------------------------------------------------
@@ -1056,6 +1437,9 @@ class Player {
       el._applied = 0;
       el.addEventListener("scroll", () => this.scrolled(el), { passive: true });
       el.addEventListener("scrollend", () => this.scrollEnded(el));
+      // The user takes over a smooth scroll of the core's (`op_sb`).
+      const takeOver = () => { el._smooth = null; };
+      for (const type of ["wheel", "pointerdown", "touchstart", "keydown"]) el.addEventListener(type, takeOver, { passive: true });
     }
     if (kind === "screen") el.classList.add("nsh-screen");
     if (kind === "modal") el.classList.add("nsh-modal");
@@ -1125,6 +1509,7 @@ class Player {
     const el = this.view(id);
     if (!el) return;
     this.views.delete(id);
+    this.mouseTracked.delete(id);
     if (el._video) {
       // A removed media element keeps playing until it is collected.
       clearInterval(el._progressTimer);
@@ -1158,9 +1543,10 @@ class Player {
     // card inside the root): the core lays it out at the size reported.
     if (!el || el._kind === "modal") return;
     // A view that had a frame moves from where it shows (a running
-    // animation's frame); a new one's first frame does not animate.
+    // animation's frame); a new one's first frame does not animate, nor
+    // does a sticky cell's (the browser keeps it in its track).
     const update = this.layoutAnimation?.update;
-    const from = update && el._frame && !this.navigated(el, el.parentNode) ? this.shownFrame(el) : null;
+    const from = update && el._frame && !el._track && !this.navigated(el, el.parentNode) ? this.shownFrame(el) : null;
     el._frameAnimation?.cancel();
     el._frameAnimation = null;
     el._frame = [x, y, w, h];
@@ -1172,12 +1558,16 @@ class Player {
       el._frameAnimation = a;
     }
     if (el._kind === "canvas") this.drawSoon(el);
-    if (el._kind === "stack") for (const screen of el.children) if (screen._kind === "screen") this.reportRoot(screen, w, h);
+    if (el._kind === "stack") for (const screen of el.children) if (screen._kind === "screen") this.reportRoot(screen, w, h, this.screenInsets(screen));
   }
 
   placeFrame(el) {
     const f = el._frame;
     if (!f) return;
+    if (el._track) {
+      this.placeTrack(el);
+      return;
+    }
     const s = el.style;
     s.left = `${f[0]}px`;
     s.top = `${f[1]}px`;
@@ -1224,6 +1614,14 @@ class Player {
       this.drawSoon(el);
       return;
     }
+    if (prop === "sticky-offset") {
+      // A sticky cell sticks this much further in (an animated offset).
+      const offset = Number(value);
+      if (el._stickyOffset === offset) return;
+      el._stickyOffset = offset;
+      if (el._track) this.placeTrack(el);
+      return;
+    }
     el._animation[prop] = value;
     if (prop === "border-color") {
       // Borders are drawn by an overlay.
@@ -1238,10 +1636,18 @@ class Player {
     el.style.setProperty(prop, value);
   }
 
-  op_t([, id, cx, cy, , , runs, styles, selectable, selection]) {
+  op_t([, id, cx, cy, , , runs, styles, selectable, selection, backgrounds]) {
     const el = this.view(id);
     if (!el) return;
     const frag = document.createDocumentFragment();
+    // Span backgrounds, behind the runs: one box per span and line.
+    for (const [x, y, w, h, r, color] of backgrounds ?? []) {
+      const box = document.createElement("div");
+      box.className = "nsh-run-bg";
+      box.style.cssText = `left:${cx + x}px;top:${cy + y}px;width:${w}px;height:${h}px;` +
+        `border-radius:${r}px;background:${color}`;
+      frag.append(box);
+    }
     for (const [x, y, text, style, after] of runs) {
       const span = document.createElement("span");
       const name = this.styleClass(styles[style]);
@@ -1253,10 +1659,11 @@ class Player {
       if (el._animation.color) span.style.color = el._animation.color;
       frag.append(span);
     }
-    for (const span of [...el.querySelectorAll(":scope > .nsh-run")]) span.remove();
+    for (const span of [...el.querySelectorAll(":scope > .nsh-run, :scope > .nsh-run-bg")]) span.remove();
     el.insertBefore(frag, el.firstChild);
     el.classList.toggle("nsh-selectable", !!selectable);
     el.classList.toggle("nsh-autoselect", selectable == null);
+    el.classList.toggle("nsh-noselect", selectable === false);
     // Its `--nsh-selection`.
     swapClass(el, "_selection", this.styleClass(selection));
     el._textLabel = runs.map((r) => r[2]).join("");
@@ -1267,6 +1674,8 @@ class Player {
     const el = this.view(id);
     if (!el) return;
     el._events = new Set(events);
+    if (el._events.has("onMouseMove")) this.mouseTracked.add(id);
+    else this.mouseTracked.delete(id);
     const pressable = PRESS_EVENTS.some((e) => el._events.has(e));
     // Under the view's own `cursor` (its class).
     el.classList.toggle("nsh-pointer", pressable);
@@ -1274,6 +1683,37 @@ class Player {
     this.updateFocusable(el);
     this.updateTouchAction(el);
     if (el._kind === "scroll" && el._events.has("onRefresh")) this.installPull(el);
+    if (!el._hoverEvents && HOVER_EVENTS.some((e) => el._events.has(e))) this.installHover(el);
+  }
+
+  /**
+   * `onHoverIn` / `onHoverOut` / `onHoverMove` of `el`, from the mouse's
+   * pointer events (pointerenter and pointerleave reach the views around
+   * the one under the mouse too, as with `:hover`). Moves with a button
+   * down are not hovers.
+   */
+  installHover(el) {
+    el._hoverEvents = true;
+    el.addEventListener("pointerenter", (e) => {
+      if (e.pointerType !== "mouse") return;
+      el._hoverIn = true;
+      if (el._events.has("onHoverIn")) this.event(el._id, "onHoverIn");
+    });
+    el.addEventListener("pointerleave", () => {
+      if (!el._hoverIn) return;
+      el._hoverIn = false;
+      if (el._events.has("onHoverOut")) this.event(el._id, "onHoverOut");
+    });
+    el.addEventListener("pointermove", (e) => {
+      if (e.pointerType !== "mouse" || e.buttons || !el._events.has("onHoverMove")) return;
+      const [pageX, pageY] = this.point(e);
+      const r = el.getBoundingClientRect();
+      this.event(el._id, "onHoverMove", {
+        position: { x: e.clientX - r.left, y: e.clientY - r.top },
+        pagePosition: { x: pageX, y: pageY },
+        modifiers: { control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, platform: e.metaKey },
+      });
+    });
   }
 
   op_ts([, id, states]) {
@@ -1303,8 +1743,9 @@ class Player {
     if (props.testID) el.dataset.testid = props.testID;
     else delete el.dataset.testid;
     const pe = props.pointerEvents;
-    el.classList.toggle("nsh-inert", pe === "none" || pe === "box-none");
-    if (pe === "box-none") el._boxNone = true;
+    el.classList.toggle("nsh-inert", pe === "none");
+    el.classList.toggle("nsh-box-none", pe === "box-none");
+    el.classList.toggle("nsh-area", !!props.selectionArea);
     this.updateFocusable(el);
     this.updateTouchAction(el);
   }
@@ -1339,12 +1780,18 @@ class Player {
   }
 
   /** Pressables take the keyboard focus (Tab; Enter and Space press them),
-   * unless disabled or hidden from assistive technologies. */
+   * unless disabled, hidden from assistive technologies or `focusable`
+   * false. */
   updateFocusable(el) {
     const p = el._props;
-    const focusable = el._pressable && !p?.disabled && !p?.hidden;
+    const focusable = el._pressable && !p?.disabled && !p?.hidden && p?.focusable !== false;
     if (focusable) el.tabIndex = 0;
-    else if (el.hasAttribute("tabindex") && !el._a11yFocus) el.removeAttribute("tabindex");
+    // Programmatic focus only for what screen-reader focus moved to.
+    else if (el._a11yFocus) el.tabIndex = -1;
+    else if (el.hasAttribute("tabindex")) el.removeAttribute("tabindex");
+    // No longer a stop with the focus on it: it leaves, as on macOS (browsers
+    // move it without a `blur`, which would leave `focus:` on).
+    if (!focusable && !el._a11yFocus && document.activeElement === el) el.blur();
     if (focusable && !el._focusListeners) {
       el._focusListeners = true;
       // `focus:` classes follow the keyboard focus (the browser draws a
@@ -1493,17 +1940,22 @@ class Player {
   // Images
 
   /**
-   * `source`, `resizeMode`, `defaultSource` (shown until the image loads,
-   * then faded out over `fadeDuration`) and `blurRadius` (a CSS blur).
-   * Any URL the browser loads works: `asset:/`, http(s), data: and blob:.
+   * `src`, `resizeMode`, `placeholder` (shown until the image loads,
+   * then faded out over `fadeDuration`), `blurRadius` (a CSS blur) and
+   * `objectPosition` (CSS's, empty for the center).
+   * Any URL the browser loads works: `asset:/` and http(s); `data:` URIs and
+   * `blob:` URLs arrive as bytes (`image_bytes`) and show as browser blob URLs.
    */
-  op_img([, id, uri, mode, placeholder, blur, fade]) {
+  op_img([, id, uri, mode, placeholder, blur, fade, position]) {
     const el = this.view(id);
     if (!el?._img) return;
     const img = el._img;
     el._fit = mode;
+    el._position = position || "";
     // The image's and the placeholder's classes (`nsh-hidden` is their state).
-    el._imgClass = `nsh-fill nsh-fit-${mode}${blur > 0 ? ` ${cssClass(`filter:blur(${blur}px);`)}` : ""}`;
+    el._imgClass = `nsh-fill nsh-fit-${mode}${blur > 0 ? ` ${cssClass(`filter:blur(${blur}px);`)}` : ""}${
+      position ? ` ${cssClass(`object-position:${position};`)}` : ""
+    }`;
     img.className = el._imgClass + (img.classList.contains("nsh-hidden") ? " nsh-hidden" : "");
     el._fade = fade;
     const ph = placeholder ? this.asset(placeholder) : "";
@@ -1546,8 +1998,9 @@ class Player {
     if (el._tint && el._src) {
       el._img.classList.add("nsh-hidden");
       const fit = el._fit;
-      const size = fit === "fill" ? "100% 100%" : fit === "scale-down" ? "contain" : fit || "cover";
-      const mask = `url(${JSON.stringify(el._src)}) center / ${size} no-repeat`;
+      const size =
+        fit === "fill" ? "100% 100%" : fit === "scale-down" ? "contain" : fit === "none" ? "auto" : fit || "cover";
+      const mask = `url(${JSON.stringify(el._src)}) ${el._position || "center"} / ${size} no-repeat`;
       // Over the view's own background.
       swapClass(el, "_tintClass", cssClass(`background-color:${el._tint};-webkit-mask:${mask};mask:${mask};`, 3));
     } else {
@@ -1596,12 +2049,29 @@ class Player {
     el._content = [w, h];
     this.placeLayer(el);
     this.snapMarkers(el);
+    // The last sticky cell travels to the end of the content.
+    for (const cell of el._tracks?.values() ?? []) this.placeTrack(cell);
   }
 
   op_sb([, id, dx, dy]) {
     const el = this.view(id);
     if (!el) return;
     el._applied++;
+    // A smooth scroll of the core's in flight moves with it, as on the
+    // native backends: setting the offset would stop it.
+    if (el._smooth) {
+      el._smooth = [el._smooth[0] + dx, el._smooth[1] + dy];
+      el.scrollTo({ left: el._smooth[0], top: el._smooth[1], behavior: "smooth" });
+      return;
+    }
+    // So does a glide of the wheel's or the keys' (`scrollSmoothly`):
+    // its next frame would put the offset back.
+    const a = el._glide;
+    if (a) {
+      a.x += dx;
+      a.y += dy;
+      if (a.at) a.at = [a.at[0] + dx, a.at[1] + dy];
+    }
     el.scrollLeft += dx;
     el.scrollTop += dy;
   }
@@ -1643,9 +2113,16 @@ class Player {
     const viewport = el._frame[2 + axis];
     const max = Math.max(0, el._content[axis] - viewport);
     let points = [];
-    if (b.snapInterval > 0) for (let p = 0; p <= max + 0.5; p += b.snapInterval) points.push(p);
-    else if (b.snapOffsets.length) points = b.snapOffsets;
-    else if (b.paging && viewport > 0) for (let p = 0; p <= max + 0.5; p += viewport) points.push(p);
+    if (b.snapInterval > 0) {
+      const interval = b.snapInterval;
+      const shift = b.snapAlignment === "center" ? (viewport - interval) / 2
+        : b.snapAlignment === "end" ? viewport - interval : 0;
+      const count = Math.max(0, Math.ceil((max + shift) / interval));
+      for (let i = 0; i <= count; i++) points.push(Math.min(max, Math.max(0, i * interval - shift)));
+    } else if (b.snapOffsets.length) points = b.snapOffsets.map(p => Math.min(max, Math.max(0, p)));
+    else if (b.paging && viewport > 0) {
+      for (let i = 0; i <= Math.ceil(max / viewport); i++) points.push(Math.min(max, i * viewport));
+    }
     if (!points.length) return;
     el._snapPoints = [...points].sort((a, b) => a - b);
     el.classList.add(el._horizontal ? "nsh-snap-x" : "nsh-snap-y");
@@ -1658,28 +2135,112 @@ class Player {
     }
   }
 
+  // Sticky list cells stick with the browser's `position: sticky`, so they
+  // move with its scrolling, in step with the compositor; a shift set from
+  // the page's scroll events trails it by a frame. Each sits in a track
+  // spanning its range of travel, from its frame to the scroll offset
+  // `end` plus its size, out of which the next sticky cell pushes it.
+
   op_sticky([, id, cells]) {
     const el = this.view(id);
     if (!el) return;
-    el._stickyCells = cells;
-    this.updateSticky(el);
-  }
-
-  updateSticky(el) {
-    if (!el._stickyCells) return;
-    const offset = el._horizontal ? el.scrollLeft : el.scrollTop;
-    for (const [cellId, start, end] of el._stickyCells) {
+    const tracks = (el._tracks ??= new Map());
+    const ranges = new Map(cells.map(([cellId, start, end]) => [cellId, [start, end]]));
+    el.classList.toggle("nsh-sticky", ranges.size > 0);
+    // Cells no longer sticky go back to their frames: a recycled cell
+    // shows another item now. Removed ones take their tracks along.
+    for (const [cellId, cell] of tracks) {
+      if (ranges.has(cellId) && this.view(cellId) === cell) continue;
+      tracks.delete(cellId);
+      this.unstick(cell);
+    }
+    for (const [cellId, range] of ranges) {
       const cell = this.view(cellId);
       if (!cell) continue;
-      const shift = Math.min(Math.max(offset - start, 0), end - start);
-      cell._sticky = el._horizontal ? `${shift}px 0` : `0 ${shift}px`;
-      cell.style.translate = cell._sticky;
-      cell.classList.toggle("nsh-stuck", shift > 0);
+      if (!cell._track) {
+        // A frame update earlier in this batch may have started an animation
+        // in content coordinates. Sticky positioning uses insets in the track.
+        cell._frameAnimation?.cancel();
+        cell._frameAnimation = null;
+        const track = document.createElement("div");
+        track.className = "nsh-track";
+        track._list = el;
+        // Where the list's cells are: in it, or in its content layer; the
+        // cells of a list in the scroll view's viewport are in that list,
+        // which keeps their z-index to itself.
+        const own = el._layer ?? el;
+        const host = cell.parentNode ?? own;
+        track._page = host !== own;
+        if (track._page) host.classList.add("nsh-sticky");
+        host.insertBefore(track, cell.parentNode === host ? cell : null);
+        track.append(cell);
+        cell._track = track;
+        tracks.set(cellId, cell);
+      }
+      cell._range = range;
+      // The animated offsets come after the batch's ops (`sticky-offset`):
+      // one that became a number is no longer added.
+      cell._stickyOffset = undefined;
+      this.placeTrack(cell);
     }
   }
 
+  /** `cell` leaves its track for its place among the list's cells. */
+  unstick(cell) {
+    const track = cell._track;
+    cell._track = null;
+    cell._range = null;
+    if (cell.parentNode === track) track.replaceWith(cell);
+    else track.remove();
+    this.placeFrame(cell);
+  }
+
+  /** Where the views around `track` (up to its scroll view) put it in the
+   * scroll view's content along its axis. */
+  trackOrigin(track, horizontal) {
+    const list = track._list;
+    let at = 0;
+    for (let n = track.parentNode; n && n !== list && n !== list._layer; n = n.parentNode) {
+      const f = n._frame;
+      if (f) at += horizontal ? f[0] : f[1];
+    }
+    return at;
+  }
+
+  /** Places `cell`'s track along its range of travel and the cell in it:
+   * it sticks the distance from its range's start to its frame's from the
+   * scroll view's start. */
+  placeTrack(cell) {
+    const f = cell._frame;
+    const range = cell._range;
+    if (!f || !range) return;
+    const list = cell._track._list;
+    const horizontal = !!list._horizontal;
+    const [at, size] = horizontal ? [f[0], f[2]] : [f[1], f[3]];
+    // The last one's range ends past the content: it travels to its end
+    // (not at all before the list's content size arrives). A page list's
+    // ranges end within it, and are in the scroll view's content, where
+    // the list starts at `origin`.
+    const page = cell._track._page;
+    const origin = page ? this.trackOrigin(cell._track, horizontal) : 0;
+    const content = list._content?.[horizontal ? 0 : 1] ?? 0;
+    const travel = page ? range[1] - range[0] : Math.min(range[1] - range[0], content - at - size);
+    const length = size + Math.max(0, travel);
+    const t = cell._track.style;
+    t.left = `${f[0]}px`;
+    t.top = `${f[1]}px`;
+    t.width = `${horizontal ? length : 0}px`;
+    t.height = `${horizontal ? 0 : length}px`;
+    const s = cell.style;
+    const inset = `${at + origin - range[0] + (cell._stickyOffset ?? 0)}px`;
+    s.left = horizontal ? inset : "auto";
+    s.top = horizontal ? "auto" : inset;
+    s.width = `${f[2]}px`;
+    s.height = `${f[3]}px`;
+  }
+
   // Desktop scroll bars (the desktop idiom): nsh's own, thin, over the
-  // content, shown while the view scrolls or the mouse moves over it and
+  // content, shown while the view scrolls or the mouse reaches its thumb and
   // fading after, and dragged by the mouse as a scroll bar's thumb, as on
   // the desktop backends.
 
@@ -1726,6 +2287,22 @@ class Player {
     if (!el._barHeld) el._barTimer = setTimeout(() => el._bar && (el._bar.firstChild.style.opacity = "0"), BAR_HOLD);
   }
 
+  /** Whether the pointer reaches the draggable thumb, even while faded. */
+  barHit(el, e) {
+    if (!this.barShown(el)) return false;
+    const thumb = this.barThumb(el);
+    if (!thumb) return false;
+    const r = el.getBoundingClientRect();
+    const [x, y] = [e.clientX - r.left, e.clientY - r.top];
+    const [along, across, edge] = el._horizontal ? [x, y, el.clientHeight] : [y, x, el.clientWidth];
+    return across >= edge - BAR_GRAB && across <= edge && along >= thumb[0] - 4 && along <= thumb[0] + thumb[1] + 4;
+  }
+
+  /** Content hover leaves the bar and its fade timer unchanged. */
+  hoverBar(el, e) {
+    if (this.barHit(el, e)) this.showBar(el);
+  }
+
   /** A mouse press on the bar of a scroll view around `e`'s target grabs
    * it, faded or not: the content moves the other way, so the thumb
    * follows the pointer. */
@@ -1733,20 +2310,14 @@ class Player {
     const view = this.viewOf(e.target);
     if (!view) return false;
     for (const el of this.ancestors(view)) {
-      if (el._kind !== "scroll" || !this.barShown(el)) continue;
-      const thumb = this.barThumb(el);
-      if (!thumb) continue;
-      const r = el.getBoundingClientRect();
-      const [x, y] = [e.clientX - r.left, e.clientY - r.top];
+      if (!this.barHit(el, e)) continue;
       const h = !!el._horizontal;
-      const [along, across, edge] = h ? [x, y, el.clientHeight] : [y, x, el.clientWidth];
-      if (across < edge - BAR_GRAB || across > edge || along < thumb[0] - 4 || along > thumb[0] + thumb[1] + 4) continue;
       e.preventDefault();
       el._barHeld = true;
       // Snapping would move the content under the thumb: back once it ends.
       el.style.scrollSnapType = "none";
       this.drive(el, 1);
-      this.scrollEvent(el, "onScrollBeginDrag");
+      this.scrollEvent(el, "onScrollDragStart");
       this.pointers.set(e.pointerId, {
         mode: "bar", scroll: el, start: h ? e.clientX : e.clientY, offset: h ? el.scrollLeft : el.scrollTop,
         touchPath: [], states: [],
@@ -1768,7 +2339,7 @@ class Player {
 
   releaseBar(el) {
     el._barHeld = false;
-    this.scrollEvent(el, "onScrollEndDrag");
+    this.scrollEvent(el, "onScrollDragEnd");
     this.drive(el, -1);
     el._restoreSnap = true;
     // Snapping views settle on the nearest snap point.
@@ -1781,13 +2352,13 @@ class Player {
   }
 
   scrolled(el) {
-    this.updateSticky(el);
+    if (el._commandEnd) this.waitCommandEnd(el);
     if (this.desktopUI) this.showBar(el);
     // Still moving after the finger left (touch scrolling is the
     // browser's): a glide.
     if (el._released && !el._momentum && performance.now() - el._released < 150) {
       el._momentum = true;
-      this.scrollEvent(el, "onMomentumScrollBegin");
+      this.scrollEvent(el, "onMomentumStart");
     }
     // Pulled to refresh, the offset is negative, as on the native backends.
     this.call((w) => w.nsh_scroll(el._id, el.scrollLeft, el.scrollTop - (el._pull ?? 0), el._applied));
@@ -1796,6 +2367,9 @@ class Player {
   /** The browser's scrolling stopped: the end, unless the scroll is driven
    * here (`drive`) or a finger still holds it. */
   scrollEnded(el) {
+    clearTimeout(el._commandEnd);
+    el._commandEnd = 0;
+    el._smooth = null;
     if (el._driven || el._touchDrag) return;
     // The browser's end of a scroll that ended here (`ownEnd`).
     const own = el._ownEnd;
@@ -1808,7 +2382,7 @@ class Player {
     }
     if (el._momentum) {
       el._momentum = false;
-      this.scrollEvent(el, "onMomentumScrollEnd");
+      this.scrollEvent(el, "onMomentumEnd");
     }
     this.scrollEvent(el, "onScrollEnd");
   }
@@ -1821,7 +2395,8 @@ class Player {
     if (el._layer) return el._layer;
     const layer = document.createElement("div");
     layer.className = "nsh-layer";
-    for (const child of [...el.children]) if (child._id !== undefined) layer.append(child);
+    // Its views, and the tracks its sticky cells sit in.
+    for (const child of [...el.children]) if (child._id !== undefined || child._list) layer.append(child);
     el.insertBefore(layer, el._spacer.nextSibling);
     el._layer = layer;
     el._zoom = 1;
@@ -1922,7 +2497,7 @@ class Player {
   /** `zoomTo({ scale, x, y, animated })`: content point (x, y) to the middle of the viewport, or the point there now. */
   zoomCommand(el, scale, x, y, animated) {
     if (!this.zooms(el) || !el._frame) return;
-    el._applied++;
+    // Not one of the core's counted scrolls (`ScrollBy`, `ScrollTo`), as on the other platforms.
     const target = this.limitZoom(el, scale, false);
     const fx = el._frame[2] / 2;
     const fy = el._frame[3] / 2;
@@ -2137,19 +2712,19 @@ class Player {
       canvas.width = pw;
       canvas.height = ph;
     }
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    ctx.save();
+    const cx = canvas.getContext("2d");
+    cx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    cx.clearRect(0, 0, w, h);
+    cx.save();
     const slots = el._slots;
     const v = (n) => (Array.isArray(n) && n[0] === "$" ? (slots[n[1]] ?? 0) : n);
     const paint = (p) => {
       if (Array.isArray(p) && p[0] === "$") return slots[p[1]] ?? "transparent";
       if (p && typeof p === "object" && p.g) {
         const a = p.args;
-        const g = p.g === "linear" ? ctx.createLinearGradient(a[0], a[1], a[2], a[3])
-          : p.g === "radial" ? ctx.createRadialGradient(a[0], a[1], a[2], a[3], a[4], a[5])
-            : ctx.createConicGradient(a[0], a[1], a[2]);
+        const g = p.g === "linear" ? cx.createLinearGradient(a[0], a[1], a[2], a[3])
+          : p.g === "radial" ? cx.createRadialGradient(a[0], a[1], a[2], a[3], a[4], a[5])
+            : cx.createConicGradient(a[0], a[1], a[2]);
         for (const [offset, color] of p.stops) g.addColorStop(Math.min(1, Math.max(0, offset)), color);
         return g;
       }
@@ -2167,36 +2742,36 @@ class Player {
       try {
         if (name.startsWith("=")) {
           const prop = name.slice(1);
-          ctx[prop] = prop.endsWith("Style") ? paint(args[0]) : v(args[0]);
+          cx[prop] = prop.endsWith("Style") ? paint(args[0]) : v(args[0]);
         } else if (name === "fill" || name === "clip") {
-          if (args[0]) ctx[name](path(args[0]), args[1]);
-          else ctx[name](args[1]);
+          if (args[0]) cx[name](path(args[0]), args[1]);
+          else cx[name](args[1]);
         } else if (name === "stroke") {
-          if (args[0]) ctx.stroke(path(args[0]));
-          else ctx.stroke();
+          if (args[0]) cx.stroke(path(args[0]));
+          else cx.stroke();
         } else if (name === "shadowOffset") {
-          ctx.shadowOffsetX = args[0];
-          ctx.shadowOffsetY = args[1];
+          cx.shadowOffsetX = args[0];
+          cx.shadowOffsetY = args[1];
         } else if (name === "roundRect") {
-          ctx.roundRect(...args.slice(0, 4).map(v), args[4].map(v));
+          cx.roundRect(...args.slice(0, 4).map(v), args[4].map(v));
         } else if (name === "drawImage") {
           const img = this.canvasImage(args[0], el);
           if (!img) continue;
           const dest = args.slice(2).map(v);
-          if (args[1]) ctx.drawImage(img, ...args[1], ...dest);
-          else ctx.drawImage(img, ...dest);
+          if (args[1]) cx.drawImage(img, ...args[1], ...dest);
+          else cx.drawImage(img, ...dest);
         } else if (name === "fillText" || name === "strokeText") {
-          ctx[name](args[0], ...args.slice(1).map(v));
+          cx[name](args[0], ...args.slice(1).map(v));
         } else if (name === "setLineDash") {
-          ctx.setLineDash(args[0]);
-        } else if (typeof ctx[name] === "function") {
-          ctx[name](...args.map(v));
+          cx.setLineDash(args[0]);
+        } else if (typeof cx[name] === "function") {
+          cx[name](...args.map(v));
         }
       } catch (err) {
         console.warn("[nsh] canvas", name, err);
       }
     }
-    ctx.restore();
+    cx.restore();
   }
 
   canvasImage(uri, el) {
@@ -2239,6 +2814,10 @@ class Player {
       field = document.createElement(tag);
       field.className = "nsh-field";
       field._count = 0;
+      // The text last reported or set: an `input` event that leaves it
+      // (a composition's end in Safari, after the text it committed was
+      // reported) reports nothing.
+      field._known = "";
       this.wireInput(el, field);
       el._field = field;
       el.append(field);
@@ -2273,9 +2852,25 @@ class Player {
   }
 
   wireInput(el, field) {
-    field.addEventListener("input", () => {
-      field._count++;
-      this.event(el._id, "onChangeText", { text: field.value, count: field._count });
+    field.addEventListener("input", () => this.textChanged(el, field));
+    // An input method's composition: the app's value is held while it
+    // lasts (`op_iv`), since setting a field's value ends the composition
+    // and commits its text as typed (pinyin letters instead of the
+    // characters chosen).
+    field.addEventListener("compositionstart", (e) => {
+      field._composing = true;
+      this.compositionChanged(el, field, e.data ?? "");
+    });
+    field.addEventListener("compositionupdate", (e) => this.compositionChanged(el, field, e.data ?? ""));
+    field.addEventListener("compositionend", () => {
+      field._composing = false;
+      // The committed text is reported before the end (browsers differ in
+      // whether its `input` event comes before or after).
+      this.textChanged(el, field);
+      this.compositionChanged(el, field, "");
+      const pending = field._pending;
+      field._pending = null;
+      if (pending) this.op_iv([, el._id, ...pending]);
     });
     field.addEventListener("keydown", (e) => {
       if (el._events.has("onKeyPress")) {
@@ -2304,9 +2899,28 @@ class Player {
     field.addEventListener("select", () => this.selectionChanged(el, field));
     field.addEventListener("keyup", () => this.selectionChanged(el, field));
     field.addEventListener("pointerup", () => this.selectionChanged(el, field));
+    // Scrolling the text moves the caret.
+    field.addEventListener("scroll", () => this.caretMoved(el, field));
+    field.addEventListener("paste", (e) => this.pasted(el, e));
+  }
+
+  textChanged(el, field) {
+    if (field.value === field._known) return;
+    field._known = field.value;
+    field._count++;
+    this.event(el._id, "onChangeText", { text: field.value, count: field._count });
+  }
+
+  compositionChanged(el, field, text) {
+    const composing = !!field._composing;
+    const last = field._composition;
+    if (last && last[0] === composing && last[1] === text) return;
+    field._composition = [composing, text];
+    if (el._events.has("onCompositionChange")) this.event(el._id, "onCompositionChange", { composing, text });
   }
 
   selectionChanged(el, field) {
+    this.caretMoved(el, field);
     if (!el._events.has("onSelectionChange")) return;
     const sel = [field.selectionStart ?? 0, field.selectionEnd ?? 0];
     if (el._selection && el._selection[0] === sel[0] && el._selection[1] === sel[1]) return;
@@ -2314,9 +2928,94 @@ class Player {
     this.event(el._id, "onSelectionChange", { start: sel[0], end: sel[1] });
   }
 
+  /** A paste into a field: what the clipboard holds (`onPaste`, the files'
+   * bytes handed to WebAssembly as they are), and the field's own paste
+   * of the text unless `pasteBehavior` is `"report"`. The browser gives the
+   * clipboard only to this event, the user's paste. */
+  pasted(el, e) {
+    if (el._config?.pasteInserts === false) e.preventDefault();
+    if (!el._events.has("onPaste")) return;
+    const data = e.clipboardData;
+    const text = data?.getData("text/plain") ?? "";
+    const files = [...(data?.files ?? [])];
+    // A file manager's files are local paths the page cannot read: their
+    // `file:` URLs, when the browser lists them.
+    const uris = (data?.getData("text/uri-list") ?? "").split(/\r?\n/).filter((u) => u.startsWith("file:"));
+    Promise.all(files.map((f) => f.arrayBuffer())).then((buffers) => {
+      const size = buffers.reduce((n, b) => n + b.byteLength, 0);
+      const bytes = new Uint8Array(size);
+      let at = 0;
+      for (const b of buffers) {
+        bytes.set(new Uint8Array(b), at);
+        at += b.byteLength;
+      }
+      const json = JSON.stringify({
+        text,
+        files: files.map((f, i) => ({ name: f.name || "image.png", type: f.type, size: buffers[i].byteLength })),
+        uris,
+      });
+      this.call(() => this.withStrings([json, bytes], (jp, jl, bp, bl) => this.wasm.nsh_paste(el._id, jp, jl, bp, bl)));
+    });
+  }
+
+  /** `onCaretMove` while the field has the focus, if its caret moved. */
+  caretMoved(el, field) {
+    if (!el._events.has("onCaretMove") || document.activeElement !== field) return;
+    const caret = this.caretBounds(el, field);
+    const key = caret.join();
+    if (el._caret === key) return;
+    el._caret = key;
+    const [x, y, width, height] = caret;
+    this.event(el._id, "onCaretMove", { bounds: { origin: { x, y }, size: { width, height } } });
+  }
+
+  /** The caret at the selection's end in view `el` (`[x, y, width,
+   * height]`): a field tells no caret's place, so a hidden copy of it
+   * (its font, box and wrapping) holds the text up to the caret and a
+   * marker where the caret is, as libraries for textarea carets do. */
+  caretBounds(el, field) {
+    const style = getComputedStyle(field);
+    const area = field.tagName === "TEXTAREA";
+    const mirror = this._caretMirror ??= document.createElement("div");
+    const m = mirror.style;
+    for (const p of CARET_STYLE) m[p] = style[p];
+    m.position = "absolute";
+    m.visibility = "hidden";
+    m.top = "0";
+    m.left = "-9999px";
+    m.overflow = "hidden";
+    m.whiteSpace = area ? "pre-wrap" : "pre";
+    m.overflowWrap = area ? "break-word" : "normal";
+    document.body.appendChild(mirror);
+    const end = field.selectionEnd ?? field.value.length;
+    const before = field.value.slice(0, end);
+    mirror.textContent = field.type === "password" ? "•".repeat(before.length) : before;
+    const marker = document.createElement("span");
+    // Something to measure, even at the end of the text.
+    marker.textContent = field.value.slice(end) || ".";
+    mirror.appendChild(marker);
+    const fontSize = parseFloat(style.fontSize) || 16;
+    const height = parseFloat(style.lineHeight) || fontSize * 1.2;
+    const border = (side) => parseFloat(style[`border${side}Width`]) || 0;
+    let x = marker.offsetLeft + border("Left") - field.scrollLeft;
+    // A single line is centered in its box.
+    let y = area
+      ? marker.offsetTop + border("Top") - field.scrollTop
+      : (field.clientHeight - height) / 2 + border("Top");
+    mirror.remove();
+    x += field.offsetLeft;
+    y += field.offsetTop;
+    return [x, y, 1, height];
+  }
+
   op_iv([, id, text, count]) {
     const field = this.view(id)?._field;
     if (!field || count < field._count) return;
+    if (field._composing) {
+      field._pending = [text, count];
+      return;
+    }
+    field._known = text;
     if (field.value !== text) field.value = text;
   }
 
@@ -2336,76 +3035,45 @@ class Player {
     field.style.top = `${y}px`;
     field.style.width = `${w}px`;
     field.style.height = `${h}px`;
+    // Its text may wrap elsewhere now.
+    this.caretMoved(el, field);
   }
 
   // Navigation
 
-  op_scr([, id, title, shown, height, background, titleColor, tint, backVisible, preventBack, left, right, titleView, animation]) {
+  op_scr([, id, height, preventBack, header, animation]) {
     const el = this.view(id);
     if (!el) return;
-    el._screen = { title, shown, height, background, titleColor, tint, backVisible, preventBack, left, right, titleView, animation };
-    this.renderHeader(el);
+    el._screen = { height, preventBack, header, animation };
+    this.placeHeader(el);
+    const stack = el.parentNode;
+    if (stack?._kind === "stack" && stack._frame) this.reportRoot(el, stack._frame[2], stack._frame[3], this.screenInsets(el));
   }
 
-  renderHeader(screen) {
-    const c = screen._screen;
-    if (!c) return;
-    let header = screen._header;
-    if (!c.shown || c.height <= 0) {
-      header?.remove();
-      screen._header = null;
-      return;
-    }
-    if (!header) {
-      header = document.createElement("div");
-      screen._header = header;
-    }
-    header.textContent = "";
-    const background = c.background ?? (this.shownDark ? "#1c1c1e" : "#f9f9f9");
-    const color = c.titleColor ?? (this.shownDark ? "#fff" : "#000");
-    header.className = `nsh-header ${cssClass(`height:${c.height}px;background:${background};color:${color};`)}`;
-    const title = document.createElement("span");
-    title.textContent = c.title ?? "";
-    const titleView = c.titleView != null ? this.view(c.titleView) : null;
-    if (titleView) {
-      titleView.classList.add("nsh-slotted");
-      header.append(titleView);
-    } else {
-      header.append(title);
-    }
-    const stack = screen.parentNode;
-    const screens = stack ? [...stack.children].filter((s) => s._kind === "screen") : [];
-    const index = screens.indexOf(screen);
-    const leftView = c.left != null ? this.view(c.left) : null;
-    if (leftView) {
-      const slot = document.createElement("div");
-      slot.className = "nsh-header-back";
-      leftView.classList.add("nsh-slotted");
-      slot.append(leftView);
-      header.append(slot);
-    } else if (index > 0 && c.backVisible) {
-      const back = document.createElement("button");
-      back.className = `nsh-header-back ${cssClass(`color:${c.tint ?? "#007aff"};`)}`;
-      back.textContent = "‹ Back";
-      back.addEventListener("click", () => this.goBack(screen));
-      header.append(back);
-    }
-    const rightView = c.right != null ? this.view(c.right) : null;
-    if (rightView) {
-      const slot = document.createElement("div");
-      slot.className = "nsh-header-right";
-      rightView.classList.add("nsh-slotted");
-      slot.append(rightView);
-      header.append(slot);
-    }
-    screen.append(header);
+  /** Puts screen `screen`'s `header` (the app's view, which the core
+   * places at its top) in it, above its content; NSH draws no header. */
+  placeHeader(screen) {
+    const id = screen._screen?.header;
+    const header = id != null ? this.view(id) : null;
+    if (screen._header && screen._header !== header) screen._header.remove();
+    screen._header = header;
+    if (!header) return;
+    header.classList.add("nsh-page-header");
+    if (header.parentNode !== screen) screen.append(header);
   }
 
+  /** The insets of screen `screen`'s content: the page's safe area, but
+   * the top's when its `header` covers it. */
+  screenInsets(screen) {
+    const safe = this.safeProbe ? this.safeArea() : [0, 0, 0, 0];
+    return screen._screen?.header != null ? [0, safe[1], safe[2], safe[3]] : safe;
+  }
+
+  /** Back on screen `screen`: `onBackPress` when the app listens, then
+   * it pops unless `popOnBack` is false. */
   goBack(screen) {
-    if (screen._screen?.preventBack) {
-      this.event(screen._id, "onBackRequest");
-      return;
-    }
+    if (screen._events?.has("onBackRequest")) this.event(screen._id, "onBackRequest");
+    if (screen._screen?.preventBack) return;
     const stack = screen.parentNode;
     const screens = stack ? [...stack.children].filter((s) => s._kind === "screen") : [];
     const below = screens[screens.indexOf(screen) - 1];
@@ -2665,9 +3333,9 @@ class Player {
       }
       // A slide leaves the one under it shifted (`moveScreens`).
       if (top) screen.style.transform = "";
-      this.renderHeader(screen);
+      this.placeHeader(screen);
     });
-    if (added && stack._frame) this.reportRoot(added, stack._frame[2], stack._frame[3]);
+    if (added && stack._frame) this.reportRoot(added, stack._frame[2], stack._frame[3], this.screenInsets(added));
     this.syncHistorySoon();
   }
 
@@ -2678,88 +3346,28 @@ class Player {
 
   // Modals
 
-  op_mc([, id, animation, transparent, dismissible, presentation]) {
+  op_mc([, id, animation, closeOnEscape]) {
     const el = this.view(id);
     if (!el) return;
-    el._modal = { animation, transparent, dismissible, presentation };
-    // Its presentation decides its frame and whether a scrim dims the root.
+    el._modal = { animation, closeOnEscape };
     if (el.isConnected && !el._leaving) this.placeModal(el);
-    else this.styleModal(el);
-  }
-
-  /**
-   * How modal `el` is presented, as the platform the idiom is like does:
-   * `"card"` for a page or form sheet with the desktop or pad idiom (a card
-   * centered over the dimmed root, as the desktop backends and iPads show
-   * one), `"top"` for one in a phone browser (a card up to just below the
-   * top, as on iPhones), else `null`: it covers the root (transparent ones
-   * too, as on iOS).
-   */
-  sheetKind(el) {
-    const m = el._modal;
-    if (!m || m.transparent || !m.presentation || m.presentation === "fullScreen") return null;
-    return this.idiom === "phone" ? "top" : "card";
-  }
-
-  /** Classes of modal `el`: an opaque background, or a sheet's card. */
-  styleModal(el) {
-    const kind = this.sheetKind(el);
-    el.classList.toggle("nsh-modal-opaque", !kind && !el._modal?.transparent);
-    el.classList.toggle("nsh-modal-sheet", !!kind);
-    el.classList.toggle("nsh-modal-top", kind === "top");
-  }
-
-  /**
-   * Where modal `el` sits in the root, and the insets system UI covers in
-   * it: the whole root with its safe area, or a sheet's card. Cards are as
-   * wide as the root allows up to 720 (page sheets) or 540 × 620 (form
-   * sheets), with a margin of 32 (less in small roots), as on Linux and
-   * macOS; a phone's starts 10 below the safe area's top.
-   */
-  modalFrame(el) {
-    const [w, h] = this.size;
-    const safe = this.safeProbe ? this.safeArea() : [0, 0, 0, 0];
-    const kind = this.sheetKind(el);
-    if (!kind) return { frame: [0, 0, w, h], insets: safe };
-    if (kind === "top") {
-      const y = safe[0] + 10;
-      return { frame: [0, y, w, Math.max(0, h - y)], insets: [0, safe[1], safe[2], safe[3]] };
+    // Its config comes after its insert in the batch that presents it: it
+    // starts out of sight the way it now comes in.
+    if (el._entering) {
+      el.style.transform = "";
+      el.style.opacity = "";
+      this.hideModal(el, this.modalMotion(el));
     }
-    const form = el._modal.presentation === "formSheet";
-    const margin = (extent) => Math.max(8, Math.min(32, Math.round(extent * 0.05)));
-    const cw = Math.round(Math.max(0, Math.min(w - 2 * margin(w), form ? 540 : 720)));
-    const ch = Math.round(Math.max(0, Math.min(h - 2 * margin(h), form ? 620 : Infinity)));
-    return { frame: [Math.round((w - cw) / 2), Math.round((h - ch) / 2), cw, ch], insets: [0, 0, 0, 0] };
   }
 
-  /** Sizes presented modal `el` (and its scrim) and reports its size. */
+  /** Sizes presented modal `el` to the root (a transparent layer over it,
+   * whatever its presentation) and reports its size and the safe area. */
   placeModal(el) {
-    this.styleModal(el);
-    const { frame, insets } = this.modalFrame(el);
+    const [w, h] = this.size;
+    const insets = this.safeProbe ? this.safeArea() : [0, 0, 0, 0];
+    const frame = [0, 0, w, h];
     el._frame = frame;
     this.placeFrame(el);
-    if (this.sheetKind(el)) {
-      if (!el._scrim) {
-        const scrim = (el._scrim = document.createElement("div"));
-        scrim.className = "nsh-modal-scrim";
-        // Clicking it asks the sheet to close, as going back does; only
-        // clicks pressed on it count (not the one of the press that
-        // presented the sheet).
-        let down = false;
-        scrim.addEventListener("pointerdown", (e) => {
-          down = true;
-          e.stopPropagation();
-        });
-        scrim.addEventListener("click", () => {
-          if (down && !el._leaving) this.requestClose(el);
-          down = false;
-        });
-        if (el.isConnected) el.before(scrim);
-      }
-    } else if (el._scrim) {
-      el._scrim.remove();
-      el._scrim = null;
-    }
     const key = `${frame[2]},${frame[3]},${insets}`;
     if (el._reported !== key) {
       el._reported = key;
@@ -2780,7 +3388,6 @@ class Player {
     const below = this.size[1] - (el._frame?.[1] ?? 0);
     if (motion === "slide") el.style.transform = `translateY(${below}px)`;
     if (motion === "fade") el.style.opacity = "0";
-    if (el._scrim) el._scrim.style.opacity = "0";
   }
 
   present(el) {
@@ -2796,21 +3403,16 @@ class Player {
     el.setAttribute("aria-modal", "true");
     this.root.append(el);
     this.placeModal(el);
-    const scrim = el._scrim;
     el.style.transition = "none";
-    if (scrim) scrim.style.transition = "none";
     this.hideModal(el, motion);
-    if (scrim && motion === "none") scrim.style.opacity = "";
+    el._entering = true;
     this.scopeFocus();
     this.syncHistorySoon();
     requestAnimationFrame(() => requestAnimationFrame(() => {
+      el._entering = false;
       el.style.transition = "";
       el.style.transform = "";
       el.style.opacity = "";
-      if (scrim) {
-        scrim.style.transition = "";
-        scrim.style.opacity = "";
-      }
       setTimeout(() => this.event(el._id, "onShow"), motion === "none" ? 0 : 350);
     }));
   }
@@ -2821,9 +3423,6 @@ class Player {
     el._leaving = true;
     const motion = this.modalMotion(el);
     this.hideModal(el, motion);
-    const scrim = el._scrim;
-    el._scrim = null;
-    scrim?.classList.add("nsh-inert");
     this.scopeFocus();
     this.syncHistorySoon();
     const restore = el._restoreFocus;
@@ -2833,16 +3432,16 @@ class Player {
         el.remove();
         this.dropLeftWith(el);
       }
-      scrim?.remove();
       if (!reported) this.event(el._id, "onDismiss");
     }, motion === "none" ? 0 : 350);
   }
 
-  /** Going back or Escape on a modal: it asks to close (`onRequestClose`);
-   * a `dismissible` one closes natively, then reports `onDismiss`. */
+  /** Going back or Escape on a modal: it asks to close (`onRequestClose`,
+   * reason `"cancel"`); with `closeOnEscape` it closes natively, then
+   * reports `onDismiss`. */
   requestClose(el) {
-    this.event(el._id, "onRequestClose");
-    if (el._modal?.dismissible && !el._leaving) {
+    this.event(el._id, "onRequestClose", { reason: "cancel" });
+    if ((el._modal?.closeOnEscape ?? true) && !el._leaving) {
       el._closed = true;
       this.event(el._id, "onDismiss");
       this.dismiss(el, true);
@@ -2854,7 +3453,7 @@ class Player {
   scopeFocus() {
     const top = this.dialogs?.[this.dialogs.length - 1] ?? this.topModal();
     for (const child of this.root.children) {
-      if (child === this.live || child.classList.contains("nsh-error") || child.classList.contains("nsh-modal-scrim")) continue;
+      if (child === this.live || child.classList.contains("nsh-error")) continue;
       child.inert = (child._kind === "modal" && !!child._leaving) || (!!top && child !== top);
     }
   }
@@ -2862,10 +3461,10 @@ class Player {
   // Web views and videos
 
   /**
-   * A web view is an <iframe>. HTML (`source={{ html }}`) loads as
+   * A web view is an <iframe>. HTML (`html`) loads as
    * `srcdoc` in a sandbox with an origin of its own (it never reaches the
    * player's page), with a bridge script first: the page's
-   * `window.ReactNativeWebView.postMessage(data)` reaches `onMessage`
+   * `window.nsh.postMessage(data)` reaches `onMessage`
    * through a `MessageChannel`, and `injectJavaScript` runs through it.
    * `injectedJavaScriptBeforeContentLoaded` / `injectedJavaScript` are
    * scripts at the document's start and end. A URL loads as it is
@@ -3029,13 +3628,18 @@ class Player {
       case "scrollTo":
         if (!el) break;
         el._applied++;
+        this.stopGlide(el, args[0], args[1]);
+        el._smooth = args[2] ? [args[0], args[1]] : null;
         el.scrollTo({ left: args[0], top: args[1], behavior: args[2] ? "smooth" : "instant" });
         break;
-      case "scrollToEnd":
+      case "scrollToEnd": {
         if (!el) break;
         el._applied++;
-        el.scrollTo({ left: el._horizontal ? el.scrollWidth : 0, top: el._horizontal ? 0 : el.scrollHeight, behavior: args[0] ? "smooth" : "instant" });
+        const [x, y] = el._horizontal ? [el.scrollWidth, 0] : [0, el.scrollHeight];
+        this.stopGlide(el, x, y);
+        el.scrollTo({ left: x, top: y, behavior: args[0] ? "smooth" : "instant" });
         break;
+      }
       case "zoomTo": if (el) this.zoomCommand(el, ...args); break;
       case "dialog": this.dialog(args[0], args[1], args[2], args[3], args[4] ?? [], args[5] ?? true, args[6] ?? false); break;
       case "toast": this.toast(args[0], args[1]); break;
@@ -3059,11 +3663,23 @@ class Player {
         }
         break;
       case "seek": if (el?._video) el._video.currentTime = args[0]; break;
+      case "openUrl": this.event(ROOT_ID, "onOpenUrl", { id: args[0], opened: this.openUrl(args[1]) }); break;
       case "setClipboard": this.writeClipboard(args[0]); break;
       case "readClipboard": this.readClipboard(args[0], args[1]); break;
+      case "setClipboardImage": this.writeClipboardImage(args[0]); break;
+      case "readClipboardImage": this.readClipboardImage(args[0], args[1]); break;
+      // Pages see no local paths: never any files.
+      case "readClipboardFiles": this.event(ROOT_ID, "onClipboard", { id: args[0], has: false, files: "" }); break;
+      case "pickImages": this.pickImages(args[0], args[1], args[2], args[3], args[4]); break;
+      case "hostCall": this.hostCall(args[0], args[1], args[2]); break;
       case "imageInfo": this.imageInfo(args[0], args[1]); break;
-      case "statusBar": this.setThemeColor(args[0]); break;
       case "back": this.defaultBack(); break;
+      case "exitApp": {
+        const app = this.app;
+        // Finish the current engine call before releasing its surface.
+        queueMicrotask(() => { if (this.app === app) this.reset(); });
+        break;
+      }
       case "announce":
         // Cleared first: the same text again is announced again.
         this.live.textContent = "";
@@ -3081,26 +3697,10 @@ class Player {
     }
   }
 
-  /** `StatusBar`'s `web={{ themeColor }}`: the page's theme color ("" for the page's own). */
-  setThemeColor(color) {
-    let meta = document.querySelector('meta[name="theme-color"]:not([media])');
-    if (!meta && !color) return;
-    if (!meta) {
-      meta = document.createElement("meta");
-      meta.name = "theme-color";
-      meta._nshAdded = true;
-      document.head.append(meta);
-    }
-    if (meta._nshOriginal === undefined) meta._nshOriginal = meta.getAttribute("content");
-    if (color) meta.content = color;
-    else if (meta._nshAdded) {
-      meta.remove();
-    } else if (meta._nshOriginal === null) meta.removeAttribute("content");
-    else meta.content = meta._nshOriginal;
-  }
+
 
   /**
-   * `Clipboard.setString`. The async Clipboard API needs a secure context
+   * `Clipboard.writeText`. The async Clipboard API needs a secure context
    * (and, in some browsers, a user gesture); a copy command is the fallback.
    */
   writeClipboard(text) {
@@ -3122,11 +3722,28 @@ class Player {
   }
 
   /**
-   * `Clipboard.getString` / `hasString`: browsers only tell by reading,
+   * `Clipboard.readText` / `hasText`: browsers only tell by reading,
    * which may ask the user (Chromium asks once per site; Safari and Firefox
-   * show a paste button), and fails in an insecure context. `hasString`
+   * show a paste button), and fails in an insecure context. `hasText`
    * reads too: there is no way to ask without reading.
    */
+  // `openUrl` (the URL passed nsh_core::open_url's check): a web page in a
+  // new tab, another scheme (mailto:, tel:, ...) through the browser's
+  // handler. Whether the browser let it open (a blocked pop-up is false).
+  openUrl(url) {
+    let opened = null;
+    try {
+      opened = window.open(url, "_blank");
+    } catch (err) {
+      console.warn(`[nsh] openUrl: ${err}`);
+    }
+    // The page opened knows nothing of this one.
+    if (opened) {
+      try { opened.opener = null; } catch {}
+    }
+    return !!opened;
+  }
+
   async readClipboard(request, hasOnly) {
     let text = "";
     try {
@@ -3137,6 +3754,150 @@ class Player {
     const payload = { id: request, has: text.length > 0 };
     if (!hasOnly && text) payload.text = text;
     this.event(ROOT_ID, "onClipboard", payload);
+  }
+
+  /** `Clipboard.writeImage`: a `data:` URI's image as a clipboard item (browsers take PNG). */
+  async writeClipboardImage(uri) {
+    try {
+      const blob = await (await fetch(uri)).blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+    } catch {
+      // Denied, an insecure context, or a type the browser does not write.
+    }
+  }
+
+  /**
+   * `Picker.pickImages`: a file input of images. Files are read as they are,
+   * unless one is larger than `maxDimension` (or a JPEG with a `quality`):
+   * then it is drawn upright at the size that fits and encoded again (a PNG
+   * stays a PNG), as `nsh_core::picker` says. A cancelled input sends none.
+   */
+  pickImages(request, limit, maxDimension, quality, current) {
+    const app = this.app;
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = current ? "image/*" : "image/jpeg,image/png,image/gif,image/webp";
+    input.multiple = limit > 1;
+    input.style.display = "none";
+    let answered = false;
+    const answer = async (files) => {
+      if (answered) return;
+      answered = true;
+      input.remove();
+      const picked = [];
+      for (const file of files.slice(0, limit)) {
+        try {
+          picked.push(await this.preparePicked(file, maxDimension, quality));
+        } catch {
+          // Unreadable: left out.
+        }
+      }
+      if (app !== this.app) return;
+      this.call((w) => {
+        for (const p of picked) {
+          this.withStrings([p.name, p.type, p.bytes], (np, nl, tp, tl, bp, bl) =>
+            w.nsh_picked_file(np, nl, tp, tl, bp, bl, p.width, p.height, p.lastModified));
+        }
+        return w.nsh_picked(request);
+      });
+    };
+    input.addEventListener("change", () => answer([...(input.files ?? [])]));
+    input.addEventListener("cancel", () => answer([]));
+    this.root.append(input);
+    input.click();
+  }
+
+  async preparePicked(file, maxDimension, quality) {
+    const type = file.type.toLowerCase();
+    let bitmap = null;
+    try {
+      bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    } catch {
+      // A format the browser does not decode: kept as it is.
+    }
+    const width = bitmap?.width ?? 0;
+    const height = bitmap?.height ?? 0;
+    const longer = Math.max(width, height);
+    const scale = maxDimension > 0 && longer > maxDimension;
+    const requality = quality >= 0 && type === "image/jpeg";
+    const keep = { name: file.name, type, lastModified: file.lastModified, width, height };
+    if (!bitmap || !(scale || requality)) {
+      bitmap?.close();
+      return { ...keep, bytes: new Uint8Array(await file.arrayBuffer()) };
+    }
+    const factor = scale ? maxDimension / longer : 1;
+    const w = Math.max(1, Math.round(width * factor));
+    const h = Math.max(1, Math.round(height * factor));
+    const canvas = new OffscreenCanvas(w, h);
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, w, h);
+    bitmap.close();
+    const png = type === "image/png" && scale;
+    const out = await canvas.convertToBlob(png ? { type: "image/png" } : { type: "image/jpeg", quality: quality >= 0 ? quality : 0.9 });
+    const name = file.name.replace(/\.[^.]*$/, "") + (png ? ".png" : ".jpg");
+    return { ...keep, name, type: out.type, width: w, height: h, bytes: new Uint8Array(await out.arrayBuffer()) };
+  }
+
+  /** `Clipboard.readImage` / `hasImage`: the first image item, as a `data:` URI with its size. */
+  async readClipboardImage(request, hasOnly) {
+    const app = this.app;
+    const answer = (payload) => app === this.app && this.event(ROOT_ID, "onClipboard", { id: request, ...payload });
+    let blob = null;
+    try {
+      for (const item of (await navigator.clipboard?.read()) ?? []) {
+        const type = item.types.find((t) => t.startsWith("image/"));
+        if (type) {
+          blob = await item.getType(type);
+          break;
+        }
+      }
+    } catch {
+      // Denied, or no clipboard access (an insecure context).
+    }
+    if (!blob || hasOnly) return answer({ has: !!blob });
+    const uri = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+    if (!uri) return answer({ has: true });
+    const img = new Image();
+    img.onload = () => answer({ has: true, uri, width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = () => answer({ has: true });
+    img.src = uri;
+  }
+
+  /**
+   * `nsh/host`'s `host.call`: `options.host.call(name, args)`, answered
+   * with `onHost` `{ type: "reply" }` whatever happens (the app's call waits for the
+   * reply): a missing host, a throw, a rejection or a result that is not
+   * JSON answer `ok: false` with the error's message.
+   */
+  async hostCall(request, name, args) {
+    // Answers for an app that was replaced meanwhile are dropped.
+    const app = this.app;
+    let reply;
+    try {
+      const host = this.options.host;
+      if (typeof host?.call !== "function") throw new Error("this page has no host (createPlayer's `host`)");
+      const value = (await host.call(name, args)) ?? null;
+      reply = JSON.stringify({ type: "reply", id: request, ok: true, value });
+    } catch (err) {
+      reply = JSON.stringify({ type: "reply", id: request, ok: false, error: String(err?.message ?? err) });
+    }
+    if (app === this.app) this.eventJson(ROOT_ID, "onHost", reply);
+  }
+
+  /**
+   * Sends `event` with `payload` to the app's `host.on(event)` listeners.
+   * The payload is serialized here, so one that is not JSON throws to the
+   * caller rather than inside a deferred engine call. Events sent before
+   * the app runs wait for it (`begin`).
+   */
+  hostEvent(event, payload = null) {
+    const json = JSON.stringify({ type: "event", event: String(event), payload: payload ?? null });
+    if (this.started) this.eventJson(ROOT_ID, "onHost", json);
+    else this.hostEvents?.push(json);
   }
 
   /** `Image.getSize` / `prefetch`: loads the image (the browser keeps it cached for the views that show it). */
@@ -3151,6 +3912,196 @@ class Player {
   }
 
   // Network -------------------------------------------------------------
+
+  /** A browser operation returns its error without reentering the engine. */
+  /** Executes app-private fs/promises requests using persistent browser OPFS. */
+  filesystemStart(id, request, bytes) {
+    const token = {};
+    this.fileOperations.set(id, token);
+    const active = () => this.fileOperations.get(id) === token;
+    const error = (code, message = code) => Object.assign(new Error(message), { code });
+    const parts = (path) => {
+      const value = path.split("/").filter(Boolean);
+      if (value.some(p => p === "." || p === ".." || p.includes("\\"))) throw error("EACCES");
+      return value;
+    };
+    const execute = async () => {
+      if (!navigator.storage?.getDirectory) throw error("ENOTSUP", "This browser does not provide Origin Private File System storage");
+      const origin = await navigator.storage.getDirectory();
+      // Hashing makes arbitrary app IDs safe as a single OPFS directory name.
+      const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(request.namespace));
+      const namespace = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, "0")).join("");
+      const apps = await origin.getDirectoryHandle("nsh-files", {create:true});
+      const root = await apps.getDirectoryHandle(namespace, {create:true});
+      const directory = async (names, create = false) => {
+        let dir = root;
+        for (const name of names) dir = await dir.getDirectoryHandle(name, {create});
+        return dir;
+      };
+      const locate = async (path) => {
+        const names = parts(path);
+        if (!names.length) return {handle:root, parent:root, name:""};
+        const name = names.pop(), parent = await directory(names);
+        let handle;
+        try {handle = await parent.getFileHandle(name);} catch (e) {
+          if (e.name !== "TypeMismatchError") throw e;
+          handle = await parent.getDirectoryHandle(name);
+        }
+        return {handle,parent,name};
+      };
+      const names = parts(request.path), name = names.at(-1);
+      if (!active()) return {};
+      if (request.op === "mkdir") {
+        if (!names.length) {if (!request.recursive) throw error("EEXIST"); return {};}
+        if (request.recursive) {await directory(names,true); return {};}
+        const parent = await directory(names.slice(0,-1));
+        try {await locate(request.path); throw error("EEXIST");} catch(e) {if(e.name !== "NotFoundError") throw e;}
+        await parent.getDirectoryHandle(name,{create:true}); return {};
+      }
+      if (request.op === "write") {
+        if (!name) throw error("EISDIR");
+        const parent = await directory(names.slice(0,-1));
+        let handle;
+        try {handle=await parent.getFileHandle(name,{create:true});} catch(e) {if(e.name === "TypeMismatchError") throw error("EISDIR");throw e;}
+        if (!active()) return {};
+        const writer = await handle.createWritable();
+        try {
+          if (!active()) {await writer.abort(); return {};}
+          await writer.write(bytes);
+          if (!active()) {await writer.abort(); return {};}
+          await writer.close();
+        } catch(e) {await writer.abort().catch(()=>{});throw e;}
+        return {};
+      }
+      let item;
+      try {item = await locate(request.path);} catch(e) {if(request.op === "exists" && e.name === "NotFoundError") return {kind:"exists",value:false}; throw e;}
+      const {handle,parent} = item;
+      const isDir = handle.kind === "directory";
+      switch(request.op) {
+        case "exists": return {kind:"exists",value:true};
+        case "read": {
+          if(isDir) throw error("EISDIR");
+          const file=await handle.getFile();
+          if(file.size > request.maxBytes) throw error("EFBIG", "File exceeds the configured read limit");
+          return {kind:"bytes",bytes:new Uint8Array(await file.arrayBuffer())};
+        }
+        case "entries": {
+          if(!isDir) throw error("ENOTDIR");
+          const entries=[]; let nameBytes=0;
+          for await (const [name,entry] of handle.entries()) {
+            nameBytes += new TextEncoder().encode(name).length;
+            if(entries.length >= request.maxEntries || nameBytes > request.maxNameBytes) throw error("EFBIG", "Directory exceeds the configured listing limit");
+            entries.push({name,directory:entry.kind === "directory"});
+          }
+          return {kind:"entries",entries};
+        }
+        case "stat": {
+          const file=isDir?null:await handle.getFile();
+          return {kind:"metadata",file:!isDir,directory:isDir,size:file?.size??0,mtime:file?.lastModified??0};
+        }
+        case "readlink": throw error("EINVAL", "OPFS entries are regular files and directories");
+        case "unlink": if(isDir) throw error("EISDIR"); if (!active()) return {}; await parent.removeEntry(item.name); return {};
+        case "rmdir":
+          if(!isDir) throw error("ENOTDIR");
+          if(!item.name) throw error("EBUSY");
+          for await (const _ of handle.keys()) throw error("ENOTEMPTY");
+          if (!active()) return {};
+          await parent.removeEntry(item.name); return {};
+        case "rename": {
+          const to=parts(request.to), targetName=to.pop();
+          if(!item.name || !targetName) throw error("EBUSY");
+          const target=await directory(to);
+          if(await parent.isSameEntry(target) && item.name===targetName) return {};
+          try {
+            const existing = (await locate(request.to)).handle;
+            if(existing.kind === "directory" && !isDir) throw error("EISDIR");
+            if(existing.kind === "file" && isDir) throw error("ENOTDIR");
+            if(existing.kind === "directory") {
+              for await (const _ of existing.keys()) throw error("ENOTEMPTY");
+            }
+          } catch(e) {if(e.name !== "NotFoundError") throw e;}
+          if(typeof handle.move !== "function") throw error("ENOTSUP", "This browser does not support atomic OPFS rename for this entry");
+          // The browser's move preserves a file's identity; never emulate it with copy/delete.
+          if (!active()) return {};
+          await handle.move(target,targetName); return {};
+        }
+        default: throw error("ENOTSUP");
+      }
+    };
+    execute().then(result => {
+      if(!active()) return;
+      const bytes=result.bytes??new Uint8Array(); delete result.bytes;
+      this.call(w => this.withStrings([JSON.stringify(result),bytes], (p,l,bp,bl) => w.nsh_filesystem_reply(id,p,l,bp,bl)));
+      this.fileOperations.delete(id);
+    }, e => {
+      if(!active()) return;
+      const codes={NotFoundError:"ENOENT",TypeMismatchError:"ENOTDIR",NotAllowedError:"EACCES",SecurityError:"EACCES",QuotaExceededError:"ENOSPC",InvalidModificationError:"ENOTEMPTY",NotSupportedError:"ENOTSUP"};
+      const reply={error:String(e?.message??e),code:e?.code&&typeof e.code === "string"?e.code:(codes[e?.name]??"EIO"),syscall:request.op,path:request.path};
+      this.call(w => this.withStrings([JSON.stringify(reply),new Uint8Array()], (p,l,bp,bl) => w.nsh_filesystem_reply(id,p,l,bp,bl)));
+      this.fileOperations.delete(id);
+    });
+  }
+
+  websocketOperation(operation) {
+    try {
+      operation();
+      return 1;
+    } catch (error) {
+      this.withStrings([String(error?.message ?? error)], (p, l) => this.wasm.nsh_websocket_reply(p, l));
+      return 0;
+    }
+  }
+
+  websocketStart(id, request) {
+    const socket = new WebSocket(request.url, request.protocols);
+    socket.binaryType = "arraybuffer";
+    this.websockets.set(id, socket);
+    const report = (kind, value, code = 0, clean = false) => {
+      if (this.websockets.get(id) !== socket) return;
+      this.call((w) => {
+        // A queued callback from before stop or a hot replacement cannot enter the new engine.
+        if (this.websockets.get(id) !== socket) return w.nsh_pump();
+        // Count UTF-8 without allocating an encoded copy of an oversized peer message.
+        const limit = 8 * 1024 * 1024;
+        let length = typeof value === "string" ? 0 : value.byteLength;
+        if (typeof value === "string") {
+          for (let i = 0; i < value.length && length <= limit; i++) {
+            const ch = value.charCodeAt(i);
+            if (ch < 0x80) length++;
+            else if (ch < 0x800) length += 2;
+            else if (ch >= 0xd800 && ch <= 0xdbff && i + 1 < value.length &&
+              value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) {
+              length += 4;
+              i++;
+            } else length += 3;
+          }
+        }
+        if (length > limit) {
+          const message = "WebSocket message exceeds the 8 MiB limit";
+          return this.withStrings([message], (p, l) => {
+            try {
+              w.nsh_websocket_event(id, 3, p, l, 0, 0);
+              return w.nsh_websocket_event(id, 4, p, l, 1009, 0);
+            } finally { this.websocketCancel(id); }
+          });
+        }
+        return this.withStrings([value], (p, l) => w.nsh_websocket_event(id, kind, p, l, code, clean ? 1 : 0));
+      });
+    };
+    socket.onopen = () => report(0, socket.protocol);
+    socket.onmessage = (event) => report(typeof event.data === "string" ? 1 : 2,
+      typeof event.data === "string" ? event.data : new Uint8Array(event.data));
+    socket.onerror = () => report(3, "Browser WebSocket failed (network, TLS, origin or server handshake error)");
+    socket.onclose = (event) => report(4, event.reason, event.code, event.wasClean);
+  }
+
+  websocketCancel(id) {
+    const socket = this.websockets.get(id);
+    if (!socket) return;
+    this.websockets.delete(id);
+    socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null;
+    try { socket.close(); } catch { /* The browser already ended this socket. */ }
+  }
 
   /**
    * Request `id` from the engine's `fetch` (`net.rs`): made with the
@@ -3266,7 +4217,8 @@ class Player {
    * presses the cancel button if any (`keyDown`, `_cancel`).
    */
   dialog(dialogId, title, message, buttons, styles, cancelable, sheet) {
-    const list = buttons.length ? buttons : ["OK"];
+    // `AlertDialog` always brings the app's actions: no label of NSH's own.
+    const list = buttons;
     const style = (i) => styles[i] ?? "default";
     const desktop = this.desktopUI;
     const backdrop = document.createElement("div");
@@ -3427,6 +4379,40 @@ class Player {
     return out;
   }
 
+  /** Convert viewport coordinates through the view's composed 2D transforms. */
+  mousePoint(el, e) {
+    let a = 1, b = 0, c = 0, d = 1;
+    for (let node = el; node; node = node.parentElement) {
+      const transform = getComputedStyle(node).transform;
+      if (transform === "none") continue;
+      const m = new DOMMatrix(transform);
+      [a, b, c, d] = [m.a * a + m.c * b, m.b * a + m.d * b,
+        m.a * c + m.c * d, m.b * c + m.d * d];
+    }
+    const r = el.getBoundingClientRect();
+    const det = a * d - b * c;
+    if (!det) return null;
+    const style = getComputedStyle(el);
+    const w = parseFloat(style.width), h = parseFloat(style.height);
+    // The bounding rectangle includes transform origins and scrolling;
+    // its top left is the minimum of the transformed border-box corners.
+    const x = e.clientX - r.left + Math.min(0, a * w, c * h, a * w + c * h);
+    const y = e.clientY - r.top + Math.min(0, b * w, d * h, b * w + d * h);
+    return [(d * x - c * y) / det, (a * y - b * x) / det];
+  }
+
+  /** Mouse motion follows the hit view, even during pointer capture. */
+  mouseMoved(e) {
+    if (e.pointerType !== "mouse" || !this.mouseTracked.size) return;
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    if (!target || !this.root.contains(target)) return;
+    for (const el of this.ancestors(this.viewOf(target))) {
+      if (!el._events?.has("onMouseMove")) continue;
+      const point = this.mousePoint(el, e);
+      if (point) this.event(el._id, "onMouseMove", { x: point[0], y: point[1] });
+    }
+  }
+
   installInput() {
     const root = this.root;
     root.addEventListener("pointerdown", (e) => this.pointerDown(e));
@@ -3446,7 +4432,7 @@ class Player {
     });
     // No page menu over the app (nor iOS's callout on a long press); fields
     // and selectable text keep theirs.
-    root.addEventListener("contextmenu", (e) => this.editable(e.target) || e.preventDefault());
+    root.addEventListener("contextmenu", (e) => this.contextMenu(e) || this.editable(e.target) || e.preventDefault());
     root.addEventListener("copy", (e) => this.copyText(e));
     root.addEventListener("wheel", (e) => this.wheel(e), { passive: false });
     // Safari's touchpad pinches (it sends no ctrl+wheel).
@@ -3454,12 +4440,13 @@ class Player {
     root.addEventListener("gesturechange", (e) => this.gesture && this.gestureZoom(e, 1));
     root.addEventListener("gestureend", (e) => this.gesture && this.gestureZoom(e, 2));
     root.addEventListener("pointermove", (e) => {
+      this.mouseMoved(e);
       if (e.pointerType !== "mouse") return;
       this.hover = [e.clientX, e.clientY];
-      // The scroll views under the mouse show their bars.
+      // Reveal only a draggable thumb under the pointer.
       if (!this.desktopUI || e.buttons) return;
       const view = this.viewOf(e.target);
-      if (view) for (const el of this.ancestors(view)) if (el._kind === "scroll") this.showBar(el);
+      if (view) for (const el of this.ancestors(view)) if (el._kind === "scroll") this.hoverBar(el, e);
     });
     root.addEventListener("focusin", () => (Player.active = this));
     window.addEventListener("keydown", (e) => this.keyDown(e));
@@ -3477,18 +4464,65 @@ class Player {
     if (this.history) this.installHistory();
   }
 
+  /**
+   * `onContextMenu` of the nearest view around `e`'s target that listens,
+   * unless a field or selectable text is nearer (it keeps the browser's
+   * menu); true when a view took it. The browser raises `contextmenu` for
+   * right clicks, Control-clicks on macOS and the keyboard's menu key.
+   */
+  contextMenu(e) {
+    const view = this.viewOf(e.target);
+    if (!view) return false;
+    for (const el of this.ancestors(view)) {
+      if (el._events?.has("onContextMenu")) {
+        e.preventDefault();
+        const [pageX, pageY] = this.point(e);
+        const r = el.getBoundingClientRect();
+        this.event(el._id, "onContextMenu", {
+          position: { x: e.clientX - r.left, y: e.clientY - r.top },
+          pagePosition: { x: pageX, y: pageY },
+          modifiers: { control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, platform: e.metaKey },
+        });
+        return true;
+      }
+      if (el.matches(".nsh-field, .nsh-selectable")) return false;
+    }
+    return false;
+  }
+
   /** Whether the browser handles presses at `target` itself: fields,
    * selectable text, hosted pages and videos. */
   editable(target) {
-    return !!target?.closest?.(".nsh-field, .nsh-selectable, iframe, video") || !!this.textAt(target);
+    return !!target?.closest?.(".nsh-field, .nsh-selectable, iframe, video") || !!this.textAt(target) || this.areaGap(target);
   }
 
-  /** The text at `target` that is selectable by default (desktop idiom:
-   * not set off, in nothing that takes presses or touches). */
+  /** Whether `target` is in a selection area outside its texts, where a
+   * drag starts a selection as between a web page's paragraphs: not in a
+   * view inside the area that takes presses (they keep theirs) nor in a
+   * text set off. */
+  areaGap(target) {
+    const area = target?.closest?.(".nsh-area");
+    if (!area || target.closest(".nsh-noselect")) return false;
+    const press = target.closest(".nsh-press");
+    return !press || !area.contains(press);
+  }
+
+  /** The text at `target` that is selectable by default: not set off, and
+   * in a selection area, or (desktop idiom) in nothing that takes presses
+   * or touches. */
   textAt(target) {
-    if (!this.desktopUI) return null;
     const text = target?.closest?.(".nsh-autoselect");
-    return text && !text.closest(".nsh-press") ? text : null;
+    if (!text) return null;
+    if (text.closest(".nsh-area")) return text;
+    return this.desktopUI && !text.closest(".nsh-press") ? text : null;
+  }
+
+  /** The selection area `el` is in: the outermost, as an area inside
+   * another is part of it. */
+  areaOf(el) {
+    let area = null;
+    for (let a = el?.closest?.(".nsh-area"); a; a = a.parentElement?.closest(".nsh-area")) area = a;
+    return area;
   }
 
   /** This player takes the keys: the focus is in it, or it was the last
@@ -3576,7 +4610,10 @@ class Player {
 
   /** What copying the selection in text gives: its runs in order, each
    * line's break after its last run (`_after`) and a newline between
-   * texts; absolutely placed runs would each be a line of their own. */
+   * texts; absolutely placed runs would each be a line of their own. In a
+   * selection area, texts on one row (their boxes overlap vertically: a
+   * table's cells) are joined by a tab instead, and attachments (U+FFFC)
+   * are left out, as the native platforms copy. */
   copyText(e) {
     const sel = getSelection();
     if (e.target.closest?.(".nsh-field")) return;
@@ -3584,6 +4621,8 @@ class Player {
     const range = sel.getRangeAt(0);
     let out = "";
     let last = null;
+    let lastArea = null;
+    let lastBox = null;
     let found = false;
     for (const run of this.root.querySelectorAll(".nsh-run")) {
       // Text that cannot be selected is not copied, as by the browser.
@@ -3595,9 +4634,18 @@ class Player {
       const to = range.endContainer === node ? range.endOffset : text.length;
       if (from >= to) continue;
       found = true;
-      if (last && last !== run.parentNode && !out.endsWith("\n")) out += "\n";
-      last = run.parentNode;
-      out += text.slice(from, to);
+      const area = this.areaOf(run.parentNode);
+      if (last !== run.parentNode) {
+        const box = area ? run.parentNode.getBoundingClientRect() : null;
+        if (last && area && area === lastArea && box.top < lastBox.bottom && lastBox.top < box.bottom) {
+          out = out.replace(/\n$/, "") + "\t";
+        } else if (last && !out.endsWith("\n")) out += "\n";
+        last = run.parentNode;
+        lastArea = area;
+        lastBox = box;
+      }
+      const part = text.slice(from, to);
+      out += area ? part.replaceAll("\uFFFC", "") : part;
       if (to === text.length && run._after) out += run._after;
     }
     if (!found) return;
@@ -3615,7 +4663,8 @@ class Player {
     if (!text) return false;
     if (e.key === "a" && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
       e.preventDefault();
-      sel.selectAllChildren(text);
+      // In a selection area: all of its texts.
+      sel.selectAllChildren(this.areaOf(text) ?? text);
       return true;
     }
     if (e.key === "Escape") {
@@ -3757,6 +4806,41 @@ class Player {
     }, 200);
   }
 
+  /** Stops `el`'s glide where it is for a scroll command of the core's to
+   * (`x`, `y`), as the native backends interrupt theirs: left running, its
+   * next frame would put the offset back. The browser's `scrollend` after
+   * the command's scroll ends the scroll it stopped; a command that leaves
+   * the view where it is moves nothing, and no `scrollend` follows, so its
+   * `onScrollEnd` is sent here. */
+  stopGlide(el, x, y) {
+    const a = el._glide;
+    if (!a) return;
+    cancelAnimationFrame(a.frame);
+    clearTimeout(a.timer);
+    el._glide = null;
+    this.drive(el, -1);
+    // Browsers clamp the offsets of scrolls.
+    const stays = (to, at, max) => Math.min(Math.max(to, 0), max) === at;
+    if (stays(x, el.scrollLeft, el.scrollWidth - el.clientWidth) && stays(y, el.scrollTop, el.scrollHeight - el.clientHeight)) {
+      this.ownEnd(el);
+    } else {
+      // A fractional destination may round back to the current offset,
+      // in which case the browser sends no scrollend. Moving commands
+      // keep this fallback waiting through their scroll events.
+      this.waitCommandEnd(el);
+    }
+  }
+
+  /** Ends a command rounded to the current offset when no browser event
+   * follows; scroll events keep a moving command's fallback waiting. */
+  waitCommandEnd(el) {
+    clearTimeout(el._commandEnd);
+    el._commandEnd = setTimeout(() => {
+      this.scrollEnded(el);
+      el._ownEnd = [el.scrollLeft, el.scrollTop];
+    }, 200);
+  }
+
   /** The snap point of a snapping view next to where it is towards `dir`
    * (0: the nearest). */
   snapPoint(el, dir) {
@@ -3778,12 +4862,12 @@ class Player {
     const h = !!el._horizontal;
     if (target == null || Math.abs(target - (h ? el.scrollLeft : el.scrollTop)) < 1) return false;
     el._momentum = true;
-    this.scrollEvent(el, "onMomentumScrollBegin");
+    this.scrollEvent(el, "onMomentumStart");
     el.scrollTo({ [h ? "left" : "top"]: target, behavior: "smooth" });
     return true;
   }
 
-  /** Ctrl + wheel pinches the view under the pointer (native values),
+  /** Ctrl + wheel pinches the view under the pointer (animated values),
    * ending when the wheel stops for 150 ms. */
   wheelPinch(e) {
     let t = this.wheelPinchState;
@@ -3818,6 +4902,8 @@ class Player {
   }
 
   scrollEvent(el, name) {
+    // Snapping animated values that follow it settle, listened to or not.
+    if (name === "onScrollEnd") this.call((w) => w.nsh_scroll_ended(el._id));
     if (el._events.has(name)) this.event(el._id, name, { x: el.scrollLeft, y: el.scrollTop });
   }
 
@@ -3897,8 +4983,6 @@ class Player {
   pressIn(p) {
     const el = p.press;
     p.pressed = true;
-    const opacity = el._props?.activeOpacity;
-    if (opacity != null && opacity < 1) this.pressFade(el, opacity);
     if (el._events.has("onPressIn")) this.event(el._id, "onPressIn");
     if (el._events.has("onLongPress")) {
       p.longTimer = setTimeout(() => {
@@ -3908,29 +4992,11 @@ class Player {
     }
   }
 
-  /** Fades pressed view `el` to `opacity` times its own (null: back to
-   * its own), over the view's style, which it leaves alone. */
-  pressFade(el, opacity) {
-    const shown = getComputedStyle(el).opacity;
-    el._pressFade?.cancel();
-    el._pressFade = null;
-    // Its own opacity, without the feedback.
-    const own = Number(getComputedStyle(el).opacity);
-    if (opacity == null) {
-      const a = el.animate([{ opacity: shown, offset: 0 }], { duration: PRESS_OUT_MS, easing: EASE_OUT_QUAD });
-      a.onfinish = () => { if (el._pressFade === a) el._pressFade = null; };
-      el._pressFade = a;
-      return;
-    }
-    el._pressFade = el.animate([{ opacity: shown }, { opacity: own * opacity }], { duration: PRESS_IN_MS, easing: EASE_OUT_QUAD, fill: "forwards" });
-  }
-
   pressOut(p, inside) {
     const el = p.press;
     if (!el || !p.pressed) return;
     p.pressed = false;
     clearTimeout(p.longTimer);
-    if (el._pressFade) this.pressFade(el, null);
     if (el._events.has("onPressOut")) this.event(el._id, "onPressOut");
     if (inside && !p.long && el._events.has("onPress")) this.event(el._id, "onPress");
   }
@@ -3996,7 +5062,7 @@ class Player {
         p.scrollStart = [p.scroll.scrollLeft, p.scroll.scrollTop];
         cancelAnimationFrame(p.scroll._zoomAnimation);
         this.drive(p.scroll, 1);
-        this.scrollEvent(p.scroll, "onScrollBeginDrag");
+        this.scrollEvent(p.scroll, "onScrollDragStart");
       }
       if (p.mode || Math.hypot(tx, ty) > 10) {
         this.pressOut(p, false);
@@ -4052,9 +5118,9 @@ class Player {
       // Released after a pause: no speed left.
       this.track(p, performance.now());
       const [vx, vy] = this.velocity(p);
-      this.call((w) => w.nsh_pan(p.pan._id, 2, p.x - p.startX, p.y - p.startY, vx, vy));
+      this.call((w) => w.nsh_pan(p.pan._id, cancelled ? 3 : 2, p.x - p.startX, p.y - p.startY, vx, vy));
     } else if (p.mode === "scroll") {
-      this.scrollEvent(p.scroll, "onScrollEndDrag");
+      this.scrollEvent(p.scroll, "onScrollDragEnd");
       this.glide(p.scroll, -p.vx, -p.vy);
     } else if (p.press) {
       const rect = p.press.getBoundingClientRect();
@@ -4072,14 +5138,14 @@ class Player {
     el._touchDrag = true;
     el._momentum = false;
     (this.touchDrags ??= new Set()).add(el);
-    this.scrollEvent(el, "onScrollBeginDrag");
+    this.scrollEvent(el, "onScrollDragStart");
     if (!this.touchEndListener) {
       this.touchEndListener = (e) => {
         if (e.touches.length) return;
         for (const v of this.touchDrags) {
           v._touchDrag = false;
           v._released = performance.now();
-          this.scrollEvent(v, "onScrollEndDrag");
+          this.scrollEvent(v, "onScrollDragEnd");
           // Without a glide no scroll follows (nor, sometimes, `scrollend`).
           setTimeout(() => v._released && !v._momentum && this.scrollEnded(v), 200);
         }
@@ -4100,14 +5166,14 @@ class Player {
     const end = () => {
       this.drive(s, -1);
       this.snapMarkers(s);
-      if (momentum) this.scrollEvent(s, "onMomentumScrollEnd");
+      if (momentum) this.scrollEvent(s, "onMomentumEnd");
       this.ownEnd(s);
     };
     if (!v && !w) {
       end();
       return;
     }
-    this.scrollEvent(s, "onMomentumScrollBegin");
+    this.scrollEvent(s, "onMomentumStart");
     const step = (now) => {
       const dt = now - last;
       last = now;

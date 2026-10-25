@@ -7,18 +7,28 @@
 //! (cd crates/gpui && cargo run -p nsh-platform-gpui --example embed -- ../../target/embedded/bundle.nshc)
 //! ```
 //!
+//! With feature `dev` it also takes a dev server's URL and reloads the app
+//! as its sources change (`AppView::connect_dev_server`):
+//!
+//! ```sh
+//! cargo run -p nsh-cli -- dev examples/embedded
+//! (cd crates/gpui && cargo run -p nsh-platform-gpui --features dev --example embed -- ws://127.0.0.1:8790/ws)
+//! ```
+//!
 //! The badge is laid out by nsh (sized to its text with
 //! `ComponentContext::set_size`), takes its own clicks (GPUI's), emits
 //! `tap` with the count and flashes on JS's `pulse` command. It takes the
 //! keyboard: Tab reaches it among the app's text fields, Space or Enter
-//! taps it.
+//! taps it. The view's channel (`AppView::host`, `nsh/host` in the app)
+//! gives the app its launch parameters and a message, answers its "time"
+//! call and hears its "tapped" posts.
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn main() {
     use std::{rc::Rc, time::Instant};
 
     use nsh_platform_gpui::{
-        App, AppOptions, AppView, Bundle, ComponentContext, NativeComponent,
+        App, AppOptions, AppSource, AppView, Bundle, ComponentContext, NativeComponent,
         gpui::{
             self, AnyElement, AppContext, Bounds, FocusHandle, InteractiveElement, IntoElement,
             ParentElement, StatefulInteractiveElement, Styled, Window, WindowBounds, WindowOptions,
@@ -136,9 +146,14 @@ fn main() {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "target/embedded/bundle.nshc".to_owned());
-    // SAFETY: the bundle is the one the developer built and named.
-    let bundle =
-        unsafe { Bundle::read_trusted(path.as_ref()) }.expect("a bundle built by `nsh build`");
+    let source = match path {
+        #[cfg(feature = "dev")]
+        url if url.starts_with("ws://") || url.starts_with("wss://") => AppSource::DevServer(url),
+        // SAFETY: the bundle is the one the developer built and named.
+        path => AppSource::Bundle(
+            unsafe { Bundle::read_trusted(path.as_ref()) }.expect("a bundle built by `nsh build`"),
+        ),
+    };
     gpui_platform::application().run(move |cx| {
         let bounds = Bounds::centered(None, size(px(420.0), px(360.0)), cx);
         let options = WindowOptions {
@@ -164,7 +179,32 @@ fn main() {
                         })
                     }),
                 );
-                view.load(App::Js(bundle));
+                // The channel with the app (`nsh/host`): what it reads at
+                // start, the call it makes, the posts it sends and an event.
+                let host = view.host();
+                let mut params = serde_json::Map::new();
+                params.insert("user".into(), json!("Ada"));
+                host.set_params(params);
+                host.handle("time", |call| {
+                    let secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    let (h, m, s) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
+                    call.resolve(json!({ "time": format!("{h:02}:{m:02}:{s:02} UTC") }));
+                });
+                host.handle("tapped", |call| {
+                    eprintln!("the app posted tapped: {}", call.data())
+                });
+                // Kept until the app listens.
+                let _ = host.send("message", json!({ "text": "Hello from GPUI" }));
+                // Also while a dev server shows them over the app.
+                view.on_error(|message| eprintln!("embedded app: {message}"));
+                match source {
+                    AppSource::Bundle(bundle) => view.load(App::Js(bundle)),
+                    #[cfg(feature = "dev")]
+                    AppSource::DevServer(url) => view.connect_dev_server(url, cx),
+                    AppSource::Rust(root) => view.load(App::Rust(root)),
+                }
                 view
             })
         })

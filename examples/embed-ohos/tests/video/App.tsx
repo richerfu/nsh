@@ -1,5 +1,5 @@
 import { mount, signal, View, Text, Scroll, type YNode } from "nsh";
-import { Modal } from "nsh/ui/mobile";
+import { Modal } from "nsh/base";
 import { Video } from "nsh/video";
 import sample from "./sample.mp4";
 function App() {

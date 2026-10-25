@@ -20,7 +20,7 @@ struct Index {
 
   private overlayChecks(): void {
     const source = (name: string): string =>
-      'import { mount } from "nsh"; import { Alert } from "nsh/ui/mobile"; ' +
+      'import { mount } from "nsh"; import { Alert } from "nsh/base"; ' +
       'mount(() => null); Alert.alert("Overlay ' + name + '", "System back routing").then(i=>console.log("overlay:' + name + ':"+i));';
     this.left.loadSource(source("left"));
     this.right?.loadSource(source("right"));

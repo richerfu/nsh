@@ -19,7 +19,9 @@
 //!   drawn above it covers it. A hitbox that blocks the mouse goes under
 //!   the element: the component's own hitboxes take the pointer and the
 //!   wheel over its box, nsh's input does not. Keys go to the component
-//!   while focus is inside it ([`focused`]); a component with a focus
+//!   first while focus is inside it ([`focused`]); those it lets through
+//!   reach the window's shortcuts, the app's bindings and the menu's
+//!   shortcuts as from a text field ([`crate::input::component_key`]); a component with a focus
 //!   handle ([`NativeComponent::focus_handle`]) is a Tab stop among the text
 //!   fields, at its container's place ([`crate::input`], [`apply_focus`]).
 //!   GPUI's content masks are rectangles: a rounded clipping ancestor cuts
@@ -50,7 +52,7 @@ use gpui::{
     ParentElement, Pixels, Styled, Window, px,
 };
 use nsh_core::{
-    Command, EventKind, EventPayload, NativeProps, NodeId, PayloadValue, Rect, Size, ViewKind,
+    Command, EventKind, EventPayload, NativeProps, NodeId, PayloadValue, Points, Size, ViewKind,
 };
 use nsh_engine::{Access, EngineControl};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -189,7 +191,7 @@ impl ComponentContext {
     /// dimension open.
     pub fn set_size(&self, width: f32, height: f32) {
         self.control
-            .set_component_size(self.id, Size::new(width, height));
+            .set_component_size(self.id, Size::new(Points(width), Points(height)));
     }
 
     /// What the component shows changed: the surface draws again, asking
@@ -231,8 +233,14 @@ impl std::fmt::Debug for Components {
 }
 
 impl Components {
-    /// Registers `factory` under `name` (replacing an earlier one).
+    /// Registers `factory` under `name` (replacing an earlier one). Names
+    /// under `nsh/` are NSH's own: registering one logs a warning and
+    /// changes nothing.
     pub fn register(&self, name: &str, factory: ComponentFactory) {
+        if nsh_core::platform::is_reserved_component(name) {
+            log::warn!("native component `{name}` is not registered: names under `nsh/` are NSH's");
+            return;
+        }
         self.factories.borrow_mut().insert(name.into(), factory);
         self.missing.borrow_mut().remove(name);
     }
@@ -375,7 +383,7 @@ pub(crate) fn deleted(surface: &Rc<Surface>, view: &NshView) {
 /// The view's frame changed: its item fills it again.
 pub(crate) fn resized(view: &NshView) {
     let mut s = view.state_mut();
-    let rect = bounds(s.frame.width, s.frame.height);
+    let rect = bounds(s.frame.size.width.0, s.frame.size.height.0);
     for native in &mut s.natives {
         native.rect = rect;
     }
@@ -502,7 +510,7 @@ pub(crate) fn prepaint(surface: &Rc<Surface>, window: &mut Window, cx: &mut App)
 }
 
 /// True when focus is inside one of the surface's components: keys go
-/// there, not to nsh.
+/// there first, and only the app's shortcuts see what it lets through.
 pub(crate) fn focused(surface: &Surface, window: &Window) -> bool {
     let in_frame = surface
         .native
@@ -606,7 +614,7 @@ impl Geometry {
 fn geometry(surface: &Surface, view: &NshView) -> Option<Geometry> {
     let (w, h) = {
         let s = view.try_state()?;
-        (s.frame.width, s.frame.height)
+        (s.frame.size.width.0, s.frame.size.height.0)
     };
     let (ox, oy) = surface.origin.get();
     let to_window = |v: &NshView, w: f32, h: f32| {
@@ -623,7 +631,7 @@ fn geometry(surface: &Surface, view: &NshView) -> Option<Geometry> {
             (
                 !s.style.hidden && !s.concealed && s.opacity() > 0.0,
                 s.clips(),
-                (s.frame.width, s.frame.height),
+                (s.frame.size.width.0, s.frame.size.height.0),
             )
         };
         if !shows {
@@ -655,15 +663,19 @@ fn component_item(surface: &Surface, id: NodeId) -> Option<Rc<ComponentItem>> {
 /// Hosts `item` in `view`, filling it ([`resized`] follows the frame).
 fn fill(view: &NshView, item: &Rc<dyn Hosted>) {
     let frame = view.state().frame;
-    view.set_native(item, bounds(frame.width, frame.height));
+    view.set_native(item, bounds(frame.size.width.0, frame.size.height.0));
 }
 
-fn bounds(width: f32, height: f32) -> Rect {
-    Rect {
-        x: 0.0,
-        y: 0.0,
-        width,
-        height,
+fn bounds(width: f32, height: f32) -> nsh_core::Bounds<Points> {
+    nsh_core::Bounds {
+        origin: nsh_core::Point {
+            x: Points(0.0),
+            y: Points(0.0),
+        },
+        size: nsh_core::Size {
+            width: Points(width),
+            height: Points(height),
+        },
     }
 }
 
@@ -826,7 +838,9 @@ fn locate(source: &str, base: Option<&AssetBase>) -> Option<Location> {
     if let Some(path) = source.strip_prefix("asset:/") {
         let path = path.trim_start_matches('/');
         return match base {
-            Some(AssetBase::Directory(dir)) => Some(Location::Path(dir.join(path))),
+            Some(dirs @ (AssetBase::Directory(_) | AssetBase::Directories(_))) => {
+                dirs.file(path).map(Location::Path)
+            }
             Some(AssetBase::Http(url)) => Some(Location::Url(format!(
                 "{}/{path}",
                 url.trim_end_matches('/')

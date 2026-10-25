@@ -81,6 +81,7 @@ impl Mounter {
     /// The batch is applied.
     pub(crate) fn end_batch(&mut self, surface: &Rc<Surface>) {
         self.layout_animation = None;
+        crate::selection_area::end_batch(surface);
         crate::navigation::end_batch(surface);
         crate::system::end_batch(surface);
     }
@@ -94,6 +95,16 @@ impl Mounter {
     }
 
     pub(crate) fn apply(&mut self, surface: &Rc<Surface>, item: &MountItem) {
+        if matches!(
+            item,
+            MountItem::Text { .. }
+                | MountItem::Insert { .. }
+                | MountItem::Remove { .. }
+                | MountItem::Delete { .. }
+                | MountItem::ViewProps { .. }
+        ) {
+            crate::selection_area::tree_changed();
+        }
         match item {
             MountItem::Create { id, kind } => {
                 let view = NshView::new(*id, *kind);
@@ -161,6 +172,7 @@ impl Mounter {
                     // A removal animation detaches the view when it ends.
                     if !crate::transition::removing(surface, &view, self.layout_animation.as_ref())
                     {
+                        crate::transition::deleted(&view);
                         self.detach(surface, &view);
                     }
                 }
@@ -172,10 +184,10 @@ impl Mounter {
                 }
                 let mut frame = *frame;
                 if view.kind() == ViewKind::Modal {
-                    // Where a modal sits is the platform's (a sheet is a
-                    // card inside the window): the core only sizes it.
+                    // Where a modal sits is navigation's (over the whole
+                    // window): the core only sizes it.
                     let old = view.state().frame;
-                    (frame.x, frame.y) = (old.x, old.y);
+                    (frame.origin.x.0, frame.origin.y.0) = (old.origin.x.0, old.origin.y.0);
                 }
                 let frame = &frame;
                 // Compared with where a running layout animation is headed,
@@ -207,6 +219,7 @@ impl Mounter {
                 let old = std::mem::replace(&mut view.state_mut().style, style.clone());
                 crate::input::style_changed(view);
                 crate::transition::style_changed(surface, view, &old);
+                crate::access::style_changed(view, &old);
                 view.moved();
             }
             MountItem::Text {
@@ -241,12 +254,18 @@ impl Mounter {
             MountItem::ScrollConfig {
                 id,
                 horizontal,
-                shows_indicator,
+                scrollbar_visible,
                 mirrored,
                 ..
             } => {
                 if let Some(view) = &self.get(*id) {
-                    crate::scroll::config(surface, view, *horizontal, *shows_indicator, *mirrored);
+                    crate::scroll::config(
+                        surface,
+                        view,
+                        *horizontal,
+                        *scrollbar_visible,
+                        *mirrored,
+                    );
                 }
             }
             MountItem::ScrollContent { id, size } => {
@@ -256,7 +275,7 @@ impl Mounter {
             }
             MountItem::ScrollBy { id, dx, dy } => {
                 if let Some(view) = &self.get(*id) {
-                    crate::scroll::scroll_by(surface, view, *dx, *dy);
+                    crate::scroll::scroll_by(surface, view, dx.0, dy.0);
                 }
             }
             MountItem::LayoutDirection { rtl } => self.rtl = *rtl,
@@ -350,6 +369,17 @@ impl Mounter {
             // The animator's (`Surface::apply`).
             MountItem::Animation(_) | MountItem::AnimationBindings { .. } => {}
         }
+        // What the item may change on screen is drawn again, whether or not
+        // what applied it said so: a partial frame draws only that.
+        match redrawn(item) {
+            Redraw::Nothing => {}
+            Redraw::View(id) => {
+                if let Some(view) = self.views.get(id) {
+                    view.changed();
+                }
+            }
+            Redraw::Window => surface.invalidate(),
+        }
     }
 
     /// Takes `view` out of its parent (a modal is dismissed).
@@ -415,5 +445,57 @@ impl Mounter {
             }
             other => crate::system::command(surface, id, other),
         }
+    }
+}
+
+/// What a mount item may change on screen.
+enum Redraw {
+    Nothing,
+    /// The view and its subtree.
+    View(NodeId),
+    /// Anything.
+    Window,
+}
+
+/// What `item` may change on screen once applied. Insertions and removals
+/// draw their parents again themselves ([`NshView::insert_before`],
+/// [`NshView::unparent`]); a new view is drawn when it is inserted.
+fn redrawn(item: &MountItem) -> Redraw {
+    match item {
+        MountItem::Create { .. }
+        | MountItem::Insert { .. }
+        | MountItem::Remove { .. }
+        | MountItem::Delete { .. }
+        | MountItem::TrackStates { .. }
+        | MountItem::Events { .. }
+        | MountItem::AccessibilityLabel { .. }
+        | MountItem::Gestures { .. }
+        | MountItem::Keymap(_)
+        | MountItem::LayoutAnimation(_)
+        | MountItem::Animation(_)
+        | MountItem::AnimationBindings { .. } => Redraw::Nothing,
+        MountItem::Frame { id, .. }
+        | MountItem::ViewStyle { id, .. }
+        | MountItem::Text { id, .. }
+        | MountItem::Image { id, .. }
+        | MountItem::ScrollConfig { id, .. }
+        | MountItem::ScrollContent { id, .. }
+        | MountItem::ScrollBy { id, .. }
+        | MountItem::Overflow { id, .. }
+        | MountItem::StickyCells { id, .. }
+        | MountItem::ScrollBehavior { id, .. }
+        | MountItem::Refreshing { id, .. }
+        | MountItem::Canvas { id, .. }
+        | MountItem::ViewProps { id, .. }
+        | MountItem::Input { id, .. }
+        | MountItem::InputValue { id, .. }
+        | MountItem::InputContent { id, .. }
+        | MountItem::ScreenConfig { id, .. }
+        | MountItem::ModalConfig { id, .. }
+        | MountItem::NativeProps { id, .. }
+        | MountItem::Component { id, .. }
+        | MountItem::ComponentProps { id, .. }
+        | MountItem::Command { id, .. } => Redraw::View(*id),
+        MountItem::LayoutDirection { .. } | MountItem::Appearance { .. } => Redraw::Window,
     }
 }

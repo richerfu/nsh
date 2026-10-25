@@ -6,7 +6,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use nsh_core::{EventKind, EventPayload, ScrollBehavior, Size};
+use nsh_core::{EventKind, EventPayload, Point, Points, ScrollBehavior};
 use ohos_arkui_binding::{
     common::attribute::{ArkUINodeAttributeItem, ArkUINodeAttributeNumber as N},
     component::{
@@ -22,7 +22,10 @@ use ohos_arkui_binding::{
 };
 
 use crate::{
-    render::node::{NativeNode, Node, Result, callback},
+    render::{
+        geometry::Size,
+        node::{NativeNode, Node, Result, callback},
+    },
     scroll::motion::{ZoomFrame, ZoomMotion, focal_offset, resisted_scale},
 };
 
@@ -248,17 +251,25 @@ impl Scroller {
                             {
                                 let frame = owner.frame.get();
                                 let size = scroll.size.get();
-                                scroll.snap_limit.set(behavior.snap_target(
-                                    offset,
-                                    offset,
-                                    delta.signum(),
-                                    if horizontal {
-                                        frame.width
-                                    } else {
-                                        frame.height
-                                    },
-                                    if horizontal { size.width } else { size.height },
-                                ));
+                                scroll.snap_limit.set(
+                                    behavior
+                                        .snap_target(
+                                            Points(offset),
+                                            Points(offset),
+                                            delta.signum(),
+                                            Points(if horizontal {
+                                                frame.width
+                                            } else {
+                                                frame.height
+                                            }),
+                                            Points(if horizontal {
+                                                size.width
+                                            } else {
+                                                size.height
+                                            }),
+                                        )
+                                        .map(|p| p.0),
+                                );
                             }
                             if let Some(limit) = scroll.snap_limit.get() {
                                 let distance = if delta > 0.0 {
@@ -447,10 +458,10 @@ impl Scroller {
         native.set_attribute(
             A::Padding,
             vec![
-                behavior.content_inset.top,
-                behavior.content_inset.right,
-                behavior.content_inset.bottom,
-                behavior.content_inset.left,
+                behavior.content_inset.top.0,
+                behavior.content_inset.right.0,
+                behavior.content_inset.bottom.0,
+                behavior.content_inset.left.0,
             ]
             .into(),
         )?;
@@ -461,10 +472,10 @@ impl Scroller {
                 nsh_core::SnapAlignment::End => 3,
             };
             let mut snap = vec![N::Int(align), N::Int(1), N::Int(1)];
-            if behavior.snap_interval > 0.0 {
-                snap.push(N::Float(behavior.snap_interval));
+            if behavior.snap_interval.0 > 0.0 {
+                snap.push(N::Float(behavior.snap_interval.0));
             } else {
-                snap.extend(behavior.snap_offsets.iter().copied().map(N::Float));
+                snap.extend(behavior.snap_offsets.iter().map(|p| N::Float(p.0)));
             }
             native.set_number_attribute(A::ScrollSnap, snap)?;
         } else {
@@ -546,9 +557,11 @@ impl Scroller {
         self.pin_sticky()?;
         if let Some(owner) = self.owner.upgrade() {
             owner.invalidate_scene();
-            owner
-                .control
-                .scroll(owner.id, offset.0, offset.1, self.corrections.get());
+            owner.control.scroll(
+                owner.id,
+                Point::new(Points(offset.0), Points(offset.1)),
+                self.corrections.get(),
+            );
             if let Some(value) = self.scroll_value.get() {
                 owner.animator.set(
                     value,
@@ -632,9 +645,9 @@ impl Scroller {
             if behavior.zooms() {
                 self.native_width.get() - viewport.width
             } else {
-                size.width * zoom + inset.left + inset.right - viewport.width
+                size.width * zoom + inset.left.0 + inset.right.0 - viewport.width
             },
-            size.height * zoom + inset.top + inset.bottom - viewport.height,
+            size.height * zoom + inset.top.0 + inset.bottom.0 - viewport.height,
         );
         let axis = |position, extent, current, maximum, enabled| {
             if enabled {
@@ -760,8 +773,8 @@ impl Scroller {
         let offset = self.offset.get();
         for (cell, node) in self.sticky.borrow().iter() {
             if let Some(node) = node.upgrade() {
-                let shift = ((if horizontal { offset.0 } else { offset.1 }) - cell.start)
-                    .clamp(0.0, (cell.end - cell.start).max(0.0));
+                let shift = ((if horizontal { offset.0 } else { offset.1 }) - cell.start.0)
+                    .clamp(0.0, (cell.end.0 - cell.start.0).max(0.0));
                 node.pin(
                     if horizontal { shift } else { 0.0 },
                     if horizontal { 0.0 } else { shift },
@@ -1087,26 +1100,24 @@ impl Scroller {
         }
         if let Some(owner) = self.owner.upgrade() {
             let (x, y) = self.offset.get();
+            let payload = EventPayload::Scroll(Point::new(Points(x), Points(y)));
             if previous == 1 {
-                owner.emit(EventKind::ScrollEndDrag, EventPayload::Scroll { x, y });
+                owner.emit(EventKind::ScrollDragEnd, payload.clone());
             }
             if previous == 2 {
-                owner.emit(EventKind::MomentumScrollEnd, EventPayload::Scroll { x, y });
+                owner.emit(EventKind::MomentumEnd, payload.clone());
             }
             if phase == 1 {
                 if self.keyboard_dismiss.get() != nsh_core::KeyboardDismissMode::None {
                     callback(|| owner.dismiss_keyboard());
                 }
-                owner.emit(EventKind::ScrollBeginDrag, EventPayload::Scroll { x, y });
+                owner.emit(EventKind::ScrollDragStart, payload.clone());
             }
             if phase == 2 {
-                owner.emit(
-                    EventKind::MomentumScrollBegin,
-                    EventPayload::Scroll { x, y },
-                );
+                owner.emit(EventKind::MomentumStart, payload.clone());
             }
             if phase == 0 {
-                owner.emit(EventKind::ScrollEnd, EventPayload::Scroll { x, y });
+                owner.emit(EventKind::ScrollEnd, payload);
             }
         }
     }

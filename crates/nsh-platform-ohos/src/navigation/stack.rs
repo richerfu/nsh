@@ -104,14 +104,20 @@ impl Screen {
             == nsh_engine::ColorScheme::Dark;
         let fg = if dark { 0xffeeeeee } else { 0xff161616 };
         let overlap = owner.top_overlap();
-        let height = if c.header_shown { 52.0 + overlap } else { 0.0 };
-        if !c.large_title && !c.header_transparent && (c.header_height - height).abs() > 0.01 {
-            owner.control.set_screen_header(owner.id, Some(height));
+        let height = if c.header_visible {
+            52.0 + overlap
+        } else {
+            0.0
+        };
+        if !c.large_title && !c.header_transparent && (c.header_height.0 - height).abs() > 0.01 {
+            owner
+                .control
+                .set_screen_header(owner.id, Some(nsh_core::Points(height)));
         }
         let h = self.header.borrow();
         h.width(owner.frame.get().width)?;
         h.height(height)?;
-        h.set_i32_attribute(A::Visibility, i32::from(!c.header_shown))?;
+        h.set_i32_attribute(A::Visibility, i32::from(!c.header_visible))?;
         h.background_color(if c.header_transparent {
             0
         } else {

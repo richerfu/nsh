@@ -13,9 +13,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use nsh_core::{
-    EventKind, EventPayload, ImageOptions, ImageSource, PayloadValue, ResizeMode, Size,
-};
+use nsh_core::{EventKind, EventPayload, ImageOptions, ImageSource, PayloadValue, ResizeMode};
 use nsh_engine::{Access, Assets};
 use ohos_arkui_binding::{
     component::{
@@ -31,7 +29,10 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     app::runtime::Dispatcher,
-    render::node::{NativeNode, Node, Result, callback},
+    render::{
+        geometry::Size,
+        node::{NativeNode, Node, Result, callback},
+    },
 };
 
 const MAX_DATA: usize = 16 << 20;
@@ -437,10 +438,10 @@ impl ImageView {
                         if let Some(data) = image.data.borrow().as_ref() {
                             owner.emit(
                                 EventKind::Load,
-                                EventPayload::Image {
-                                    width: data.width as f32,
-                                    height: data.height as f32,
-                                },
+                                EventPayload::Image(nsh_core::Size::new(
+                                    nsh_core::geometry::DevicePixels(data.width as i32),
+                                    nsh_core::geometry::DevicePixels(data.height as i32),
+                                )),
                             );
                         }
                         owner.emit(EventKind::LoadEnd, EventPayload::None);
@@ -489,7 +490,10 @@ impl ImageView {
                 native.reset_attribute(A::ImageColorFilter)?;
             }
         }
-        let radii = [0, 1, 3, 2].map(|i| style.corner_radius[i].unwrap_or(style.border_radius));
+        let c = style.corner_radius;
+        let r = style.border_radius.0;
+        let radii =
+            [c.top_left, c.top_right, c.bottom_left, c.bottom_right].map(|v| v.map_or(r, |p| p.0));
         if self.radii.replace(radii) != radii {
             self.native
                 .borrow()
@@ -528,11 +532,11 @@ impl ImageView {
         self.fade_start.set(None);
         self.fade_ms.set(options.fade_ms.unwrap_or(0.0).max(0.0));
         self.native.borrow().set_f32_attribute(A::Opacity, 1.0)?;
-        if self.blur.replace(options.blur_radius) != options.blur_radius {
+        if self.blur.replace(options.blur_radius.0) != options.blur_radius.0 {
             self.native.borrow().set_f32_attribute(
                 A::Blur,
                 crate::render::composition::geometry::blur_sigma(
-                    options.blur_radius,
+                    options.blur_radius.0,
                     self.owner.upgrade().map_or(1.0, |node| node.scale),
                 ),
             )?;
@@ -551,6 +555,7 @@ impl ImageView {
                 ResizeMode::Contain => 0,
                 ResizeMode::Cover => 2,
                 ResizeMode::Stretch => 1,
+                ResizeMode::ScaleDown => 4,
                 ResizeMode::Center => 5,
             },
         )?;
