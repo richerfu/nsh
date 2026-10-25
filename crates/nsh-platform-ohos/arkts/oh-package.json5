@@ -1,0 +1,10 @@
+{
+  "name": "@nsh/ohos",
+  "version": "0.1.0",
+  "description": "Native Shell SDK fragments",
+  "main": "index.ets",
+  "license": "MIT OR Apache-2.0",
+  "dependencies": {
+    "@ohos-rs/ability": "workspace:*"
+  }
+}

@@ -123,3 +123,30 @@ in a resizable split.
   (`NativeComponent::focus_handle`; a wrapper's, since the `Switch` keeps its handle internal), so it is a Tab stop
   among the app's text fields, and a click focuses that handle too. `AppView::on_error` hears
   the app's fatal errors (also logged).
+
+## OHOS embedding
+
+`NshSurface` is an independently owned native view, with one NodeContent and
+one engine/VM per active module. The host places `surface.content` in a standard
+ContentSlot and controls its layout, order and lifetime through ordinary ArkUI
+containers. Rust observes native size/attachment and loads resources off the
+UI thread. Removing a slot preserves retained instance state; `stop()` clears
+the module, while `dispose()` permanently releases the instance.
+
+NativeAbility supplies the shared session and existing resource, clipboard, accessibility,
+window and URL plugins. One DefaultXComponent supplies the module's UI-plugin
+context; its required native entry exports create no implicit NSH module.
+The paired NSH HAR supplies SDK-only controls and subtree exports; the host
+registers `nativeShellPlugins()` and writes no Rust entry adapter.
+
+`cargo xtask ohos` builds the arm64 library and generated declarations.
+Every instance exposes source/resource and verified-package loading, development
+connections (the dev SDK), options/grants, environment
+and error handling, and native component registration. See [OHOS](ohos.md)
+for binding setup, ownership and verification.
+
+The [embedding guide](../../website/docs/embedding-ohos.md) documents the full
+DevEco setup, generated library/declarations, ArkTS component, API parameters,
+limits, signing and diagnostics. The [implementation status](ohos.md#implementation-status)
+compares the native adapters, host policy, signed delivery and toolchain with
+the iOS and Android SDKs.

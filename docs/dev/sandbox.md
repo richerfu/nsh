@@ -38,7 +38,8 @@ trusted: every limit and check is enforced in Rust, never in JS.
   sources, the status bar and the clipboard in the core (`Core::check_prop`; a refused image fails with `onError`, clipboard reads resolve empty, the rest show nothing;
   each refusal is logged once, target `js`, saying which key to add); top-level web view navigations on the platforms
   (`WKNavigationDelegate decidePolicyForNavigationAction` / `WebViewClient.shouldOverrideUrlLoading` → `Native.allowsWebview`).
-  `asset:` URIs are always allowed. Host checks take the host after the last `@` (`https://ok.com@evil.io` is evil.io).
+  Media `asset:` URIs refer to the app's own files. WebView `asset:/` resources
+  require web views to be granted by both app and host, like inline HTML. Host checks take the host after the last `@` (`https://ok.com@evil.io` is evil.io).
 - **Embedding limits**: `NshAppView.limits` (`NshLimits`) / `NshView.setLimits` (heap MB, stack KB, load / call
   budgets, node quota; unset / 0 keeps a default), from the next load.
 

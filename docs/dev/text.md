@@ -25,7 +25,22 @@
   them), Shift+click extends; the highlight is drawn behind the glyphs in `selectionColor` at 30% (the system blue by
   default); the view takes keyboard focus only while it has a selection, for Ctrl+C (and Ctrl+Insert), Ctrl+A and
   Escape, and a press anywhere else or losing focus ends it; a finished drag also sets the primary selection.
-  Touchscreen drags scroll instead; there is no context menu. GPUI (`nsh-platform-gpui` `text.rs`): the same selection
+  Touchscreen drags scroll instead; there is no context menu.
+  OHOS (`text/selection/controller.rs`, API 20): the engine retains Unicode grapheme/word boundaries and owned visual-run rectangles
+  from the original Typography through `ohos-drawing-binding::Typography::range_boxes`. No paragraph or ArkTS
+  reference crosses to the UI thread. A long press selects a word, dragging extends it, and two handles adjust the
+  range. The NSH-owned HAR supplies a scoped Copy/Select All menu; the clipboard plugin
+  writes the selected text with U+FFFC attachments removed. Ctrl+C, Ctrl+A and Escape apply while a text selection
+  is active. Other touches, editor focus, new text, foreground loss and retirement clear it, independently per surface.
+  Hit tests use the node's presentation transform. Selection rectangles are merged/cached on range changes and
+  highlighted behind the original raster, with handles above it. Native run direction positions RTL handles.
+  A held drag near a scroll viewport's edge advances its native offset on VSync, then recomputes the selection
+  from the stationary surface-space contact. Inner scroll views take precedence; an exhausted inner view lets
+  an ancestor scroll. Frame time and speed are bounded, and release/cancellation/retirement ends the drag.
+  Selection data shares the surface's 96 MiB raster reservation; one selectable block admits up to 1 MiB of UTF-8,
+  65,536 graphemes and a bounded total of visual-run boxes. A grapheme can have more than four boxes.
+  Cache exhaustion disables selection for that layout while preserving text and the engine.
+  GPUI (`nsh-platform-gpui` `text.rs`): the same desktop selection
   (Cmd instead of Ctrl on macOS), plus a right-click menu (Copy, Select All: `chrome::popup_actions`). Its engine
   shapes each paragraph once with GPUI's text system, in segments of one bidi level and font size, and does the rest
   itself: lines break at UAX #14 opportunities (`unicode-linebreak`), measuring at another width only re-breaks, and
@@ -49,3 +64,14 @@
 
 See also the text pitfalls in [pitfalls.md](pitfalls.md) and the engines in `crates/nsh-platform-ios/src/text.rs` /
 `crates/nsh-platform-android/src/text.rs`.
+
+OHOS retains the native paragraph's UTF-16 range rectangles and resolves a
+span's font metrics through the drawing binding. A span with explicit
+`textDecorationThickness` or `textUnderlineOffset` draws its decorations over
+the raster using those metrics; spans without overrides retain the native
+paragraph decoration. Solid, double, dotted, dashed and wavy patterns share the
+same pixel-aligned point thickness. Decoration work is clipped to the raster's
+visible width, so a long unwrapped line cannot create an unbounded wave path.
+The raster grows vertically to contain explicit decoration offsets while keeping
+logical line and inline-attachment coordinates unchanged; those extra pixels
+remain subject to the ancestor view clips and the surface raster budget.

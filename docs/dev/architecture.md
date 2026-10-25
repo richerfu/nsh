@@ -36,6 +36,13 @@ Input                        native gestures -> EngineControl::dispatch_event ->
 - **Android**: the engine thread typesets with `StaticLayout` through JNI; each commit is one `byte[]` plus an object
   table handed to `Mounter.java` on the UI thread, and animation items stay in Rust (the flow, the units and the JNI
   rules: `crates/nsh-platform-android/src/encode.rs`).
+- **OHOS** (ArkUI, [ohos.md](ohos.md)): each `NshSurface` owns its NodeContent,
+  engine and native tree. One UI-queue wake applies each commit through the
+  surface's shared `UiContext`. Typography and composition workers publish owned
+  pixels; native input and frame callbacks stay on the UI thread. The standard
+  Ability WebView and the NSH-owned HAR retain their SDK platform objects while
+  Rust owns layout, editor algorithms, media/composition and event semantics. Implementation domains and their boundaries are
+  listed in the [OHOS source map](ohos.md#source-map).
 - **Linux** (GTK 4, `linux.md`): one `NshView` widget per node, placed at the core's frames in `size_allocate` and
   drawn with GSK nodes in `snapshot`; each commit wakes the GTK main loop once (`MainContext::invoke`); native
   animations run on the frame clock.
@@ -71,4 +78,5 @@ Dependency direction: `nsh-core` ← `nsh-js` ← `nsh-engine` (also ← `nsh-pa
 
 The CoreText, StaticLayout, Pango, DirectWrite and GPUI text engines are documented in
 `crates/nsh-platform-ios/src/text.rs`, `crates/nsh-platform-android/src/text.rs`, `crates/nsh-platform-linux/src/text.rs`,
-`crates/nsh-platform-windows/src/text.rs` and `crates/gpui/nsh-platform-gpui/src/text.rs`, the measure cache in `crates/nsh-core/src/text.rs` (`MeasureCache`).
+`crates/nsh-platform-windows/src/text.rs`, `crates/gpui/nsh-platform-gpui/src/text.rs` and
+`crates/nsh-platform-ohos/src/text/typography.rs`, the measure cache in `crates/nsh-core/src/text.rs` (`MeasureCache`).

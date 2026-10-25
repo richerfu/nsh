@@ -27,6 +27,7 @@ Documentation, guides and live demos: **[nsh.dev](https://nsh.dev)**.
 |---|---|---|---|
 | iOS | UIKit, CoreText | `NshAppView` (Swift, `NativeShell.xcframework`) | iOS 15+ |
 | Android | Android views, `StaticLayout` | `NshView` (Java / Kotlin, `nsh.aar`) | Android 9 (API 28)+ |
+| [OHOS](website/docs/embedding-ohos.md) | ArkUI custom nodes, native typography | `NshSurface` (ArkTS, `nsh-platform-ohos`) | API 20 baseline, optional API 23/26, arm64 |
 | macOS | AppKit, Core Animation, CoreText | `AppView` (Rust, `nsh-platform-macos`) | macOS 14+ |
 | Windows | Win32, Direct2D, DirectWrite | `AppView` (Rust, `nsh-platform-windows`) | Windows 10 1809+ |
 | Linux | GTK 4, Pango | `AppView` (Rust, `nsh-platform-linux`) | GTK 4.14+ |

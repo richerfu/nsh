@@ -160,7 +160,7 @@ On Android, a view embedded below a toolbar gets only the parts of the system ba
 
 | Member | Description |
 |---|---|
-| `Platform.OS` | `"ios"`, `"android"`, `"macos"`, `"windows"`, `"linux"` or `"web"`. Mac Catalyst reports `"ios"`. |
+| `Platform.OS` | `"ios"`, `"android"`, `"ohos"`, `"macos"`, `"windows"`, `"linux"` or `"web"`. Mac Catalyst reports `"ios"`. |
 | `Platform.Version` | iOS and desktops: the version string (`"17.5"`); Android: the API level (a number). |
 | `Platform.isPad` | An iPad (or the iPad idiom). |
 | `Platform.isTV` | A TV. |
@@ -176,6 +176,13 @@ const hapticsSupported = Platform.OS === "ios" || (Platform.OS === "android" && 
 ```
 
 `nsh trace` runs headless as iOS.
+
+On [OHOS](./embedding-ohos.md), the host supplies the surface's size and pixel ratio.
+The embedding defaults are `Platform.Version` `"0.0"`, the phone idiom, zero safe-area
+insets and keyboard height, text scale `1.0`, and a light system appearance. The host
+places the surface inside its safe content bounds. These values describe the
+embedding configuration; the [backend reference](../../docs/dev/ohos.md#environment-observations)
+records environment forwarding and its verification scope.
 
 On [Linux](./linux.md), `Platform.OS` is `"linux"`, the idiom `"desktop"` and `Platform.Version` the kernel's major
 and minor version (`"6.12"`): distributions number their releases in ways that cannot be compared. There, the safe

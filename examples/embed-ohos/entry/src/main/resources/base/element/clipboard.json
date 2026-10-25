@@ -1,0 +1,8 @@
+{
+  "string": [
+    {
+      "name": "clipboard_permission_reason",
+      "value": "Read copied text in the Native Shell acceptance fixture."
+    }
+  ]
+}

@@ -56,6 +56,8 @@ pub enum Os {
     Ios,
     /// Android.
     Android,
+    /// OpenHarmony and HarmonyOS.
+    Ohos,
     /// macOS (a desktop backend).
     MacOs,
     /// Windows.
@@ -73,6 +75,7 @@ impl Os {
         match self {
             Os::Ios => "ios",
             Os::Android => "android",
+            Os::Ohos => "ohos",
             Os::MacOs => "macos",
             Os::Windows => "windows",
             Os::Linux => "linux",
@@ -93,7 +96,9 @@ impl Default for Os {
     /// The mobile OS of this build (`nsh trace` behaves as iOS); desktop
     /// backends set theirs.
     fn default() -> Self {
-        if cfg!(target_os = "android") {
+        if cfg!(target_env = "ohos") {
+            Os::Ohos
+        } else if cfg!(target_os = "android") {
             Os::Android
         } else {
             Os::Ios

@@ -144,7 +144,7 @@ function BottomBar() {
 
 | 成员 | 说明 |
 |---|---|
-| `Platform.OS` | `"ios"`、`"android"`、`"macos"`、`"windows"`、`"linux"` 或 `"web"`。Mac Catalyst 报告 `"ios"`。 |
+| `Platform.OS` | `"ios"`、`"android"`、`"ohos"`、`"macos"`、`"windows"`、`"linux"` 或 `"web"`。Mac Catalyst 报告 `"ios"`。 |
 | `Platform.Version` | iOS 和桌面平台：版本字符串（`"17.5"`）；Android：API 级别（数字）。 |
 | `Platform.isPad` | iPad（或 iPad 界面风格）。 |
 | `Platform.isTV` | 电视。 |
@@ -160,6 +160,11 @@ const hapticsSupported = Platform.OS === "ios" || (Platform.OS === "android" && 
 ```
 
 `nsh trace` 以 iOS 身份无界面运行。
+
+在 [OHOS](./embedding-ohos.md) 上，宿主提供 surface 尺寸与像素比例。嵌入配置的默认值为
+`Platform.Version` `"0.0"`、手机界面风格、安全区域与键盘高度 0、文字缩放 `1.0` 和浅色
+系统外观。宿主将 surface 放在自己的安全内容区域内。这些数值描述嵌入配置，环境转发
+及其验证范围见[后端参考](../../../docs/dev/ohos.md#environment-observations)。
 
 在 [Linux](./linux.md) 上，`Platform.OS` 为 `"linux"`，界面风格为 `"desktop"`，`Platform.Version` 为内核的主、次版本号（`"6.12"`）：
 各发行版给版本编号的方式无法相互比较。在那里，安全区域和键盘高度为 0，`colorScheme()` 实时跟随桌面的设置（XDG 设置门户），

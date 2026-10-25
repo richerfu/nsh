@@ -8,7 +8,8 @@ Module code runs in QuickJS on a native runtime (the reactive graph, the rendere
 Rust); layout uses Taffy; embedding native components such as maps or web views has no layering problems. The
 toolchain is pure Rust and does not need Node.js; app developers get a prebuilt distribution (`cargo xtask dist`) and
 never need Rust either. Every platform has a native backend: iOS with UIKit views (`nsh-platform-ios`), Android with
-Android views (`nsh-platform-android`), macOS with AppKit views (`nsh-platform-macos`), Windows in Win32 windows drawn
+Android views (`nsh-platform-android`), OHOS with ArkUI custom nodes (`nsh-platform-ohos`),
+macOS with AppKit views (`nsh-platform-macos`), Windows in Win32 windows drawn
 with Direct2D (`nsh-platform-windows`), Linux with GTK 4 widgets (`nsh-platform-linux`). The GPUI backend
 (`nsh-platform-gpui`) draws on macOS, Windows and Linux and embeds in GPUI / GPUI Kit apps; the web platform
 (`nsh-platform-web`) renders apps as HTML in a browser page, and `nsh package --target web` publishes them as static
@@ -60,6 +61,8 @@ crates/
                        `include/nsh.h`) under the `NativeShell` Swift module (`swift/NativeShell.swift`) iOS apps embed nsh with
   nsh-platform-android/ Android backend: `libnsh.so` (JNI glue, StaticLayout text engine, batch encoding, UI-thread animator) + the Java
                        runtime in `java/com/longbridge/nsh` (NshView, Mounter, views, images, networking); feature `dev` as above
+  nsh-platform-ohos/   OHOS arm64 embedding backend (API 20 baseline, optional API 23/26 features): NativeAbility session, instance-owned NodeContent views, ArkUI native nodes,
+                       native typography/VSync; explicit N-API NshSurface; bindings own native APIs; examples/embed-ohos is the app host
   nsh-platform-web/    WebAssembly backend (published web apps, `nsh run --target web`, the website's live demos): the engine on
                        the page's main thread (`LocalEngine`), text laid out with browser font metrics, batches as JSON + CSS
                        for the DOM runtime in `web/nsh.js`, the animator on requestAnimationFrame, fetch over the browser's
@@ -139,6 +142,7 @@ on any platform or JS crate.
 | the GPUI backend (`nsh-platform-gpui`, macOS / Windows / Linux) | `docs/dev/gpui.md` |
 | a hot path | `docs/dev/performance.md` (baselines) |
 | anything platform-specific | `docs/dev/pitfalls.md` (verified constraints, by area) |
+| the OHOS backend and SDK | `docs/dev/ohos.md` (binding setup, API 20 compatibility, ownership, verification and remaining work) |
 | components (`nsh/ui/mobile`) | `docs/dev/components.md`, `crates/nsh-ui-mobile/README.md` |
 | Rust classes TS uses (`#[class]`), module functions' kinds, callbacks, how calls and Rust components' props cross (typed) | `docs/dev/rust-classes.md`, `docs/dev/components.md` |
 
@@ -178,6 +182,7 @@ cargo build --manifest-path crates/gpui/Cargo.toml --target-dir target -p nsh-gp
 ./target/debug/nsh package examples/gallery --target web --run             # a static site (files named by content), served on this machine
 ./target/debug/nsh package examples/gallery --target ios-simulator --run   # installable app (.app / .ipa / .apk)
 cargo xtask android [--release] [--dev]                                            # Android runtime into target/android/<profile>[-dev]
+cargo xtask ohos [--release]                                                      # OHOS arm64 embedding SDK into target/ohos/<profile>
 cargo xtask dist                                                                   # the distribution in dist/nsh
 ./target/debug/nsh dev examples/counter                                    # dev server only (for simulators / devices); prints local and LAN URLs
 ./target/debug/nsh build examples/counter --release                        # writes bundle.js / bundle.nshc
@@ -204,6 +209,12 @@ cargo test -p nsh-platform-windows -p nsh-windows-host -p nsh-windows-app       
 (cd crates/gpui && cargo test && cargo +nightly fmt --all)                              # its tests (they open no window) and formatting
 cd website && bun run dev                                                       # the documentation site (builds the player too)
 ```
+
+`nsh-platform-ohos` only compiles for `target_env = "ohos"`; use `cargo xtask ohos` or `ohrs cargo` to check its native
+code with the OHOS SDK. OHOS also reports `target_os = "linux"`, so Linux-only crates exclude `target_env = "ohos"`.
+Use binding crates for OHOS capabilities and add missing wrappers to the binding repository; keep direct OHOS sys
+dependencies out of NSH. Preserve the API 20 baseline and audit final imports when enabling newer binding features.
+See `docs/dev/ohos.md` for the sibling binding checkout required by the current workspace.
 
 `nsh-platform-ios` only compiles for `target_os = "ios"` (iOS devices, the iOS simulator and Catalyst); on a macOS
 host it is an empty crate, so always run clippy on platform code with the Catalyst target. Likewise

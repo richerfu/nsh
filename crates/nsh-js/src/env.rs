@@ -731,11 +731,12 @@ pub(crate) const DEVICE_EXPORTS: &[Item] = &[
 pub(crate) const DEVICE_TYPES: &str = r#"export interface PlatformSelectSpec<T> {
   ios?: T;
   android?: T;
+  ohos?: T;
   macos?: T;
   windows?: T;
   linux?: T;
   web?: T;
-  /** iOS, Android, and phone and tablet browsers. */
+  /** iOS, Android, OHOS, and phone and tablet browsers. */
   mobile?: T;
   /** macOS, Windows, Linux, and desktop browsers. */
   desktop?: T;

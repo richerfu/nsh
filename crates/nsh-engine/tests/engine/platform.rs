@@ -17,10 +17,11 @@ mount(
     <View
       ios={{ accessibilityLabel: "ios" }}
       android={{ accessibilityLabel: "android" }}
+      ohos={{ accessibilityLabel: "ohos" }}
       desktop={{ accessibilityLabel: "desktop" }}
       web={{ accessibilityHint: "web" }}
     >
-      <Text>{`${Platform.OS} ${Platform.isDesktop} ${Platform.select({ ios: "i", mobile: "m", desktop: "d" })} ${Platform.select({ native: "n", default: "-" })}`}</Text>
+      <Text>{`${Platform.OS} ${Platform.isDesktop} ${Platform.select({ ios: "i", ohos: "o", mobile: "m", desktop: "d" })} ${Platform.select({ native: "n", default: "-" })}`}</Text>
     </View>
   ),
 );
@@ -93,6 +94,7 @@ fn platform_props_and_select_follow_the_os() {
     };
     frame(Os::Ios, Idiom::Phone, "ios false i n", &["ios"]);
     frame(Os::Android, Idiom::Phone, "android false m n", &["android"]);
+    frame(Os::Ohos, Idiom::Phone, "ohos false o n", &["ohos"]);
     frame(Os::MacOs, Idiom::Desktop, "macos true d n", &["desktop"]);
     // `native` is not the web, as in React Native.
     frame(Os::Web, Idiom::Phone, "web false m -", &["web"]);

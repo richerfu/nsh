@@ -15,6 +15,7 @@ NSH 的所有操作都通过一个命令 `nsh` 完成：打包和编译应用、
 |---|---|---|
 | iOS | macOS | Xcode 和一个 iOS 模拟器运行时 |
 | Android | macOS、Windows 或 Linux | Android SDK 和 JDK；一个模拟器或设备 |
+| [OHOS](./embedding-ohos.md) | macOS 源码 SDK 与 DevEco 宿主流程 | DevEco Studio、配套 SDK、Rust 和 ohrs；arm64 设备 |
 | macOS | macOS | Xcode 命令行工具；应用运行在 macOS 14+ |
 | Windows | Windows | Windows 10 1809+；网页视图需要 WebView2 Runtime |
 | Linux | Linux | GTK 4.14+（构建运行时还需要它的开发包） |
@@ -180,6 +181,13 @@ sdkmanager "platforms;android-35" "build-tools;35.0.1" "platform-tools"
 ### 构建 Android 运行时
 
 从源码构建 Android 运行时（`cargo xtask android`）还需要 SDK 中的 **NDK**（`ndk;<version>`；如果已安装的最新版本不完整，请设置 `ANDROID_NDK_HOME`）以及 `javac`。
+
+### 构建 OHOS 嵌入 SDK
+
+[OHOS 指南](./embedding-ohos.md)介绍 API 12 arm64 嵌入流程。在具备配套 binding 仓库的
+源码目录中，将 `OHOS_NDK_HOME` 指向 SDK 的 `openharmony` 目录，使用 `cargo xtask ohos`
+构建原生库和声明。DevEco 宿主从 rawfile 资源加载模块的 `bundle.js`，并通过
+OHPM/Hvigor 构建 HAP。
 
 ## 各平台可用的命令
 

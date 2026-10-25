@@ -1156,7 +1156,7 @@ fn set_prop(
             }
             return Ok(());
         }
-        "ios" | "android" | "desktop" | "web" => {
+        "ios" | "android" | "ohos" | "desktop" | "web" => {
             return platform_props(ctx, node, name, value, prev);
         }
         "contentContainerStyle" | "contentContainerClass"

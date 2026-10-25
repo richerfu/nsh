@@ -1,15 +1,15 @@
 ---
 title: 平台概览
-description: "NSH 在哪些平台上运行：iOS、Android、macOS、Windows、Linux、GPUI 和 Web，每个平台都有自己的后端；在各平台上如何运行、打包和嵌入，以及各自需要什么。"
+description: "NSH 在哪些平台上运行：iOS、Android、OHOS、macOS、Windows、Linux、GPUI 和 Web，以及各平台的后端、工具和嵌入流程。"
 order: 10
 group: platforms
 ---
 
 # 平台概览
 
-NSH 运行在手机、桌面和网页上：iOS、Android、macOS、Windows、Linux、GPUI 和 Web。每个平台都有自己的后端，用平台自己的界面技术绘制：同一个模块在 iPhone 上是 UIKit 视图，在 Mac 上是 AppKit 视图，在 Linux 上是 GTK 4 控件，在 GPUI 应用里是 GPUI 元素，在浏览器里是 HTML，文本、输入、无障碍和深色模式都是平台自己的。后端之上的部分全部共享：QuickJS、响应式图、渲染器、Taffy 布局和组件在每个平台上都是同一份 Rust 代码，所以一个 bundle 可以在所有平台上运行。
+Native Shell 运行在手机、桌面和网页上：iOS、Android、OHOS、macOS、Windows、Linux、GPUI 和 Web。各后端使用平台自己的界面技术绘制：iOS 的 UIKit、OHOS 的 ArkUI、macOS 的 AppKit、Linux 的 GTK 4、GPUI 应用中的 GPUI 元素，以及浏览器中的 HTML。QuickJS、响应式图、渲染器、Taffy 布局和组件共享 Rust 代码；各平台指南说明对应后端提供的界面能力和宿主 API。
 
-在每个平台上，NSH 的主要用途都一样：把模块嵌入你自己的原生应用，由它在运行时加载。开发时借助热更新（`nsh run`）；同样的模块也可以打包成可安装的应用（`nsh package`），这是受支持的第二种用法。
+NSH 的主要用途是把模块嵌入你自己的原生应用，由它在运行时加载。CLI 开发宿主使用热更新（`nsh run`），应用 runner 将模块打包成可安装应用（`nsh package`）。OHOS 使用 [DevEco 嵌入流程](./embedding-ohos.md)，模块源码随宿主 HAP 发布。
 
 ## 一览
 
@@ -17,6 +17,7 @@ NSH 运行在手机、桌面和网页上：iOS、Android、macOS、Windows、Lin
 |---|---|---|---|---|
 | [iOS](./embedding-ios.md) | UIKit；CoreText | iOS 15.0+，真机和模拟器 | `nsh run --target ios` | `.app`（模拟器）、签名的 `.ipa` |
 | [Android](./embedding-android.md) | Android 视图；`StaticLayout` | Android 9（API 28）+，`arm64-v8a` 和 `x86_64` | `nsh run --target android` | 签名的 `.apk` |
+| [OHOS](./embedding-ohos.md) | ArkUI 自定义节点；原生文本排版 | API 12 基线，arm64 | `cargo xtask ohos`、DevEco 宿主 | 用 DevEco 构建宿主 HAP |
 | [macOS](./macos.md) | AppKit 与 Core Animation；CoreText | macOS 14+ | `nsh run --target macos` | ad hoc 签名的 `.app` |
 | [Windows](./windows.md) | 用 Direct2D 绘制的 Win32 窗口；DirectWrite | Windows 10 1809+、Windows 11 | `nsh run`（Windows 上的默认目标） | 一个目录和一个 `.zip` |
 | [Linux](./linux.md) | GTK 4 控件；Pango | GTK 4.14+ | `nsh run`（Linux 上的默认目标） | 一个目录和一个 `.tar.gz` |
@@ -44,13 +45,14 @@ nsh package my-app --target macos  # 或 ios、ios-simulator、android、windows
 |---|---|---|---|
 | iOS | `NshAppView`（一个 `UIView`） | `NativeShell.xcframework` | Swift |
 | Android | `NshView`（一个 `FrameLayout`） | `nsh.aar` | Java 或 Kotlin |
+| [OHOS](./embedding-ohos.md) | ArkTS `NshView` 中的 `NshSurface` | 动态库和自动生成的声明 | ArkTS |
 | macOS | `AppView`（一个 `NSView`） | `nsh-platform-macos` crate | Rust |
 | Windows | `AppView`（一个子窗口） | `nsh-platform-windows` crate | Rust |
 | Linux | `AppView`（一个 GTK 控件） | `nsh-platform-linux` crate | Rust |
 | GPUI（macOS、Windows、Linux） | `AppView`（一个 GPUI 视图） | `nsh-platform-gpui` crate | Rust |
 | Web | `createPlayer`（一个页面元素）或 iframe | `nsh package --target web` 生成的运行时文件 | JavaScript 或 HTML |
 
-每个视图都是一个拥有独立虚拟机的引擎，一个应用可以同时显示多个。在每个平台上，宿主都可以注册自己的原生视图给模块使用（[原生组件](./native-components.md)）。
+每个视图都是一个拥有独立虚拟机的引擎，一个应用可以同时显示多个。[原生组件指南](./native-components.md)说明各 SDK 的宿主视图注册 API。
 
 > [!NOTE]
 > 桌面宿主通过 NSH 仓库里的 Rust crate 嵌入 NSH；它们的 `AppView` 从应用自己的文件（或源代码）加载 bundle，使用默认限制。iOS 和 Android SDK 还能用 `NshTrust` 加载[签名包](./signed-packages.md)，并为每个视图设置限制和能力（[沙箱与能力](./sandbox-and-capabilities.md)）。
@@ -60,7 +62,7 @@ nsh package my-app --target macos  # 或 ios、ios-simulator、android、windows
 应用的大部分代码不需要判断平台：元素、样式、布局和模块在各处行为一致。平台确实不同的地方，NSH 给它一个固定的位置（[平台特定代码](./platform-specific.md)）：
 
 - **平台专属属性**放在 `ios={{…}}`、`android={{…}}`、`web={{…}}` 或 `desktop={{…}}`（macOS、Windows、Linux 和桌面浏览器）里。
-- **`Platform.select`** 按操作系统取值，也可以按 `mobile` 和 `desktop` 整体取值；`Platform.OS` 是 `"ios"`、`"android"`、`"macos"`、`"windows"`、`"linux"` 或 `"web"`。
+- **`Platform.select`** 按操作系统取值，也可以按 `mobile` 和 `desktop` 整体取值；`Platform.OS` 是 `"ios"`、`"android"`、`"ohos"`、`"macos"`、`"windows"`、`"linux"` 或 `"web"`。
 - **输入跟随平台。** 手机上是触摸和软键盘；桌面上是鼠标、触控板和键盘。
 
 [`nsh/ui/mobile`](../components/index.md) 的组件由 NSH 绘制，所以在桌面上也能运行，样子和在手机上一样。桌面布局用基础元素（`View`、`Text`、`Scroll`、`List` 等）和 `Platform.select({ desktop: … })` 搭建，示例应用 gallery 的桌面布局就是这样做的；桌面 UI 套件也在路上。

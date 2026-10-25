@@ -33,6 +33,7 @@ nsh-engine = { version = "0.1.1", path = "crates/nsh-engine", default-features =
 nsh-bundler = { version = "0.1.1", path = "crates/nsh-bundler", default-features = false }
 nsh-platform-ios = { version = "0.1.1", path = "crates/nsh-platform-ios", default-features = false }
 nsh-platform-android = { version = "0.1.1", path = "crates/nsh-platform-android", default-features = false }
+nsh-platform-ohos = { version = "0.1.1", path = "crates/nsh-platform-ohos" }
 nsh-platform-linux = { version = "0.1.1", path = "crates/nsh-platform-linux", default-features = false }
 nsh-platform-macos = { version = "0.1.1", path = "crates/nsh-platform-macos", default-features = false }
 nsh-platform-windows = { version = "0.1.1", path = "crates/nsh-platform-windows", default-features = false }
@@ -68,9 +69,37 @@ base64 = "0.22"
 getrandom = "0.3"
 slab = "0.4"
 percent-encoding = "2.3"
+unicode-segmentation = "1.13.3"
 url = "2.5"
-ureq = "3.1"
+ureq = "3.1.3"
 jni = "0.21"
+napi-ohos = { version = "1.2", default-features = false, features = ["napi8", "serde-json", "tokio_rt"] }
+napi-derive-ohos = "1.2"
+napi-build-ohos = "1.2"
+openharmony-ability = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39", default-features = false }
+openharmony-ability-plugin-accessibility = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39" }
+openharmony-ability-plugin-clipboard = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39" }
+openharmony-ability-plugin-resource = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39" }
+openharmony-ability-plugin-window = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39" }
+openharmony-ability-plugin-webview = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39" }
+openharmony-ability-plugin-url = { version = "1.0.0-beta.3", git = "https://github.com/harmony-contrib/openharmony-ability", rev = "b65502500b820a570496f3798c931d12d3b71d39" }
+futures-executor = "0.3"
+ohos-arkui-binding = { version = "0.4.2", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["napi", "xcomponent", "api-20"] }
+ohos-accessibility-binding = { version = "0.1.2", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
+ohos-drawing-binding = { version = "0.2.4", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
+ohos-native-image-binding = { version = "0.1.0", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
+ohos-vsync-binding = { version = "0.3.1", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false }
+ohos-window-manager-binding = { version = "0.1.1", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["input", "api-20"] }
+ohos-image-native-binding = { version = "0.0.7", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false }
+ohos-pasteboard-binding = { version = "0.0.7", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
+ohos-udmf-binding = { git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
+ohos-avplayer-binding = { git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
+glow = "0.18"
+khronos-egl = { version = "6", default-features = false, features = ["static", "no-pkg-config", "1_5"] }
+ohos-xcomponent-binding = { git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["callbacks", "multi_mode", "api-20"] }
+ohos-native-window-binding = { git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
+ohos-hilog-binding = { git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", features = ["log"] }
+ohos-net-connection-binding = { version = "0.1.4", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false }
 windows-sys = "0.61"
 dunce = "1"
 # The Windows backend: Win32 windows, Direct2D / DirectWrite drawing, WIC images,

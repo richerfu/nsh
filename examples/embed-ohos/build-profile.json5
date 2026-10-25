@@ -1,0 +1,85 @@
+{
+  "app": {
+    "products": [
+      {
+        "name": "default",
+        "compatibleSdkVersion": "6.0.0(20)",
+        "targetSdkVersion": "6.0.0(20)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        },
+        "signingConfig": "default"
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ],
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "/Users/ranger/.ohos/config/default_embed-ohos_4hhmHr3D2gGbneuYnRxwmFhIQ8Zwk4y-kRd7Aia0DI8=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001A1B27DF3CAE60B0EF8D252E3BF95875DBC5BFE0873048D23849529B13D49377198DF7F03EB5CB",
+          "profile": "/Users/ranger/.ohos/config/default_embed-ohos_4hhmHr3D2gGbneuYnRxwmFhIQ8Zwk4y-kRd7Aia0DI8=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "/Users/ranger/.ohos/config/default_embed-ohos_4hhmHr3D2gGbneuYnRxwmFhIQ8Zwk4y-kRd7Aia0DI8=.p12",
+          "storePassword": "0000001AD2DAF41F8960E90899DF85C4BF65DADF4F8A1EF07C809F781004C3149846693ED708F2562E0F"
+        }
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "nsh_ohos",
+      "srcPath": "../../target/ohos/arkts-deps/nsh"
+    },
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default"
+        }
+      ]
+    },
+    {
+      "name": "native_ability",
+      "srcPath": "../../target/ohos/arkts-deps/ability"
+    },
+    {
+      "name": "plugin_clipboard",
+      "srcPath": "../../target/ohos/arkts-deps/clipboard"
+    },
+    {
+      "name": "plugin_resource",
+      "srcPath": "../../target/ohos/arkts-deps/resource"
+    },
+    {
+      "name": "plugin_window",
+      "srcPath": "../../target/ohos/arkts-deps/window"
+    },
+    {
+      "name": "plugin_accessibility",
+      "srcPath": "../../target/ohos/arkts-deps/accessibility"
+    },
+    {
+      "name": "plugin_url",
+      "srcPath": "../../target/ohos/arkts-deps/url"
+    },
+    {
+      "name": "plugin_webview",
+      "srcPath": "../../target/ohos/arkts-deps/webview"
+    }
+  ]
+}

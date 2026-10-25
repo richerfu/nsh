@@ -128,7 +128,7 @@ Host patterns are `*` (any host), `*.example.com` (any subdomain of `example.com
 exact host name. Matching ignores case and the port. The host is taken after the last `@`, so
 `https://api.example.com@evil.io/` is checked as `evil.io`.
 
-`asset:` URIs (the app's own files) are always allowed; images and videos may also use `data:` URIs and relative
+Media `asset:` URIs (the app's own files) are allowed; images and videos may also use `data:` URIs and relative
 paths.
 
 ### `webview`
@@ -139,7 +139,7 @@ paths.
 
 Top-level navigations inside the web view are checked too, by the platform's navigation delegate, before they load.
 The page's own subresources (its scripts, images, XHRs) are the web content's business and are not checked.
-`about:blank` and inline HTML (`source={{ html }}`) need only web views to be granted at all: `"webview": { "hosts": [] }`
+`about:blank`, scoped `asset:/` resources and inline HTML (`source={{ html }}`) need only web views to be granted at all: `"webview": { "hosts": [] }`
 allows them without allowing any remote page.
 
 ### `statusBar`

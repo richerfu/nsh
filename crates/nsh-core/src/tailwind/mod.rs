@@ -88,7 +88,7 @@ pub mod deps {
     pub const MOTION: u16 = 128;
 }
 
-/// The platform classes run on (`ios:`, `android:`, `web:`).
+/// The platform classes run on (`ios:`, `android:`, `ohos:`, `web:`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Platform {
     /// iOS and Mac Catalyst.
@@ -96,6 +96,8 @@ pub enum Platform {
     Ios,
     /// Android.
     Android,
+    /// OpenHarmony.
+    Ohos,
     /// A web browser.
     Web,
 }
@@ -705,6 +707,10 @@ fn variant(theme: &Theme, v: &str, cond: &mut Condition) -> Option<u16> {
         "android" => {
             cond.platform = Some(Platform::Android);
             82
+        }
+        "ohos" => {
+            cond.platform = Some(Platform::Ohos);
+            84
         }
         "web" => {
             cond.platform = Some(Platform::Web);

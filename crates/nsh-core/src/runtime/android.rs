@@ -20,7 +20,7 @@ impl Toast {
 /// The back button's functions (its listeners are JS's).
 pub(crate) struct BackHandler;
 
-/// The back button, after modals and stacks had their turn.
+/// The back button, after native dialogs and modals had their turn.
 #[module]
 impl BackHandler {
     /// Leaves the app.

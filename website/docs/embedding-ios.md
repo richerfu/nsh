@@ -274,6 +274,7 @@ updates the app in place, logs appear in the `nsh dev` terminal, and errors show
 ## See also
 
 - [Embedding in Android apps](./embedding-android.md)
+- [Embedding in OHOS apps](./embedding-ohos.md)
 - [Native components](./native-components.md)
 - [Signed packages](./signed-packages.md)
 - [Sandbox and capabilities](./sandbox-and-capabilities.md)

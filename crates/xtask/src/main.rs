@@ -15,6 +15,7 @@
 mod android;
 mod dist;
 mod ios;
+mod ohos;
 mod run;
 mod term;
 mod web;
@@ -62,6 +63,18 @@ enum Task {
         /// ABIs to build (default: arm64-v8a and x86_64).
         #[arg(long)]
         abi: Vec<String>,
+    },
+    /// Build the arm64 OHOS embedding SDK (requires ohrs and OHOS_NDK_HOME).
+    Ohos {
+        /// Optimized build.
+        #[arg(long)]
+        release: bool,
+        /// Include development connections, hot updates and error overlays.
+        #[arg(long)]
+        dev: bool,
+        /// Include optional OHOS enhancements (api-23 or api-26).
+        #[arg(long, value_delimiter = ',', value_parser = ["api-23", "api-26"])]
+        features: Vec<String>,
     },
     /// Run clippy on the Android crate (with the NDK set up).
     ClippyAndroid,
@@ -128,6 +141,11 @@ fn task(task: Task) -> anyhow::Result<()> {
             };
             android::build(release, dev, &abis).map(|_| ())
         }
+        Task::Ohos {
+            release,
+            dev,
+            features,
+        } => ohos::build(release, dev, features),
         Task::ClippyAndroid => android::clippy(),
         Task::Dist => dist::dist(),
         Task::IosEmbed => ios::build().map(|out| term::note(out.display())),

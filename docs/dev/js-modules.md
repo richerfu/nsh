@@ -52,12 +52,12 @@ the chunks of a split bundle (`Screen.js`: a name that is no native module, with
 
 - **Platform modules** are importable on both platforms (one bundle runs on both); on the other one their calls do
   nothing and their components render nothing. `isAvailable` tells which.
-- **Platform-only props** are grouped: `ios={{…}}` / `android={{…}}` / `web={{…}}` / `desktop={{…}}` (macOS, Windows, Linux, and browsers in the desktop idiom) on
-  elements and components (`IOSProps` / `AndroidProps` / `DesktopProps` in `types.d.ts`, extended per element; the host
+- **Platform-only props** are grouped: `ios={{…}}` / `android={{…}}` / `ohos={{…}}` / `web={{…}}` / `desktop={{…}}` (macOS, Windows, Linux, and browsers in the desktop idiom) on
+  elements and components (`IOSProps` / `AndroidProps` / `OhosProps` / `DesktopProps` in `types.d.ts`, extended per element; the host
   props in them are the generated `IOS…HostProps` / `Android…HostProps`). The renderer
   (`platform_props` in `dom.rs`) sends only the current platform's object, each key as a prop of its own (keys removed
   from the object are cleared); the core knows them by those names. Android: `ripple`, `elevation`,
-  `accessibilityLiveRegion`, Modal `statusBarTranslucent`, StatusBar `backgroundColor` (a Rust component's `android`
+  `accessibilityLiveRegion`; OHOS: `accessibilityLiveRegion`. Android Modal `statusBarTranslucent`, StatusBar `backgroundColor` (a Rust component's `android`
   prop). Alert's `cancelable` is an option of both platforms (iOS alerts are never dismissed by a tap outside). iOS:
   input `inputAccessoryViewID` / `textContentType` / `keyboardAppearance`, Screen `headerLargeTitle` / `headerBackTitle`, Modal
   `presentationStyle` / `supportedOrientations`, WebView `allowsBackForwardNavigationGestures`. Desktop: Screen

@@ -16,3 +16,10 @@
   resolves, never JS) and keep the downloaded bytes in a data cache (32 MB) until a view
   decodes them. Android `ImageBox` draws its borders above the
   image (as Core Animation's layer border).
+
+On OHOS, scoped worker IO validates redirects and encoded/natural-size bounds,
+and ArkUI owns decoding and presentation. The internal Image receives the
+node's corner radii, a source-alpha-preserving tint matrix, native blur and a
+VSync fade over `fadeDuration` (default zero). Reduced motion completes fades
+immediately. The API 26 image fixture checks actual native pixels, dynamic
+tint changes, transparent margins, blur, remount and independent surfaces.

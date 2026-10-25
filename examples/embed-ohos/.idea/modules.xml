@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/embed-ohos.iml" filepath="$PROJECT_DIR$/.idea/modules/embed-ohos.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/embed-ohos.entry.iml" filepath="$PROJECT_DIR$/.idea/modules/embed-ohos.entry.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/embed-ohos.native_ability.iml" filepath="$PROJECT_DIR$/.idea/modules/embed-ohos.native_ability.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_accessibility.iml" filepath="$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_accessibility.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_arkui.iml" filepath="$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_arkui.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_clipboard.iml" filepath="$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_clipboard.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_resource.iml" filepath="$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_resource.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_url.iml" filepath="$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_url.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_video.iml" filepath="$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_video.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_webview.iml" filepath="$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_webview.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_window.iml" filepath="$PROJECT_DIR$/.idea/modules/embed-ohos.plugin_window.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/entry.iml" filepath="$PROJECT_DIR$/.idea/modules/entry.iml" />
+    </modules>
+  </component>
+</project>

@@ -121,7 +121,7 @@ release 构建（所有并非从开发服务器加载的代码）在加载时会
 主机名。匹配时忽略大小写和端口。主机取最后一个 `@` 之后的部分，因此 `https://api.example.com@evil.io/` 会按 `evil.io`
 检查。
 
-`asset:` URI（应用自己的文件）始终允许；图片和视频还可以使用 `data:` URI 和相对路径。
+媒体的 `asset:` URI（应用自己的文件）允许访问；图片和视频还可以使用 `data:` URI 和相对路径。
 
 ### `webview`
 
@@ -130,7 +130,7 @@ release 构建（所有并非从开发服务器加载的代码）在加载时会
 | `hosts` | `string[]` | [web view](./web-view-and-video.md) 可以显示和导航到的主机（`http` 和 `https`）。没有 `webview` 时，应用完全不能显示网页。 |
 
 web view 内的顶层导航也会在加载前由平台的导航代理检查。页面自身的子资源（脚本、图片、XHR）属于网页内容自己的事，
-不做检查。`about:blank` 和内联 HTML（`source={{ html }}`）只要求 web view 被授予即可：`"webview": { "hosts": [] }`
+不做检查。`about:blank`、独立的 `asset:/` 资源和内联 HTML（`source={{ html }}`）只要求 web view 被授予即可：`"webview": { "hosts": [] }`
 允许它们，但不允许任何远程页面。
 
 ### `statusBar`

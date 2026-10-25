@@ -1,15 +1,15 @@
 ---
 title: Platform overview
-description: "Where NSH runs: iOS, Android, macOS, Windows, Linux, GPUI and the web, each with its own backend; how to run, package and embed on each, and what each needs."
+description: "Where NSH runs: iOS, Android, OHOS, macOS, Windows, Linux, GPUI and the web; each platform's backend, tools and embedding workflow."
 order: 10
 group: platforms
 ---
 
 # Platform overview
 
-NSH runs on phones, desktops and the web: iOS, Android, macOS, Windows, Linux, GPUI and web pages. Each has a backend of its own that draws with the platform's own UI, so a module is UIKit views on an iPhone, AppKit views on a Mac, GTK 4 widgets on Linux, GPUI elements in a GPUI app and HTML in a browser, with the platform's text, input, accessibility and dark mode. Everything above the backend is shared: QuickJS, the reactive graph, the renderer, Taffy layout and the components are the same Rust code everywhere, so one bundle runs on all of them.
+Native Shell runs on phones, desktops and the web: iOS, Android, OHOS, macOS, Windows, Linux, GPUI and web pages. Each backend draws with its platform's UI: UIKit on iOS, ArkUI on OHOS, AppKit on macOS, GTK 4 on Linux, GPUI elements in a GPUI app and HTML in a browser. QuickJS, the reactive graph, the renderer, Taffy layout and the components are shared Rust code. Each platform guide describes the UI capabilities and host APIs its backend exposes.
 
-On every platform, NSH's main use is the same: modules embedded in a native app of your own, which loads them at run time. You develop them with hot reload (`nsh run`), and the same modules can also be packaged as an installable app (`nsh package`), a supported second use.
+NSH's main use is modules embedded in a native app of your own, loaded at run time. The CLI's development hosts use hot reload (`nsh run`), and its app runners package modules as installable apps (`nsh package`). OHOS uses the [DevEco embedding workflow](./embedding-ohos.md) with source modules in the host HAP.
 
 ## At a glance
 
@@ -17,6 +17,7 @@ On every platform, NSH's main use is the same: modules embedded in a native app 
 |---|---|---|---|---|
 | [iOS](./embedding-ios.md) | UIKit; CoreText | iOS 15.0+, devices and the simulator | `nsh run --target ios` | `.app` (simulator), signed `.ipa` |
 | [Android](./embedding-android.md) | Android views; `StaticLayout` | Android 9 (API 28)+, `arm64-v8a` and `x86_64` | `nsh run --target android` | signed `.apk` |
+| [OHOS](./embedding-ohos.md) | ArkUI custom nodes; native typography | API 12 baseline, arm64 | `cargo xtask ohos`, DevEco host | host HAP built with DevEco |
 | [macOS](./macos.md) | AppKit and Core Animation; CoreText | macOS 14+ | `nsh run --target macos` | ad hoc signed `.app` |
 | [Windows](./windows.md) | Win32 windows drawn with Direct2D; DirectWrite | Windows 10 1809+, Windows 11 | `nsh run` (the default on Windows) | a directory and a `.zip` |
 | [Linux](./linux.md) | GTK 4 widgets; Pango | GTK 4.14+ | `nsh run` (the default on Linux) | a directory and a `.tar.gz` |
@@ -44,13 +45,14 @@ Desktop backends build for the machine they run on: package a Mac app on a Mac, 
 |---|---|---|---|
 | iOS | `NshAppView` (a `UIView`) | `NativeShell.xcframework` | Swift |
 | Android | `NshView` (a `FrameLayout`) | `nsh.aar` | Java or Kotlin |
+| [OHOS](./embedding-ohos.md) | `NshSurface` in an ArkTS `NshView` | shared library and generated declarations | ArkTS |
 | macOS | `AppView` (an `NSView`) | the `nsh-platform-macos` crate | Rust |
 | Windows | `AppView` (a child window) | the `nsh-platform-windows` crate | Rust |
 | Linux | `AppView` (a GTK widget) | the `nsh-platform-linux` crate | Rust |
 | GPUI (macOS, Windows, Linux) | `AppView` (a GPUI view) | the `nsh-platform-gpui` crate | Rust |
 | Web | `createPlayer` (a page element) or an iframe | the runtime files from `nsh package --target web` | JavaScript or HTML |
 
-Each view is one engine with its own VM, and an app can show several. The host registers its own native views for modules to use on every platform ([Native components](./native-components.md)).
+Each view is one engine with its own VM, and an app can show several. The [native component guide](./native-components.md) describes the SDKs' host-view registration APIs.
 
 > [!NOTE]
 > Desktop hosts embed NSH with Rust crates from the NSH repository; their `AppView` loads bundles from the app's own files (or source code), with the default limits. The iOS and Android SDKs also load [signed packages](./signed-packages.md) with `NshTrust` and set limits and capabilities per view ([Sandbox and capabilities](./sandbox-and-capabilities.md)).
@@ -60,7 +62,7 @@ Each view is one engine with its own VM, and an app can show several. The host r
 Most of an app needs no platform checks: elements, styles, layout and modules behave the same everywhere. Where platforms differ, NSH gives the difference one place ([Platform-specific code](./platform-specific.md)):
 
 - **Platform-only props** go in `ios={{…}}`, `android={{…}}`, `web={{…}}` or `desktop={{…}}` (macOS, Windows, Linux and desktop browsers).
-- **`Platform.select`** takes a value per OS, or for `mobile` and `desktop` as a whole; `Platform.OS` is `"ios"`, `"android"`, `"macos"`, `"windows"`, `"linux"` or `"web"`.
+- **`Platform.select`** takes a value per OS, or for `mobile` and `desktop` as a whole; `Platform.OS` is `"ios"`, `"android"`, `"ohos"`, `"macos"`, `"windows"`, `"linux"` or `"web"`.
 - **Input follows the platform.** Phones get touches and the software keyboard; desktops get the mouse, the trackpad and the keyboard.
 
 The components of [`nsh/ui/mobile`](../components/index.md) are drawn by NSH, so they also run on desktops, looking as they do on phones. A desktop layout is built from the primitives (`View`, `Text`, `Scroll`, `List`, …) and `Platform.select({ desktop: … })`, as the gallery's desktop layout is; a desktop UI set is on the way.

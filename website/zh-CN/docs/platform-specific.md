@@ -14,7 +14,7 @@ group: platforms
 | [`ios={{…}}`、`android={{…}}`、`desktop={{…}}`、`web={{…}}`](#平台专属属性) | 只有一个平台才有的属性。 |
 | [`nsh/ios`、`nsh/android`](#平台模块) | 只有一个平台才有的 API。 |
 | [`Platform.OS`、`Platform.select`](#platformos-与-platformselect) | 按平台选择值或代码。 |
-| [`ios:` / `android:` / `web:` 类](#tailwind-中的平台变体) | 按平台设置样式。 |
+| [`ios:` / `android:` / `ohos:` / `web:` 类](#tailwind-中的平台变体) | 按平台设置样式。 |
 
 ## 平台专属属性
 
@@ -147,7 +147,7 @@ function PhotoViewer() {
 
 ## Platform.OS 与 Platform.select
 
-`nsh/device` 中的 `Platform` 告诉你应用运行在哪里：`Platform.OS` 为 `"ios"`、`"android"`、`"macos"`、`"windows"`、`"linux"` 或 `"web"`（Mac Catalyst 为 `"ios"`，同时 `Platform.isMacCatalyst` 为真；[macOS 后端](./macos.md)为 `"macos"`，[Linux 后端](./linux.md)为 `"linux"`，[Windows 后端](./windows.md)为 `"windows"`，它们的元素会应用 `desktop` 属性；[浏览器](./web.md)为 `"web"`，界面风格为 `"desktop"` 时也会应用 `desktop` 属性）。`Version`、`isPad` 等见[设备与环境](./device-and-environment.md#平台)。
+`nsh/device` 中的 `Platform` 告诉你应用运行在哪里：`Platform.OS` 为 `"ios"`、`"android"`、`"ohos"`、`"macos"`、`"windows"`、`"linux"` 或 `"web"`（Mac Catalyst 为 `"ios"`，同时 `Platform.isMacCatalyst` 为真；[macOS 后端](./macos.md)为 `"macos"`，[Linux 后端](./linux.md)为 `"linux"`，[Windows 后端](./windows.md)为 `"windows"`，它们的元素会应用 `desktop` 属性；[浏览器](./web.md)为 `"web"`，界面风格为 `"desktop"` 时也会应用 `desktop` 属性）。`Version`、`isPad` 等见[设备与环境](./device-and-environment.md#平台)。
 
 ```tsx
 import { Platform } from "nsh/device";
@@ -159,7 +159,7 @@ if (Platform.OS === "android") {
 
 ### Platform.select
 
-`Platform.select(spec)` 返回当前平台对应的值。它依次查找该操作系统自己的键，然后是 `mobile`（iOS、Android、手机和平板浏览器）或 `desktop`（macOS、Windows、Linux、桌面浏览器），再是 `native`（除 Web 外的所有平台，与 React Native 相同），最后是 `default`：
+`Platform.select(spec)` 返回当前平台对应的值。它依次查找该操作系统自己的键，然后是 `mobile`（iOS、Android、OHOS、手机和平板浏览器）或 `desktop`（macOS、Windows、Linux、桌面浏览器），再是 `native`（除 Web 外的所有平台，与 React Native 相同），最后是 `default`：
 
 ```tsx
 const styles = {
@@ -196,7 +196,7 @@ const Spinner = Platform.select({ ios: IosSpinner, default: MaterialSpinner })!;
 
 ## Tailwind 中的平台变体
 
-`ios:`、`android:` 和 `web:` 变体只在一个平台上应用对应的类：
+`ios:`、`android:`、`ohos:` 和 `web:` 变体只在一个平台上应用对应的类：
 
 ```tsx
 <View class="rounded-xl bg-white p-4 ios:shadow-md android:border android:border-zinc-200">…</View>

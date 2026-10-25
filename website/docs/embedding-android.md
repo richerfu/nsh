@@ -276,6 +276,7 @@ config of the app may override it). The release `nsh.aar` does not.
 ## See also
 
 - [Embedding in iOS apps](./embedding-ios.md)
+- [Embedding in OHOS apps](./embedding-ohos.md)
 - [Native components](./native-components.md)
 - [Signed packages](./signed-packages.md)
 - [Packaging](./packaging.md): a standalone APK without writing any Java

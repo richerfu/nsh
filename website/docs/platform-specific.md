@@ -14,7 +14,7 @@ One NSH bundle runs on iOS, Android, macOS, Windows and Linux (and in Mac Cataly
 | [`ios={{…}}`, `android={{…}}`, `desktop={{…}}`, `web={{…}}`](#platform-only-props) | Props only one platform has. |
 | [`nsh/ios`, `nsh/android`](#platform-modules) | APIs only one platform has. |
 | [`Platform.OS`, `Platform.select`](#platformos-and-platformselect) | Choosing values or code per platform. |
-| [`ios:` / `android:` / `web:` classes](#platform-variants-in-tailwind) | Styles per platform. |
+| [`ios:` / `android:` / `ohos:` / `web:` classes](#platform-variants-in-tailwind) | Styles per platform. |
 
 ## Platform-only props
 
@@ -147,7 +147,7 @@ In an app embedded in a native one, the host app's view controller decides the s
 
 ## Platform.OS and Platform.select
 
-`Platform` from `nsh/device` tells you where the app runs: `Platform.OS` is `"ios"`, `"android"`, `"macos"`, `"windows"`, `"linux"` or `"web"` (Mac Catalyst is `"ios"`, with `Platform.isMacCatalyst`; the [macOS backend](./macos.md) is `"macos"`, the [Linux backend](./linux.md) `"linux"` and the [Windows backend](./windows.md) `"windows"`, and their elements apply their `desktop` props; [browsers](./web.md) are `"web"`, and apply `desktop` props too when the idiom is `"desktop"`). See [Device and environment](./device-and-environment.md#the-platform) for `Version`, `isPad` and the rest.
+`Platform` from `nsh/device` tells you where the app runs: `Platform.OS` is `"ios"`, `"android"`, `"ohos"`, `"macos"`, `"windows"`, `"linux"` or `"web"` (Mac Catalyst is `"ios"`, with `Platform.isMacCatalyst`; the [macOS backend](./macos.md) is `"macos"`, the [Linux backend](./linux.md) `"linux"` and the [Windows backend](./windows.md) `"windows"`, and their elements apply their `desktop` props; [browsers](./web.md) are `"web"`, and apply `desktop` props too when the idiom is `"desktop"`). See [Device and environment](./device-and-environment.md#the-platform) for `Version`, `isPad` and the rest.
 
 ```tsx
 import { Platform } from "nsh/device";
@@ -159,7 +159,7 @@ if (Platform.OS === "android") {
 
 ### Platform.select
 
-`Platform.select(spec)` returns the value for this platform. It looks for the OS's own key, then `mobile` (iOS, Android, phone and tablet browsers) or `desktop` (macOS, Windows, Linux, desktop browsers), then `native` (every platform but the web, as in React Native), then `default`:
+`Platform.select(spec)` returns the value for this platform. It looks for the OS's own key, then `mobile` (iOS, Android, OHOS, phone and tablet browsers) or `desktop` (macOS, Windows, Linux, desktop browsers), then `native` (every platform but the web, as in React Native), then `default`:
 
 ```tsx
 const styles = {
@@ -196,7 +196,7 @@ or inline with [`<If>`](../elements/control-flow.md):
 
 ## Platform variants in Tailwind
 
-The `ios:`, `android:` and `web:` variants apply classes on one platform:
+The `ios:`, `android:`, `ohos:` and `web:` variants apply classes on one platform:
 
 ```tsx
 <View class="rounded-xl bg-white p-4 ios:shadow-md android:border android:border-zinc-200">…</View>

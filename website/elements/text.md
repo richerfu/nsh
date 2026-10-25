@@ -126,7 +126,8 @@ None of its own.
 
 ## Platform notes
 
-- Selection stays inside one text block (one `<Text>` and its spans); it does not run across blocks. iOS shows its edit menu (Copy, Select All, Look Up, Translate, Share), Android a floating toolbar (Copy, Select all, Share).
+- Selection stays inside one text block (one `<Text>` and its spans); it does not run across blocks. iOS shows its edit menu (Copy, Select All, Look Up, Translate, Share), Android a floating toolbar (Copy, Select all, Share), and OHOS a native Copy/Select All menu. On OHOS, Ctrl+C copies, Ctrl+A selects the block, and Esc clears the active selection.
+- On OHOS, holding a selection handle near a scroll viewport's edge scrolls the content and extends the range; releasing the handle stops scrolling.
 - Text decorations other than a solid single line (`double`, `dotted`, `dashed`, `wavy`) are drawn by NSH on iOS.
 - iOS texts draw no gradient backgrounds or inset shadows.
 - `fontScale()` from [`nsh/device`](../modules/nsh-device.md) reports the current system text scale.

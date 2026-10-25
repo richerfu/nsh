@@ -321,6 +321,11 @@ fn BackCounter() -> impl IntoElement {
 
 #[test]
 fn rust_components_take_the_back_button() {
+    for os in [nsh_engine::Os::Android, nsh_engine::Os::Ohos] {
+        assert_rust_back_button(os);
+    }
+}
+fn assert_rust_back_button(os: nsh_engine::Os) {
     let (tx, rx) = crossbeam_channel::unbounded();
     let config = EngineConfig {
         app: App::Rust(Root::of::<BackCounter>()),
@@ -328,7 +333,10 @@ fn rust_components_take_the_back_button() {
         trace: false,
         network: None,
         assets: None,
-        environment: Environment::default(),
+        environment: Environment {
+            os,
+            ..Environment::default()
+        },
         header_heights: (44.0, 96.0),
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),

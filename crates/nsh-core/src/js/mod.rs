@@ -163,6 +163,7 @@ mod tests {
             ("HostProps", "  onPress?: () => void;"),
             ("HostProps", "  onLayout?: (e: LayoutEvent) => void;"),
             ("AndroidHostProps", "  elevation?: number;"),
+            ("OhosHostProps", "  accessibilityLiveRegion?: LiveRegion;"),
             ("InputHostProps", "  keyboardType?: KeyboardType;"),
             ("InputHostProps", "  onChangeText?: (text: string) => void;"),
             ("IOSInputHostProps", "  inputAccessoryViewID?: string;"),

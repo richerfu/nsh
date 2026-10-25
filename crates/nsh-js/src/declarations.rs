@@ -38,6 +38,8 @@ export interface CommonProps extends TouchProps, HostProps {
   ios?: IOSProps;
   /** Android-only props (ignored elsewhere). */
   android?: AndroidProps;
+  /** OHOS-only props (ignored elsewhere). */
+  ohos?: OhosProps;
   /** Desktop-only props (macOS, Windows, Linux and desktop browsers;
    * ignored on mobile). */
   desktop?: DesktopProps;
@@ -56,6 +58,9 @@ export interface WebProps {}
 
 /** Android-only props of every element (`android={{…}}`). */
 export interface AndroidProps extends AndroidHostProps {}
+
+/** OHOS-only props of every element (`ohos={{…}}`). */
+export interface OhosProps extends OhosHostProps {}
 
 /** `<View>` */
 export interface ViewProps extends CommonProps {
@@ -114,7 +119,7 @@ export interface Insets {
 }
 
 /** An operating system (`Platform.OS`). */
-export type OS = "ios" | "android" | "macos" | "windows" | "linux" | "web";
+export type OS = "ios" | "android" | "ohos" | "macos" | "windows" | "linux" | "web";
 
 export declare namespace JSX {
   /** What components return and children accept. */

@@ -15,6 +15,7 @@ On top of `nsh`, each platform needs its own tools:
 |---|---|---|
 | iOS | macOS | Xcode and an iOS simulator runtime |
 | Android | macOS, Windows or Linux | The Android SDK and a JDK; an emulator or a device |
+| [OHOS](./embedding-ohos.md) | macOS source SDK and DevEco host workflow | DevEco Studio, its SDK, Rust and ohrs; an arm64 target |
 | macOS | macOS | Xcode's command line tools; apps run on macOS 14+ |
 | Windows | Windows | Windows 10 1809+; the WebView2 Runtime for web views |
 | Linux | Linux | GTK 4.14+ (and its development packages to build the runtime) |
@@ -179,6 +180,14 @@ See [Windows](./windows.md).
 ### Building the Android runtime
 
 Building the Android runtime from a checkout (`cargo xtask android`) additionally needs an **NDK** from the SDK (`ndk;<version>`; set `ANDROID_NDK_HOME` if the newest one installed is incomplete) and `javac`.
+
+### Building the OHOS embedding SDK
+
+The [OHOS guide](./embedding-ohos.md) covers the API 12 arm64 embedding workflow.
+From a source checkout with the matching binding repository, set
+`OHOS_NDK_HOME` to the SDK's `openharmony` directory and build the native library
+and declarations with `cargo xtask ohos`. The DevEco host loads the module's
+`bundle.js` from raw resources and uses OHPM/Hvigor to build its HAP.
 
 ## What works where
 
