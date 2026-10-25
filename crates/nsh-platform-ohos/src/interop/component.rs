@@ -16,10 +16,12 @@ use napi_ohos::{
 use nsh_core::{JsonValue, NodeId};
 use nsh_engine::EngineControl;
 use ohos_arkui_binding::{component::built_in_component::Stack, types::advanced::LengthMetricUnit};
-use openharmony_ability::NativeAttachment;
 use rustc_hash::FxHashMap;
 
-use crate::render::node::{NativeNode, Result};
+use crate::{
+    interop::attachment::NativeAttachment,
+    render::node::{NativeNode, Result},
+};
 
 /// One changed property of a host native component. A component receives
 /// one array per batch; values cross Node-API directly without JSON strings.

@@ -161,13 +161,14 @@ impl NshTrust {
         .await
     }
 
-    /// Verifies a signed HAP rawfile using the current Ability resource plugin.
+    /// Verifies a signed HAP rawfile using the current Ability resource manager.
     #[napi(ts_return_type = "Promise<NshPackage>")]
     pub fn open_resource<'env>(
         &self,
         env: &'env Env,
         name: String,
     ) -> Result<PromiseRaw<'env, NshPackage>> {
+        crate::app::entry::ensure_host_ready(env)?;
         crate::app::session::resource_name(&name)?;
         let host = crate::app::session::current()?;
         let permit = host.reserve_load()?;

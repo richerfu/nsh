@@ -1,5 +1,4 @@
-import { DefaultXComponent } from "@ohos-rs/ability";
-import { NshSurface, onBackPressIntercept, getCapabilities } from "libnsh_platform_ohos.so";
+import { NshSurface, onBackPressIntercept, getCapabilities } from "@nsh/ohos";
 import { HostBadge } from "../components/HostBadge";
 
 @Entry
@@ -55,73 +54,67 @@ struct Index {
   }
 
   build() {
-    Stack() {
-      // Ability's UI plugin root is shared by the host. It owns no NSH engine.
-      DefaultXComponent({ moduleName: "nsh_platform_ohos" }).width("100%").height("100%")
-      Column() {
-        Flex({ wrap: FlexWrap.Wrap }) {
-          Button("Reload")
-            .onClick(() => {
-              this.load(this.left);
-              if (this.right) {
-                this.load(this.right);
-              }
-            })
-          Button(this.split ? "Single" : "Split")
-            .onClick(() => {
-              if (this.split) {
-                this.split = false;
-                this.right?.dispose();
-                this.right = undefined;
-                this.refresh();
-              } else {
-                this.right = new NshSurface();
-                this.prepare(this.right);
-                this.load(this.right);
-                this.split = true;
-              }
-            })
-          Button("Stop")
-            .onClick(() => {
-              this.left.stop();
-              this.right?.stop();
-              this.refresh();
-            })
-          Button("Connect dev")
-            .onClick(() => {
-              this.left.connectDevServer("ws://127.0.0.1:8790/ws");
-            })
-          Button("Disconnect dev")
-            .onClick(() => {
-              this.left.disconnectDevServer();
-            })
-        }.margin(8)
-        Text(this.status)
-          .id("surface-status")
-          .fontSize(12)
-          .margin({ bottom: 4 })
-        Flex({ direction: FlexDirection.Row }) {
-          Column() {
-            ContentSlot(this.left.content)
-          }
-          .width(this.split ? "50%" : "100%")
-          .height("100%")
-          if (this.split && this.right) {
-            Column() {
-              ContentSlot(this.right.content)
+    Column() {
+      Flex({ wrap: FlexWrap.Wrap }) {
+        Button("Reload")
+          .onClick(() => {
+            this.load(this.left);
+            if (this.right) {
+              this.load(this.right);
             }
-            .width("50%")
-            .height("100%")
-          }
+          })
+        Button(this.split ? "Single" : "Split")
+          .onClick(() => {
+            if (this.split) {
+              this.split = false;
+              this.right?.dispose();
+              this.right = undefined;
+              this.refresh();
+            } else {
+              this.right = new NshSurface();
+              this.prepare(this.right);
+              this.load(this.right);
+              this.split = true;
+            }
+          })
+        Button("Stop")
+          .onClick(() => {
+            this.left.stop();
+            this.right?.stop();
+            this.refresh();
+          })
+        Button("Connect dev")
+          .onClick(() => {
+            this.left.connectDevServer("ws://127.0.0.1:8790/ws");
+          })
+        Button("Disconnect dev")
+          .onClick(() => {
+            this.left.disconnectDevServer();
+          })
+      }.margin(8)
+      Text(this.status)
+        .id("surface-status")
+        .fontSize(12)
+        .margin({ bottom: 4 })
+      Flex({ direction: FlexDirection.Row }) {
+        Column() {
+          ContentSlot(this.left.content)
         }
-        .width("100%")
-        .layoutWeight(1)
+        .width(this.split ? "50%" : "100%")
+        .height("100%")
+        if (this.split && this.right) {
+          Column() {
+            ContentSlot(this.right.content)
+          }
+          .width("50%")
+          .height("100%")
+        }
       }
       .width("100%")
-      .height("100%")
-      .backgroundColor("#f4f5f7")
+      .layoutWeight(1)
     }
     .width("100%")
     .height("100%")
+    .backgroundColor("#f4f5f7")
   }
 }

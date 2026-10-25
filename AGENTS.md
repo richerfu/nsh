@@ -94,7 +94,7 @@ crates/
                        `include/nsh.h`) under the `NativeShell` Swift module (`swift/NativeShell.swift`) iOS apps embed nsh with
   nsh-platform-android/ Android backend: `libnsh.so` (JNI glue, StaticLayout text engine, batch encoding, UI-thread animator) + the Java
                        runtime in `java/com/longbridge/nsh` (NshView, Mounter, views, images, networking); feature `dev` as above
-  nsh-platform-ohos/   OHOS arm64 embedding backend (API 20 baseline, optional API 23/26 features): NativeAbility session, instance-owned NodeContent views, ArkUI native nodes,
+  nsh-platform-ohos/   OHOS arm64 embedding backend (API 20 baseline, optional API 23/26 features): automatic UIContext/UIAbilityContext session, instance-owned NodeContent views, ArkUI native nodes,
                        native typography/VSync; explicit N-API NshSurface; bindings own native APIs; examples/embed-ohos is the app host
   nsh-platform-web/    WebAssembly backend (published web apps, `nsh run --target web`, the website's live demos): the engine on
                        the page's main thread (`LocalEngine`), text laid out with browser font metrics, batches as JSON + CSS

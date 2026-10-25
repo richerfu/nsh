@@ -1,14 +1,14 @@
 //! One NSH SDK call per mount or native input turn; failed retirement keeps its owner.
-use openharmony_ability::NativeAttachment;
 
-use crate::interop::sdk::{Batch, EditorCommand, EditorSettings, ViewOptions};
+use crate::interop::{
+    attachment::NativeAttachment,
+    sdk::{Batch, EditorCommand, EditorSettings, ViewOptions, WebCommand, WebSettings},
+};
 
 impl crate::render::mount::UiContext {
     pub(crate) fn editor_update(&self, settings: EditorSettings) {
         let mut pending = self.arkui.borrow_mut();
-        let wake = pending.editors.is_empty()
-            && pending.commands.is_empty()
-            && pending.remove_editors.is_empty();
+        let wake = pending.is_empty();
         if let Some(old) = pending
             .editors
             .iter_mut()
@@ -25,9 +25,7 @@ impl crate::render::mount::UiContext {
     }
     pub(crate) fn editor_command(&self, command: EditorCommand) {
         let mut pending = self.arkui.borrow_mut();
-        let wake = pending.editors.is_empty()
-            && pending.commands.is_empty()
-            && pending.remove_editors.is_empty();
+        let wake = pending.is_empty();
         pending.commands.push(command);
         drop(pending);
         if wake {
@@ -43,6 +41,47 @@ impl crate::render::mount::UiContext {
         let target = self.retire_unattached(target);
         if let Some(target) = target {
             self.arkui.borrow_mut().remove_editors.push(id);
+            self.arkui_views.borrow_mut().push(target);
+        }
+        self.editor_wake();
+    }
+    pub(crate) fn web_update(&self, settings: WebSettings) {
+        let mut pending = self.arkui.borrow_mut();
+        let wake = pending.is_empty();
+        if let Some(old) = pending
+            .webs
+            .iter_mut()
+            .find(|old| old.target_id == settings.target_id)
+        {
+            *old = settings;
+        } else {
+            pending.webs.push(settings);
+        }
+        drop(pending);
+        if wake {
+            self.editor_wake();
+        }
+    }
+    pub(crate) fn web_command(&self, command: WebCommand) {
+        let mut pending = self.arkui.borrow_mut();
+        let wake = pending.is_empty();
+        pending.web_commands.push(command);
+        drop(pending);
+        if wake {
+            self.editor_wake();
+        }
+    }
+    pub(crate) fn web_remove(&self, target: NativeAttachment) {
+        let id = target.id();
+        let mut pending = self.arkui.borrow_mut();
+        pending.webs.retain(|update| update.target_id != id);
+        pending
+            .web_commands
+            .retain(|command| command.target_id != id);
+        drop(pending);
+        let target = self.retire_unattached(target);
+        if let Some(target) = target {
+            self.arkui.borrow_mut().remove_webs.push(id);
             self.arkui_views.borrow_mut().push(target);
         }
         self.editor_wake();
@@ -115,11 +154,25 @@ impl crate::render::mount::UiContext {
                         pending.views.push(update);
                     }
                 }
+                for update in batch.webs {
+                    if !pending
+                        .webs
+                        .iter()
+                        .any(|next| next.target_id == update.target_id)
+                        && !pending.remove_webs.contains(&update.target_id)
+                    {
+                        pending.webs.push(update);
+                    }
+                }
                 let mut commands = batch.commands;
                 commands.append(&mut pending.commands);
                 pending.commands = commands;
+                let mut web_commands = batch.web_commands;
+                web_commands.append(&mut pending.web_commands);
+                pending.web_commands = web_commands;
                 pending.remove_editors.extend(batch.remove_editors);
                 pending.remove_views.extend(batch.remove_views);
+                pending.remove_webs.extend(batch.remove_webs);
                 self.arkui_views.borrow_mut().extend(retired);
                 return Err(error);
             }
@@ -131,10 +184,8 @@ impl crate::render::mount::UiContext {
                 let id = owner.accessibility_id()?;
                 self.host.accessibility_event(
                     self.dispatcher.clone(),
-                    openharmony_ability_plugin_accessibility::AccessibilitySendEventRequest {
-                        announcement: None,
-                        element_id: Some(id),
-                    },
+                    None,
+                    Some(i64::from(id)),
                 )?;
             }
         }

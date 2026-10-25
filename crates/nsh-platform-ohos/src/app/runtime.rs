@@ -107,8 +107,8 @@ pub(crate) enum Message {
     },
     HostEnvironment(NshEnvironment),
     HostWindow(
-        [openharmony_ability::AvoidArea; 3],
-        openharmony_ability::AvoidArea,
+        [crate::app::session::AvoidArea; 3],
+        crate::app::session::AvoidArea,
     ),
     HostEvent(nsh_core::EventKind, nsh_core::EventPayload),
     TextSelection(
@@ -133,7 +133,6 @@ pub(crate) enum Message {
     Frame,
     Reclaim(u64),
     VideoRetired(u64),
-    WebviewRetired(u32, Option<u32>, Option<String>),
     VideoUi(u64, crate::media::video::UiState),
 }
 pub(crate) struct Dispatcher {
@@ -214,10 +213,6 @@ impl State {
             if let Some(mounter) = &mut self.mounter {
                 mounter.reclaim(epoch);
             }
-            return Ok(());
-        }
-        if let Message::WebviewRetired(token, created_target, failure) = message {
-            crate::media::webview::retired(token, created_target, failure);
             return Ok(());
         }
         if let Message::VideoRetired(token) = message {
@@ -369,7 +364,6 @@ impl State {
                 self.retire()?;
             }
             Message::Reclaim(_)
-            | Message::WebviewRetired(..)
             | Message::VideoRetired(_)
             | Message::VideoUi(..)
             | Message::Close
@@ -636,6 +630,9 @@ impl Runtime {
     }
     pub(crate) fn resize(&self, size: Size) -> napi_ohos::Result<()> {
         let mut state = self.state.try_borrow_mut().map_err(reentry)?;
+        if state.engine.is_none() {
+            return Ok(());
+        }
         state.environment.window = size.into();
         if let Some(mounter) = &state.mounter {
             mounter.resize(size).map_err(napi_error)?;
@@ -644,6 +641,9 @@ impl Runtime {
     }
     pub(crate) fn set_attached(&self, attached: bool) -> napi_ohos::Result<()> {
         let mut state = self.state.try_borrow_mut().map_err(reentry)?;
+        if state.engine.is_none() {
+            return Ok(());
+        }
         state.attached = attached;
         if !attached && let Some(mounter) = &state.mounter {
             mounter.cancel_input().map_err(napi_error)?;
@@ -666,11 +666,11 @@ impl Runtime {
         false
     }
     pub(crate) fn set_environment(&self, changes: NshEnvironment) -> napi_ohos::Result<()> {
-        self.state
-            .try_borrow_mut()
-            .map_err(reentry)?
-            .update_environment(changes)
-            .map_err(napi_error)
+        let mut state = self.state.try_borrow_mut().map_err(reentry)?;
+        if state.engine.is_none() {
+            return Ok(());
+        }
+        state.update_environment(changes).map_err(napi_error)
     }
     pub(crate) fn is_running(&self) -> bool {
         self.running.get()

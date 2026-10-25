@@ -1,4 +1,4 @@
-//! OHOS native backend: independent ContentSlot views in a NativeAbility host.
+//! OHOS native backend: independent ContentSlot views in a standard UIAbility host.
 //! Each rendering surface owns one engine and ArkUI tree.
 //!
 //! The engine lays out and rasterizes text off the UI thread, transferring pixels

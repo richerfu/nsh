@@ -308,11 +308,10 @@ containers. Rust observes native size/attachment and loads resources off the
 UI thread. Removing a slot preserves retained instance state; `stop()` clears
 the module, while `dispose()` permanently releases the instance.
 
-NativeAbility supplies the shared session and existing resource, clipboard, accessibility,
-window and URL plugins. One DefaultXComponent supplies the module's UI-plugin
-context; its required native entry exports create no implicit NSH module.
-The paired NSH HAR supplies SDK-only controls and subtree exports; the host
-registers `nativeShellPlugins()` and writes no Rust entry adapter.
+`@nsh/ohos` automatically attaches to the active `UIContext`, `UIAbilityContext`
+and window lifecycle in a standard `UIAbility` host without requiring a custom
+`UIAbility` base class or Rust entry adapter. The paired `@nsh/ohos` HAR supplies
+SDK-only controls and subtree exports.
 
 `cargo xtask ohos` builds the arm64 library and generated declarations.
 Every instance exposes source/resource and verified-package loading, development

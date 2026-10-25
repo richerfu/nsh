@@ -9,7 +9,6 @@ group: platforms
 
 Native Shell 通过 ArkUI 自定义节点、Taffy 布局和原生文本排版，把模块嵌入 OHOS 应用。arm64 后端以 API 20 为适配基线。每个 `NshSurface` 独立持有平台 `NodeContent`、引擎、JS VM 和 VSync。
 业务通过标准 `ContentSlot` 放置实例，并像 iOS、Android 嵌入视图一样管理其布局和生命周期。
-`NativeAbility` 提供共享的插件会话。
 
 ## 环境要求
 
@@ -76,7 +75,7 @@ const capabilities = getCapabilities();
 ```
 
 配套的 `@nsh/ohos` HAR 持有 SDK 控件和纹理 producer，Native Shell 负责语义策略、
-合成和原生视频播放。各 feature 配置使用相同的 `NativeAbility`、`NshSurface` 和
+合成和原生视频播放。各 feature 配置使用相同的 `NshSurface` 和
 `ContentSlot` 接入方式。
 
 在动态播报节点上设置 `ohos={{ accessibilityLiveRegion: "polite" }}` 或 `"assertive"`。
@@ -167,56 +166,14 @@ surface.runPackage(app);
 热更新遵循[共享状态保留规则](../../../docs/dev/tooling.md)。
 `disconnectDevServer()` 保留当前模块；显式加载和 `stop()` 结束该视图的开发连接。
 
-## 接入 NativeAbility
-
-在 DevEco 应用中使用现有 Ability runtime，以及 resource、clipboard、accessibility、window 和 URL
-插件包。完整依赖配置见[嵌入示例](../../../examples/embed-ohos/README.md)。
-
-```ts
-import { NativeAbility, LazyPlugin } from '@ohos-rs/ability';
-import { ResourcePlugin } from '@ohos-rs/ability-plugin-resource';
-import { AccessibilityPlugin } from '@ohos-rs/ability-plugin-accessibility';
-import { nativeShellPlugins } from '@nsh/ohos';
-import { ClipboardPlugin } from '@ohos-rs/ability-plugin-clipboard';
-import { WindowPlugin } from '@ohos-rs/ability-plugin-window';
-import { WebviewPlugin } from "@ohos-rs/ability-plugin-webview";
-import { UrlPlugin } from '@ohos-rs/ability-plugin-url';
-import { window } from '@kit.ArkUI';
-
-export default class EntryAbility extends NativeAbility {
-  moduleName: string = 'nsh_platform_ohos';
-  defaultPage: boolean = false;
-  bridgePlugins = [
-    new LazyPlugin(() => new ResourcePlugin()),
-    new LazyPlugin(() => new AccessibilityPlugin()),
-    ...nativeShellPlugins(),
-    new LazyPlugin(() => new ClipboardPlugin({ metadataMimeType: "application/x-nsh-clipboard" })),
-    new LazyPlugin(() => new WindowPlugin()),
-    new LazyPlugin(() => new WebviewPlugin()),
-    new LazyPlugin(() => new UrlPlugin()),
-  ];
-
-  protected async loadWindowStageContent(stage: window.WindowStage): Promise<void> {
-    await stage.loadContent('pages/Index');
-  }
-}
-```
-
-NSH 根据 NativeAbility 生命周期在 Rust 内部管理宿主会话。应用直接使用这些标准插件；
-每个 surface 在构造时自动取得当前会话。Ability 销毁会关闭其 surface，并使未完成的
-资源加载失效。
-
-剪贴板读取遵循宿主应用的 `ohos.permission.READ_PASTEBOARD` 声明、运行时授权
-和签名 profile；文本存在性查询仅检查 MIME 类型。
-
 ## 显示模块
 
-在普通宿主字段中持有实例。NativeAbility 初始化模块后，创建视图、加载资源，
-并将其 content 放入具有确定尺寸的容器：
+在 DevEco 应用中使用 `@nsh/ohos`。应用的 `EntryAbility` 保持标准的 HarmonyOS
+`UIAbility`（`extends UIAbility`）。在普通宿主字段中持有 `NshSurface` 实例，
+加载资源，并将 `surface.content` 放入具有确定尺寸的 `ContentSlot` 容器：
 
 ```ts
-import { DefaultXComponent } from '@ohos-rs/ability';
-import { NshSurface } from 'libnsh_platform_ohos.so';
+import { NshSurface } from '@nsh/ohos';
 
 @Entry
 @Component
@@ -236,23 +193,21 @@ struct Index {
   }
 
   build() {
-    Stack() {
-      DefaultXComponent({ moduleName: 'nsh_platform_ohos' })
-        .width('100%').height('100%')
-      Column() {
-        Text(this.error)
-        Stack() { ContentSlot(this.surface.content) }
-          .width('100%').layoutWeight(1)
-      }.width('100%').height('100%')
+    Column() {
+      Text(this.error)
+      Stack() { ContentSlot(this.surface.content) }
+        .width('100%').layoutWeight(1)
     }.width('100%').height('100%')
   }
 }
 ```
 
-每个模块保留一个 `DefaultXComponent`，为 Ability 提供 UIContext 和 UI 插件根节点。
-应用自己的页面通过独立的 `ContentSlot` 放置每个 NSH 视图。
-Rust 持有 NodeContent，测量原生容器尺寸并更新对应引擎的 viewport。
+`@nsh/ohos` 在创建 surface 时自动关联当前 `UIContext`、`UIAbilityContext` 和窗口生命周期。
+Rust 持有 `NodeContent`，测量原生容器尺寸并更新对应引擎的 viewport。
 挂载前可以加载源码；引擎会在 slot 已挂载且尺寸为正时启动。
+
+剪贴板读取遵循宿主应用的 `ohos.permission.READ_PASTEBOARD` 声明、运行时授权
+和签名 profile；文本存在性查询仅检查 MIME 类型。
 
 ## 多个独立视图
 

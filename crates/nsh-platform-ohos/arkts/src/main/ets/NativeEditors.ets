@@ -1,8 +1,5 @@
-import { BuilderNode } from "@ohos.arkui.node";
-import { FrameCallback } from "@ohos.arkui.UIContext";
-import {
-  BridgePluginContext,
-} from "@ohos-rs/ability";
+import { BuilderNode, FrameNode, NodeContent } from "@ohos.arkui.node";
+import { FrameCallback, UIContext } from "@ohos.arkui.UIContext";
 
 export interface EditorSettings {
   targetId: number;
@@ -48,9 +45,47 @@ export interface EditorCommand {
   start: number;
   end: number;
 }
-interface EditorReceipt { accepted: boolean; count: number; }
-interface Acknowledgement {
+export interface EditorEventPayload {
+  readonly kind: string;
+  readonly text: string;
+  readonly count: number;
+  readonly start: number;
+  readonly end: number;
+  readonly width: number;
+  readonly height: number;
+}
+export interface EditorReceipt {
   accepted: boolean;
+  count: number;
+}
+export interface MenuActionPayload {
+  targetId: number;
+  action: string;
+  kind?: string;
+  generation?: number;
+}
+export interface WebEventPayload {
+  targetId: number;
+  phase: string;
+  url: string;
+  title: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  message?: string;
+  code?: number;
+}
+export interface NshRuntimeContext {
+  isActive(): boolean;
+  getUIContext(): UIContext;
+  attachNativeNode(targetId: number, content: FrameNode | null): boolean;
+  attachNativeSubtree(targetId: number, content: FrameNode | null, slot: NodeContent): boolean;
+  retireNativeNode(targetId: number): boolean;
+  editorEvent(targetId: number, event: EditorEventPayload): EditorReceipt;
+  viewAction(action: MenuActionPayload): boolean;
+  webControllerAttached(targetId: number, nativeTag: string): boolean;
+  webNavigate(targetId: number, url: string): boolean;
+  webEvent(event: WebEventPayload): boolean;
 }
 const inputTypes: Map<string, InputType> = new Map([
   ["normal", InputType.Normal],
@@ -125,7 +160,7 @@ function contentType(value?: string | null): ContentType | undefined {
   return result;
 }
 
-class EditorEvent {
+class EditorEvent implements EditorEventPayload {
   readonly kind: string;
   readonly text: string;
   readonly count: number;
@@ -265,11 +300,11 @@ class EditorEntry {
   private appearedPending: boolean = false;
   private disposePending: boolean = false;
   private focusedOnce: boolean = false;
-  private context: BridgePluginContext;
+  private context: NshRuntimeContext;
   private sizePending: boolean = false;
   private contentWidth: number = -1;
   private contentHeight: number = -1;
-  constructor(settings: EditorSettings, context: BridgePluginContext) {
+  constructor(settings: EditorSettings, context: NshRuntimeContext) {
     this.context = context;
     this.settings = settings;
     this.text = settings.text;
@@ -282,13 +317,11 @@ class EditorEntry {
     try {
       this.node.build(wrapBuilder(editorContent), this);
       if (this.closed || !this.context.isActive()) { throw new Error("Editor creation was cancelled"); }
-      const response = this.context.invokeNativeSync(
-        "native-node-ready",
-        "ohos.node.NativeNodeReady",
-        "ohos.node.Acknowledgement",
-        { targetId: this.settings.targetId, content: this.node.getFrameNode() },
-      ) as Acknowledgement;
-      if (response.accepted !== true || this.closed) { throw new Error("Native editor target is no longer live"); }
+      const accepted = this.context.attachNativeNode(
+        this.settings.targetId,
+        this.node.getFrameNode(),
+      );
+      if (!accepted || this.closed) { throw new Error("Native editor target is no longer live"); }
       this.attached = true;
     } catch (error) {
       this.dispose();
@@ -371,12 +404,11 @@ class EditorEntry {
     if (!this.attached || this.closed || !this.context.isActive() || (this.updating && kind !== "focus" && kind !== "blur")) {
       return;
     }
-    const response = this.context.invokeNativeSync(
-      "editor-event", "nsh.arkui.EditorNotification", "nsh.arkui.EditorReceipt",
-      { targetId: this.settings.targetId, event: new EditorEvent(this, kind, text, start, end, width, height) },
-    ) as EditorReceipt;
+    const response = this.context.editorEvent(
+      this.settings.targetId,
+      new EditorEvent(this, kind, text, start, end, width, height),
+    );
     if (response.accepted) { this.count = response.count; }
-
   }
   appeared(): void {
     this.scheduleSize();
@@ -387,24 +419,32 @@ class EditorEntry {
     if (this.sdkBusy || !this.attached || this.closed || !this.context.isActive()) { return; }
     if (this.appearedPending && !this.focusedOnce && this.settings.autoFocus) {
       this.focusedOnce = true;
-      this.context.getUIContext().getFocusController().requestFocus(`nsh-editor-${this.settings.targetId}`);
+      try {
+        this.context.getUIContext().getFocusController().requestFocus(`nsh-editor-${this.settings.targetId}`);
+      } catch {}
     }
   }
   command(command: EditorCommand): void {
     if (command.kind === "focus") {
-      this.context.getUIContext().getFocusController().requestFocus(`nsh-editor-${this.settings.targetId}`);
+      try {
+        this.context.getUIContext().getFocusController().requestFocus(`nsh-editor-${this.settings.targetId}`);
+      } catch {}
     } else if (command.kind === "blur") {
-      if (this.settings.multiline && !this.settings.secure) {
-        this.area.stopEditing();
-      } else {
-        this.line.stopEditing();
-      }
+      try {
+        if (this.settings.multiline && !this.settings.secure) {
+          this.area.stopEditing();
+        } else {
+          this.line.stopEditing();
+        }
+      } catch {}
     } else if (command.kind === "selection") {
-      if (this.settings.multiline && !this.settings.secure) {
-        this.area.setTextSelection(command.start, command.end);
-      } else {
-        this.line.setTextSelection(command.start, command.end);
-      }
+      try {
+        if (this.settings.multiline && !this.settings.secure) {
+          this.area.setTextSelection(command.start, command.end);
+        } else {
+          this.line.setTextSelection(command.start, command.end);
+        }
+      } catch {}
     } else {
       throw new Error(`Unsupported editor command '${command.kind}'`);
     }
@@ -413,16 +453,14 @@ class EditorEntry {
     try { this.node.dispose(); this.disposed = true; quarantinedEditors.delete(this); }
     catch (error) { quarantinedEditors.add(this); throw new Error(String(error)); }
   }
-  dispose(cleanup: BridgePluginContext = this.context): void {
+  dispose(cleanup: NshRuntimeContext = this.context): void {
     if (this.disposed) { return; }
     this.closed = true;
     try {
       if (!this.retired) {
-        const response = cleanup.invokeNativeSync(
-          "native-node-retiring", "ohos.node.NativeNodeRetiring", "ohos.node.Acknowledgement",
-          { targetId: this.settings.targetId },
-        ) as Acknowledgement;
-        if (!response.accepted) { throw new Error("Native editor retirement was rejected"); }
+        if (!cleanup.retireNativeNode(this.settings.targetId)) {
+          throw new Error("Native editor retirement was rejected");
+        }
         this.retired = true;
       }
       if (this.sdkBusy) { this.disposePending = true; } else { this.release(); }
@@ -431,15 +469,14 @@ class EditorEntry {
       throw new Error(`Native editor retirement failed: ${String(error)}`);
     }
   }
-
 }
 
 export class NativeEditors {
   private entries: Map<number, EditorEntry> = new Map();
-  remove(ids: number[], context: BridgePluginContext): void {
+  remove(ids: number[], context: NshRuntimeContext): void {
     for (const id of ids) { this.entries.get(id)?.dispose(context); this.entries.delete(id); }
   }
-  update(states: EditorSettings[], commands: EditorCommand[], context: BridgePluginContext): void {
+  update(states: EditorSettings[], commands: EditorCommand[], context: NshRuntimeContext): void {
     for (const state of states) {
       if (!context.isActive()) { throw new Error("NSH SDK session is inactive"); }
       let entry = this.entries.get(state.targetId);
@@ -453,7 +490,7 @@ export class NativeEditors {
     }
     for (const command of commands) { this.entries.get(command.targetId)?.command(command); }
   }
-  dispose(context: BridgePluginContext): void {
+  dispose(context: NshRuntimeContext): void {
     let failure: Error | undefined;
     for (const id of Array.from(this.entries.keys())) {
       const entry = this.entries.get(id)!;

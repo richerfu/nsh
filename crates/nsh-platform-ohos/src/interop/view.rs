@@ -12,10 +12,12 @@ use ohos_arkui_binding::{
     },
     types::advanced::{LengthMetricUnit, NodeDirtyFlag},
 };
-use openharmony_ability::NativeAttachment;
 
 use crate::{
-    interop::sdk::{MenuItem, ViewOptions, ViewRoute},
+    interop::{
+        attachment::NativeAttachment,
+        sdk::{MenuItem, ViewOptions, ViewRoute},
+    },
     render::node::{NativeNode, Node, Result, callback},
 };
 

@@ -1,7 +1,15 @@
-import { LazyPlugin } from "@ohos-rs/ability";
-import { NshPlugin } from "./src/main/ets/NshPlugin";
+import "./src/main/ets/NshHost";
 
-/** Registers Native Shell's instance-owned SDK editor, menu and texture fragments. */
-export function nativeShellPlugins(): LazyPlugin[] {
-  return [new LazyPlugin(() => new NshPlugin())];
-}
+export {
+  NshCapabilities,
+  NshEnvironment,
+  NshNativeProperty,
+  NshOptions,
+  NshPackage,
+  NshPackageInfo,
+  NshSurface,
+  NshTrust,
+  getCapabilities,
+  initLogging,
+  onBackPressIntercept,
+} from "libnsh_platform_ohos.so";

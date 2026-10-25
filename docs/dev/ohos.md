@@ -14,7 +14,7 @@ verification.
 
 | Domain | Responsibility |
 |---|---|
-| [`app`](../../crates/nsh-platform-ohos/src/app/mod.rs) | NativeAbility entry/session, instance surfaces, engine queues, options, environment, capabilities, development and trust |
+| [`app`](../../crates/nsh-platform-ohos/src/app/mod.rs) | Host entry/session, instance surfaces, engine queues, options, environment, capabilities, development and trust |
 | [`render`](../../crates/nsh-platform-ohos/src/render/mod.rs) | C nodes, mount batches, geometry, drawing, Canvas, decoration and animation |
 | [`render/composition`](../../crates/nsh-platform-ohos/src/render/composition/mod.rs) | Export plans, worker-owned EGL/GLES readback, filters and blending |
 | [`text`](../../crates/nsh-platform-ohos/src/text/mod.rs) | Engine-thread typography, owned raster payloads and selectable-text geometry/state |
@@ -24,34 +24,24 @@ verification.
 | [`interop`](../../crates/nsh-platform-ohos/src/interop/mod.rs) | Native components, SDK batches, semantic/menu/texture wrappers and pointer forwarding |
 | [`media`](../../crates/nsh-platform-ohos/src/media/mod.rs), [`services`](../../crates/nsh-platform-ohos/src/services/mod.rs) | Images, WebView, Video, assets, networking and dialogs |
 | [`xtask/src/ohos.rs`](../../crates/xtask/src/ohos.rs) | Native SDK, generated declarations, staged ArkTS dependencies and build metadata |
-| [`examples/embed-ohos`](../../examples/embed-ohos/README.md) | NativeAbility embedding host sample |
+| [`examples/embed-ohos`](../../examples/embed-ohos/README.md) | Standard `UIAbility` embedding host sample |
 
-## Ability integration
+## Host integration
 
-The host extends `NativeAbility`, sets `moduleName = "nsh_platform_ohos"` and
-`defaultPage = false`, and loads its own page. Its `bridgePlugins` include
-resource, accessibility, clipboard, window, WebView and URL factories, plus
-`...nativeShellPlugins()` imported from `@nsh/ohos`. The complete registration
-is in [EntryAbility.ets](../../examples/embed-ohos/entry/src/main/ets/entryability/EntryAbility.ets).
-Rust registers the matching facades and implements Ability's lifecycle/bridge
-contract with NSH's native-node renderer. Hosts supply no Rust entry adapter.
+Host apps use a standard `UIAbility` (`extends UIAbility`) with no custom base class or Rust entry adapter.
+When `@nsh/ohos` is imported and `NshSurface` is created, `@nsh/ohos` automatically attaches to the active `UIContext`, `UIAbilityContext` and `Window`.
 
 | Owner | Native state |
 |---|---|
-| Ability core | Session/lifecycle, shared UIContext, `ContentRoot` and native attachment ownership |
-| Ability WebView | ArkWeb controller/builders, navigation, protocols and JS proxy callbacks |
-| NSH `@nsh/ohos` HAR | System TextInput/TextArea, selectable-text menus, semantic SDK attributes and texture-producing BuilderNodes |
-| NSH Rust | Controlled system editing, semantics, composition/input policy, media policy and AVPlayer controls |
+| NSH `@nsh/ohos` HAR | Automatic `UIContext`/`UIAbilityContext`/`Window` attachment, system TextInput/TextArea, ArkWeb `Web` BuilderNodes, selectable-text menus, semantic SDK attributes and texture-producing BuilderNodes |
+| NSH Rust | Session/lifecycle state, `ContentRoot` and native attachment ownership, rawfile resource/clipboard services, controlled system editing, semantics, composition/input policy, media policy and AVPlayer controls |
 | Binding crates | Generated SDK declarations, checked C operations, native owners/borrows and API feature gates |
 
-Each embedded view creates a surface and puts its retained NodeContent in a
-standard ContentSlot. The page also hosts Ability's DefaultXComponent, which
-supplies the shared UIContext root. Its module renderer creates no implicit
-NSH app. A minimal page after the registration above is:
+Each embedded view creates an `NshSurface` and puts its retained `NodeContent` in a
+standard `ContentSlot`:
 
 ```ts
-import { DefaultXComponent } from "@ohos-rs/ability";
-import { NshSurface } from "libnsh_platform_ohos.so";
+import { NshSurface } from "@nsh/ohos";
 
 @Entry
 @Component
@@ -68,11 +58,7 @@ struct Index {
   }
 
   build() {
-    Stack() {
-      DefaultXComponent({ moduleName: "nsh_platform_ohos" })
-        .width("100%").height("100%");
-      ContentSlot(this.surface.content).width("100%").height("100%");
-    }
+    ContentSlot(this.surface.content).width("100%").height("100%");
   }
 }
 ```
@@ -114,7 +100,7 @@ the activated live surface; hosts may call `activate()` when switching views.
 
 ## Threads and ownership
 
-One `Services` session spans NativeAbility Create/Destroy. N-API entry points
+One `Services` session spans the host `UIAbility` lifecycle. N-API entry points
 resolve a thread-local weak session reference; surfaces and engines remain
 independently owned. Each engine generation has a distinct dispatcher, so late
 batches, service replies and component handles cannot reach its successor.
@@ -237,15 +223,14 @@ ancestor owns the animation of descendants removed in the same batch.
 
 ## Locked native dependencies
 
-The root Cargo manifest declares one exact Ability revision and one binding
-revision for all interacting native packages. Ability's ArkUI types and NSH's
-direct binding types share that source. NSH uses binding crates for OHOS APIs;
-missing wrappers belong in the binding repository. SDK declarations are generated
-there. EGL/GLES policy, worker scheduling and application budgets belong in NSH.
+The root Cargo manifest declares one exact binding revision for all interacting
+native packages. NSH uses binding crates for OHOS APIs; missing wrappers belong
+in the binding repository. SDK declarations are generated there. EGL/GLES
+policy, worker scheduling and application budgets belong in NSH.
 
-`cargo xtask ohos` resolves the locked graph, stages the companion ArkTS
-packages in `target/ohos/arkts-deps/`, and records source revisions, features,
-minimum API and library/declaration hashes in `build-metadata.json`.
+`cargo xtask ohos` resolves the locked graph, stages the companion `@nsh/ohos`
+ArkTS package in `target/ohos/arkts-deps/nsh`, and records source revisions,
+features, minimum API and library/declaration hashes in `build-metadata.json`.
 
 ### Binding development dependency
 

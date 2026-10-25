@@ -48,7 +48,7 @@ pub(crate) struct UiContext {
     pub(crate) accessibility_dirty: std::cell::RefCell<Vec<std::rc::Weak<Node>>>,
     pub(crate) accessibility_focus: std::cell::RefCell<Vec<std::rc::Weak<Node>>>,
     pub(crate) arkui: std::cell::RefCell<crate::interop::sdk::Batch>,
-    pub(crate) arkui_views: std::cell::RefCell<Vec<openharmony_ability::NativeAttachment>>,
+    pub(crate) arkui_views: std::cell::RefCell<Vec<crate::interop::attachment::NativeAttachment>>,
     pub(crate) host: Arc<crate::app::session::Services>,
     pub(crate) dispatcher: std::sync::Weak<crate::app::runtime::Dispatcher>,
     pub(crate) env: napi_ohos::Env,
@@ -164,6 +164,8 @@ impl Mounter {
             pending.editors.clear();
             pending.commands.clear();
             pending.views.clear();
+            pending.webs.clear();
+            pending.web_commands.clear();
             // Retirements keep their targets until SDK cleanup or the next ready batch.
         }
         for node in self.slots.iter().flatten() {
@@ -295,8 +297,8 @@ impl Mounter {
     }
     pub(crate) fn window_environment(
         &self,
-        visual: [openharmony_ability::AvoidArea; 3],
-        keyboard: openharmony_ability::AvoidArea,
+        visual: [crate::app::session::AvoidArea; 3],
+        keyboard: crate::app::session::AvoidArea,
     ) -> Result<crate::app::environment::NshEnvironment> {
         let root = self.node(1)?;
         let origin = root.native.borrow().layout_position_in_window()?;
@@ -308,7 +310,7 @@ impl Mounter {
             width: frame.width as f64 * scale,
             height: frame.height as f64 * scale,
         };
-        let rect = |rect: openharmony_ability::Rect| super::geometry::WindowRect {
+        let rect = |rect: crate::app::session::AvoidRect| super::geometry::WindowRect {
             x: rect.left as f64,
             y: rect.top as f64,
             width: rect.width as f64,
@@ -569,7 +571,7 @@ impl Mounter {
                     MountItem::NativeProps { id, props } => match props {
                         nsh_core::NativeProps::WebView(props) => {
                             if let Some(web) = self.node(id)?.web.borrow().as_ref() {
-                                web.configure(props)?;
+                                web.configure(*props)?;
                             }
                         }
                         nsh_core::NativeProps::Video(props) => {
@@ -620,7 +622,8 @@ impl Mounter {
                                 .child_container()
                                 .borrow_mut()
                                 .insert_child(node.mounted(), parent.child_index(index))?;
-                            *node.mount_parent.borrow_mut() = Rc::downgrade(&parent.child_container());
+                            *node.mount_parent.borrow_mut() =
+                                Rc::downgrade(&parent.child_container());
                         }
                         parent
                             .children
@@ -641,13 +644,14 @@ impl Mounter {
                         }
                     }
                     MountItem::Delete { id } => {
-                        if !self.leaving(id) { self.node(id)?.removing(layout.as_ref())?; }
+                        if !self.leaving(id) {
+                            self.node(id)?.removing(layout.as_ref())?;
+                        }
                         self.delete(id)?;
                     }
-                    MountItem::Frame { id, frame } => {
-                        self.node(id)?
-                            .animated_frame(frame.into(), layout.as_ref())?
-                    }
+                    MountItem::Frame { id, frame } => self
+                        .node(id)?
+                        .animated_frame(frame.into(), layout.as_ref())?,
                     MountItem::LayoutAnimation(_) => {}
                     MountItem::ViewStyle { id, style } => self.node(id)?.style(&style)?,
                     MountItem::Text {
@@ -664,7 +668,8 @@ impl Mounter {
                             .0
                             .downcast_ref::<RasterText>()
                             .ok_or(Error::Unsupported("foreign text layout"))?;
-                        self.node(id)?.text(raster, content.into(), layout.clone())?;
+                        self.node(id)?
+                            .text(raster, content.into(), layout.clone())?;
                         self.node(id)?
                             .set_events(self.node(id)?.interaction.mask())?;
                         self.node(id)?
@@ -786,10 +791,8 @@ impl Mounter {
                         Command::Desktop(_) => {}
                         Command::Announce(text) => self.host.accessibility_event(
                             self.dispatcher.clone(),
-                            openharmony_ability_plugin_accessibility::AccessibilitySendEventRequest {
-                                announcement: Some(text),
-                                element_id: None,
-                            },
+                            Some(text),
+                            None,
                         )?,
                         Command::AccessibilityFocus => {
                             self.accessibility_focus
@@ -812,7 +815,9 @@ impl Mounter {
                         }
                         Command::Back => self.back_fallback()?,
                         Command::Toast { text, .. } => log::info!("OHOS toast: {text}"),
-                        Command::ExitApp => log::warn!("OHOS ExitApp: the embedding host owns Ability lifetime"),
+                        Command::ExitApp => {
+                            log::warn!("OHOS ExitApp: the embedding host owns Ability lifetime")
+                        }
                         Command::ImageInfo { id, uri } => {
                             self.images
                                 .load(crate::media::image::Target::Info(id), uri, None);
@@ -863,10 +868,11 @@ impl Mounter {
                                 component.command(&name, &args)?;
                             }
                         }
-                        Command::SetClipboard(text) => {
-                            self.host
-                                .enqueue_clipboard(self.dispatcher.clone(), Some(text), None)?
-                        }
+                        Command::SetClipboard(text) => self.host.enqueue_clipboard(
+                            self.dispatcher.clone(),
+                            Some(text),
+                            None,
+                        )?,
                         Command::ReadClipboard { id, has_only } => self.host.enqueue_clipboard(
                             self.dispatcher.clone(),
                             None,
@@ -913,11 +919,7 @@ impl Mounter {
                             animated,
                         } => {
                             if let Some(scroll) = self.node(id)?.scroll.borrow().as_ref() {
-                                scroll.zoom_to(
-                                    scale,
-                                    center.map(|p| (p.x.0, p.y.0)),
-                                    animated,
-                                )?;
+                                scroll.zoom_to(scale, center.map(|p| (p.x.0, p.y.0)), animated)?;
                             }
                         }
                         Command::ScrollTo { x, y, animated } => {
@@ -948,13 +950,24 @@ impl Mounter {
                         self.system_appearance()?;
                     }
                     MountItem::LayoutDirection { rtl } => {
-                        use ohos_arkui_binding::types::{direction::Direction, attribute::ArkUINodeAttributeType as A};
-                        self.node(nsh_core::ROOT_ID)?.native.borrow().set_i32_attribute(A::Direction, if rtl { Direction::Rtl } else { Direction::Ltr }.into())?;
+                        use ohos_arkui_binding::types::{
+                            attribute::ArkUINodeAttributeType as A, direction::Direction,
+                        };
+                        self.node(nsh_core::ROOT_ID)?
+                            .native
+                            .borrow()
+                            .set_i32_attribute(
+                                A::Direction,
+                                if rtl { Direction::Rtl } else { Direction::Ltr }.into(),
+                            )?;
                     }
                     MountItem::Overflow { id, extent } => {
                         let node = self.node(id)?;
                         node.overflow.set(extent.map(Rect::from));
-                        node.native.borrow().set_bool_attribute(ohos_arkui_binding::types::attribute::ArkUINodeAttributeType::Clip, node.clips_children())?;
+                        node.native.borrow().set_bool_attribute(
+                            ohos_arkui_binding::types::attribute::ArkUINodeAttributeType::Clip,
+                            node.clips_children(),
+                        )?;
                         node.interaction.hit_region(node)?;
                         node.invalidate_scene();
                     }

@@ -12,7 +12,6 @@ nodes, Taffy layout and native typography. The arm64 backend targets API 20.
 Each `NshSurface` owns a platform `NodeContent`, engine, JS VM and VSync
 connection. The app places it in a standard `ContentSlot` and controls its
 layout and lifetime, just as it owns an embedded view on iOS or Android.
-`NativeAbility` supplies the shared plugin session.
 
 ## Requirements
 
@@ -84,7 +83,7 @@ const capabilities = getCapabilities();
 
 The paired `@nsh/ohos` HAR owns SDK controls and texture producers. Native Shell
 owns semantic policy, composition and native video playback. Hosts use the same
-NativeAbility, NshSurface and ContentSlot integration for each feature set.
+NshSurface and ContentSlot integration for each feature set.
 
 Use `ohos={{ accessibilityLiveRegion: "polite" }}` or `"assertive"` on a live region.
 The embedding example provides a dedicated OpenHarmony QEMU acceptance suite
@@ -183,59 +182,15 @@ Hot updates follow the [shared state-preservation rules](../../docs/dev/tooling.
 `disconnectDevServer()` retains the loaded module. Explicit loads and `stop()`
 end that view's development connection.
 
-## Connect NativeAbility
-
-Use the existing Ability runtime and its resource, clipboard, accessibility, window and URL
-plugin packages in your DevEco app. The complete dependency setup is in
-[the embedding example](../../examples/embed-ohos/README.md).
-
-```ts
-import { NativeAbility, LazyPlugin } from '@ohos-rs/ability';
-import { ResourcePlugin } from '@ohos-rs/ability-plugin-resource';
-import { AccessibilityPlugin } from '@ohos-rs/ability-plugin-accessibility';
-import { nativeShellPlugins } from '@nsh/ohos';
-import { ClipboardPlugin } from '@ohos-rs/ability-plugin-clipboard';
-import { WindowPlugin } from '@ohos-rs/ability-plugin-window';
-import { WebviewPlugin } from "@ohos-rs/ability-plugin-webview";
-import { UrlPlugin } from '@ohos-rs/ability-plugin-url';
-import { window } from '@kit.ArkUI';
-
-export default class EntryAbility extends NativeAbility {
-  moduleName: string = 'nsh_platform_ohos';
-  defaultPage: boolean = false;
-  bridgePlugins = [
-    new LazyPlugin(() => new ResourcePlugin()),
-    new LazyPlugin(() => new AccessibilityPlugin()),
-    ...nativeShellPlugins(),
-    new LazyPlugin(() => new ClipboardPlugin()),
-    new LazyPlugin(() => new WindowPlugin()),
-    new LazyPlugin(() => new WebviewPlugin()),
-    new LazyPlugin(() => new UrlPlugin()),
-  ];
-
-  protected async loadWindowStageContent(stage: window.WindowStage): Promise<void> {
-    await stage.loadContent('pages/Index');
-  }
-}
-```
-
-NSH manages its native session from NativeAbility's lifecycle. The app uses
-these standard plugins directly. Each surface automatically resolves the
-current session when constructed. Ability destruction closes its surfaces
-and invalidates outstanding resource loads.
-
-Clipboard reads follow the host app's `ohos.permission.READ_PASTEBOARD`
-declaration, runtime grant and signing profile. Presence queries inspect the
-plain-text MIME type without reading its contents.
-
 ## Show the app
 
-Keep the instance in an ordinary host field. Create it after NativeAbility
-initializes the module, load a resource, and give its content a sized container:
+Use `@nsh/ohos` in your DevEco app. Your `EntryAbility` stays a standard
+HarmonyOS `UIAbility` (`extends UIAbility`). Keep each `NshSurface` in an
+ordinary host field, load a resource, and place `surface.content` in a sized
+`ContentSlot`:
 
 ```ts
-import { DefaultXComponent } from '@ohos-rs/ability';
-import { NshSurface } from 'libnsh_platform_ohos.so';
+import { NshSurface } from '@nsh/ohos';
 
 @Entry
 @Component
@@ -255,24 +210,24 @@ struct Index {
   }
 
   build() {
-    Stack() {
-      DefaultXComponent({ moduleName: 'nsh_platform_ohos' })
-        .width('100%').height('100%')
-      Column() {
-        Text(this.error)
-        Stack() { ContentSlot(this.surface.content) }
-          .width('100%').layoutWeight(1)
-      }.width('100%').height('100%')
+    Column() {
+      Text(this.error)
+      Stack() { ContentSlot(this.surface.content) }
+        .width('100%').layoutWeight(1)
     }.width('100%').height('100%')
   }
 }
 ```
 
-One `DefaultXComponent` supplies Ability's UIContext and UI-plugin root for
-the module. The host's own page places each NSH view in its own `ContentSlot`.
-Rust owns the NodeContent, measures its native allocation and forwards viewport
-changes to that instance's engine. A source loaded before attachment waits
-until the slot is attached and has positive dimensions.
+`@nsh/ohos` automatically attaches to the active `UIContext`, `UIAbilityContext`
+and window lifecycle when the surface is created. Rust owns the `NodeContent`,
+measures its native allocation and forwards viewport changes to that instance's
+engine. A source loaded before attachment waits until the slot is attached and
+has positive dimensions.
+
+Clipboard reads follow the host app's `ohos.permission.READ_PASTEBOARD`
+declaration, runtime grant and signing profile. Presence queries inspect the
+plain-text MIME type without reading its contents.
 
 ## Multiple independent views
 

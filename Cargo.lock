@@ -3344,7 +3344,6 @@ name = "nsh-platform-ohos"
 version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
- "futures-executor",
  "getrandom 0.3.4",
  "glow",
  "khronos-egl",
@@ -3361,6 +3360,7 @@ dependencies = [
  "ohos-accessibility-binding",
  "ohos-arkui-binding",
  "ohos-avplayer-binding",
+ "ohos-display-binding",
  "ohos-drawing-binding",
  "ohos-hilog-binding",
  "ohos-image-native-binding",
@@ -3368,17 +3368,12 @@ dependencies = [
  "ohos-native-window-binding",
  "ohos-net-connection-binding",
  "ohos-pasteboard-binding",
+ "ohos-resource-manager-binding",
  "ohos-udmf-binding",
  "ohos-vsync-binding",
+ "ohos-web-binding",
  "ohos-window-manager-binding",
  "ohos-xcomponent-binding",
- "openharmony-ability",
- "openharmony-ability-plugin-accessibility",
- "openharmony-ability-plugin-clipboard",
- "openharmony-ability-plugin-resource",
- "openharmony-ability-plugin-url",
- "openharmony-ability-plugin-webview",
- "openharmony-ability-plugin-window",
  "percent-encoding",
  "rustc-hash",
  "serde_json",
@@ -3830,22 +3825,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ohos-ime-binding"
-version = "0.3.1"
-source = "git+https://github.com/ohos-rs/ohos-native-bindings?rev=43aec6c125503a47f7e875c793aaf2462e91ad19#43aec6c125503a47f7e875c793aaf2462e91ad19"
-dependencies = [
- "log",
- "ohos-enum-derive",
- "ohos-input-method-sys",
- "rustc-hash",
-]
-
-[[package]]
-name = "ohos-input-method-sys"
-version = "0.2.4"
-source = "git+https://github.com/ohos-rs/ohos-native-bindings?rev=43aec6c125503a47f7e875c793aaf2462e91ad19#43aec6c125503a47f7e875c793aaf2462e91ad19"
-
-[[package]]
 name = "ohos-multi-modal-input-sys"
 version = "0.1.2"
 source = "git+https://github.com/ohos-rs/ohos-native-bindings?rev=43aec6c125503a47f7e875c793aaf2462e91ad19#43aec6c125503a47f7e875c793aaf2462e91ad19"
@@ -4065,97 +4044,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "openharmony-ability"
-version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
-dependencies = [
- "futures-channel",
- "log",
- "napi-derive-ohos",
- "napi-ohos",
- "ohos-arkui-binding",
- "ohos-display-binding",
- "ohos-ime-binding",
- "ohos-resource-manager-binding",
- "ohos-window-manager-binding",
- "ohos-xcomponent-binding",
- "png 0.17.16",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "openharmony-ability-plugin-accessibility"
-version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
-dependencies = [
- "log",
- "napi-derive-ohos",
- "napi-ohos",
- "openharmony-ability",
-]
-
-[[package]]
-name = "openharmony-ability-plugin-clipboard"
-version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
-dependencies = [
- "napi-derive-ohos",
- "napi-ohos",
- "ohos-pasteboard-binding",
- "ohos-udmf-binding",
- "openharmony-ability",
- "png 0.17.16",
-]
-
-[[package]]
-name = "openharmony-ability-plugin-resource"
-version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
-dependencies = [
- "napi-derive-ohos",
- "napi-ohos",
- "ohos-resource-manager-binding",
- "openharmony-ability",
-]
-
-[[package]]
-name = "openharmony-ability-plugin-url"
-version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
-dependencies = [
- "napi-derive-ohos",
- "napi-ohos",
- "openharmony-ability",
-]
-
-[[package]]
-name = "openharmony-ability-plugin-webview"
-version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
-dependencies = [
- "crossbeam-channel",
- "http",
- "log",
- "napi-derive-ohos",
- "napi-ohos",
- "ohos-web-binding",
- "openharmony-ability",
-]
-
-[[package]]
-name = "openharmony-ability-plugin-window"
-version = "1.0.0-beta.3"
-source = "git+https://github.com/harmony-contrib/openharmony-ability?rev=9085050a6c8dcb02fa297a6f44c4795160c93f86#9085050a6c8dcb02fa297a6f44c4795160c93f86"
-dependencies = [
- "napi-derive-ohos",
- "napi-ohos",
- "openharmony-ability",
-]
 
 [[package]]
 name = "outref"

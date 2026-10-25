@@ -1,5 +1,16 @@
 //! Compiled enhancements intersected with the real system's capabilities.
 
+#[cfg(target_env = "ohos")]
+use std::sync::atomic::{AtomicI32, Ordering};
+
+#[cfg(target_env = "ohos")]
+static RUNTIME_API_VERSION: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(target_env = "ohos")]
+pub(crate) fn set_runtime_api_version(version: i32) {
+    RUNTIME_API_VERSION.store(version.max(0), Ordering::Relaxed);
+}
+
 /// Native Shell's minimum supported OHOS API level.
 pub(crate) const MIN_API: u32 = if cfg!(feature = "api-26") {
     26
@@ -52,7 +63,23 @@ impl NshCapabilities {
 #[cfg(target_env = "ohos")]
 #[napi_derive_ohos::napi]
 pub fn get_capabilities() -> NshCapabilities {
-    NshCapabilities::for_api(openharmony_ability::version::sdk_api_version().max(0) as u32)
+    let mut version = RUNTIME_API_VERSION.load(Ordering::Relaxed);
+    if version <= 0 {
+        type GetSdkApiVersion = unsafe extern "C" fn() -> std::ffi::c_int;
+        version = unsafe {
+            let sym = libc::dlsym(libc::RTLD_DEFAULT, c"OH_GetSdkApiVersion".as_ptr());
+            if sym.is_null() {
+                0
+            } else {
+                let f: GetSdkApiVersion = std::mem::transmute(sym);
+                f().max(0)
+            }
+        };
+        if version > 0 {
+            RUNTIME_API_VERSION.store(version, Ordering::Relaxed);
+        }
+    }
+    NshCapabilities::for_api(version.max(0) as u32)
 }
 
 #[cfg(test)]

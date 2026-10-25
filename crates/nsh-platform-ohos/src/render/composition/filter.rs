@@ -79,9 +79,9 @@ impl Image {
         let width = (right - left).ceil().max(1.0) as u32;
         let height = (bottom - top).ceil().max(1.0) as u32;
         if ![left, top, right, bottom].iter().all(|v| v.is_finite())
-            || u64::from(width) * u64::from(height) > 4_194_304
+            || u64::from(width) * u64::from(height) > 16_777_216
         {
-            return Err("composite filter exceeds 4 megapixels");
+            return Err("composite filter exceeds 16 megapixels");
         }
         let canvas = Canvas::with_bitmap(Bitmap::new(width, height, BitmapFormat::default()));
         canvas.clear(0);

@@ -12,12 +12,14 @@ use ohos_arkui_binding::{
     api::node_custom_event::NodeCustomEvent, component::attribute::ArkUICommonAttribute,
     types::view::HitTestMode,
 };
-use openharmony_ability::NativeAttachment;
 
 pub(crate) use crate::interop::sdk::EditorEvent;
 use crate::{
     input::editor_state::{self, State},
-    interop::sdk::{EditorAccessibility, EditorCommand, EditorRoute, EditorSettings},
+    interop::{
+        attachment::NativeAttachment,
+        sdk::{EditorAccessibility, EditorCommand, EditorRoute, EditorSettings},
+    },
     render::{
         geometry::Rect,
         node::{Error, Node, Result, callback},

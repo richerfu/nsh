@@ -8,10 +8,9 @@ use ohos_arkui_binding::{
     component::{attribute::ArkUIEvent, built_in_component::Custom},
     types::advanced::{LengthMetricUnit, NodeDirtyFlag},
 };
-use openharmony_ability::NativeAttachment;
 
 use crate::{
-    interop::sdk::ViewOptions,
+    interop::{attachment::NativeAttachment, sdk::ViewOptions},
     render::{
         composition::worker::{Composite, Key},
         node::{NativeNode, Node, Result, callback},

@@ -1,6 +1,6 @@
 # Embedding Native Shell in an OpenHarmony / HarmonyOS Next app
 
-An ArkTS (`NativeAbility`) app that embeds Native Shell (`NshSurface`) below its own native UI (`entry/src/main/ets/pages/Index.ets`), registers a custom ArkUI component (`embed.badge` in `entry/src/main/ets/components/HostBadge.ets`), and runs `examples/embedded` (or any NSH app).
+An ArkTS (`UIAbility`) app that embeds Native Shell (`NshSurface`) below its own native UI (`entry/src/main/ets/pages/Index.ets`), registers a custom ArkUI component (`embed.badge` in `entry/src/main/ets/components/HostBadge.ets`), and runs `examples/embedded` (or any NSH app).
 
 ## Prerequisites
 
@@ -38,12 +38,12 @@ Configure signing in DevEco Studio (`File -> Project Structure -> Signing Config
 
 ```sh
 hdc install entry/build/default/outputs/default/entry-default-signed.hap
-hdc shell aa start -a EntryAbility -b com.longbridge.nsh.embeddemo
+hdc shell aa start -a EntryAbility -b com.example.nsh
 ```
 
 ## What `Index.ets` shows
 
-- **`EntryAbility` (`entry/src/main/ets/entryability/EntryAbility.ets`)**: Extends `NativeAbility` with `moduleName = "nsh_platform_ohos"`, `defaultPage = false`, and registers `nativeShellPlugins()` alongside the `@ohos-rs/ability-plugin-*` bridge plugins.
+- **`EntryAbility` (`entry/src/main/ets/entryability/EntryAbility.ets`)**: Standard HarmonyOS `UIAbility` (`extends UIAbility`) with no custom base class required.
 - **`NshSurface`**: Each `NshSurface` owns an independent NSH engine and exposes `surface.content` (`NodeContent`) for `ContentSlot(surface.content)`. Multiple surfaces can be mounted side by side (`Split` / `Single`).
 - **Native component (`embed.badge`)**: Registered per surface with `surface.registerComponent("embed.badge", ...)`, backed by an ArkUI `ComponentContent` builder (`HostBadge.ets`) that receives prop diffs, reports its intrinsic size via `surface.setComponentSize`, and emits events via `surface.emitComponentEvent`.
 - **Lifecycle**: `surface.loadResource("bundle.js")` loads a bundled app from `rawfile/`, `surface.stop()` stops the engine while preserving the slot, and `surface.dispose()` permanently releases native resources when the page disappears.

@@ -78,10 +78,6 @@ pub(crate) fn build(release: bool, dev: bool, mut features: Vec<String>) -> anyh
     let packages = metadata["packages"]
         .as_array()
         .context("Cargo package inventory")?;
-    let ability = packages
-        .iter()
-        .find(|p| p["name"] == "openharmony-ability")
-        .context("Ability dependency")?;
     let bindings: BTreeSet<_> = packages
         .iter()
         .filter(|p| {
@@ -95,25 +91,12 @@ pub(crate) fn build(release: bool, dev: bool, mut features: Vec<String>) -> anyh
         bindings.len() == 1,
         "OHOS native packages must share one binding source: {bindings:?}"
     );
-    let ability_source = ability["source"].as_str().unwrap_or("path");
     let binding_source = *bindings.first().context("OHOS bindings")?;
     let path_development = std::env::var_os("NSH_ALLOW_PATH_DEPENDENCIES").is_some();
     ensure!(
-        path_development
-            || (ability_source.starts_with("git+") && binding_source.starts_with("git+")),
-        "SDK dependencies must use pinned Ability and binding Git revisions"
+        path_development || binding_source.starts_with("git+"),
+        "SDK dependencies must use pinned binding Git revisions"
     );
-    let ability_manifest = Path::new(
-        ability["manifest_path"]
-            .as_str()
-            .context("openharmony-ability manifest_path")?,
-    );
-    let ability_root = ability_manifest
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .context("openharmony-ability repository root")?;
-    stage_arkts_deps(&root, ability_root)?;
     let step = term::Step::start("building OHOS embedding SDK");
     let mut command = Command::new("ohrs");
     command
@@ -132,12 +115,12 @@ pub(crate) fn build(release: bool, dev: bool, mut features: Vec<String>) -> anyh
     term::run(&mut command)?;
     let library = out.join("arm64-v8a/libnsh_platform_ohos.so");
     let declarations = out.join("index.d.ts");
+    stage_arkts_deps(&root, &declarations)?;
     fs::write(
         out.join("build-metadata.json"),
         serde_json::to_vec_pretty(&json!({
             "minimumApi": minimum_api, "features": features, "profile": profile,
-            "abilitySource": ability_source, "bindingSource": binding_source,
-            "abilityGitRevision": ability_source.rsplit('#').next().filter(|_| ability_source.starts_with("git+")),
+            "bindingSource": binding_source,
             "bindingGitRevision": binding_source.rsplit('#').next().filter(|_| binding_source.starts_with("git+")),
             "librarySha256": sha256(&library)?, "declarationsSha256": sha256(&declarations)?,
             "pathDevelopment": path_development,
@@ -150,46 +133,26 @@ pub(crate) fn build(release: bool, dev: bool, mut features: Vec<String>) -> anyh
     Ok(())
 }
 
-fn stage_arkts_deps(root: &Path, ability_root: &Path) -> anyhow::Result<()> {
+fn stage_arkts_deps(root: &Path, declarations: &Path) -> anyhow::Result<()> {
     let dest_root = root.join("target/ohos/arkts-deps");
     if dest_root.exists() {
         fs::remove_dir_all(&dest_root)?;
     }
-    fs::create_dir_all(&dest_root)?;
-    copy_arkts_package(
-        &ability_root.join("native_ability"),
-        &dest_root.join("ability"),
+    let nsh_dir = dest_root.join("nsh");
+    fs::create_dir_all(&nsh_dir)?;
+    copy_dir_filtered(&root.join("crates/nsh-platform-ohos/arkts"), &nsh_dir)?;
+    let types_dir = nsh_dir.join("src/main/cpp/types/libnsh_platform_ohos");
+    fs::create_dir_all(&types_dir)?;
+    fs::copy(declarations, types_dir.join("Index.d.ts"))?;
+    fs::write(
+        types_dir.join("oh-package.json5"),
+        serde_json::to_vec_pretty(&json!({
+            "name": "libnsh_platform_ohos.so",
+            "types": "./Index.d.ts",
+            "version": "0.1.0",
+            "description": "Native Shell OHOS embedding SDK"
+        }))?,
     )?;
-    copy_arkts_package(
-        &root.join("crates/nsh-platform-ohos/arkts"),
-        &dest_root.join("nsh"),
-    )?;
-    for plugin in [
-        "resource",
-        "clipboard",
-        "window",
-        "url",
-        "accessibility",
-        "webview",
-    ] {
-        copy_arkts_package(
-            &ability_root.join("plugins").join(plugin),
-            &dest_root.join(plugin),
-        )?;
-    }
-    Ok(())
-}
-
-fn copy_arkts_package(src: &Path, dst: &Path) -> anyhow::Result<()> {
-    copy_dir_filtered(src, dst)?;
-    let manifest = dst.join("oh-package.json5");
-    if manifest.is_file() {
-        let text = fs::read_to_string(&manifest)?;
-        fs::write(
-            &manifest,
-            text.replace("file:../../native_ability", "file:../ability"),
-        )?;
-    }
     Ok(())
 }
 

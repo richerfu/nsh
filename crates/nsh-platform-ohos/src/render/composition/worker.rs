@@ -22,7 +22,7 @@ use crate::{
 };
 
 const MAX_LAYERS: usize = 128;
-const MAX_SURFACE_PIXELS: u64 = 8_388_608;
+const MAX_SURFACE_PIXELS: u64 = 67_108_864;
 
 #[derive(Clone, PartialEq)]
 struct Settings {
@@ -269,7 +269,7 @@ fn check_pixels(
     key: Key,
     pixels: u64,
 ) -> std::result::Result<(), String> {
-    if pixels > 4_194_304
+    if pixels > 16_777_216
         || entries
             .iter()
             .flatten()
@@ -495,9 +495,9 @@ fn settings(owner: &Node, overlay: bool) -> Result<Settings> {
             "compositor capture size overflow",
         ));
     };
-    if u64::from(width) * u64::from(height) > 4_194_304 {
+    if u64::from(width) * u64::from(height) > 16_777_216 {
         return Err(crate::render::node::Error::Unsupported(
-            "compositor capture exceeds 4 megapixels",
+            "compositor capture exceeds 16 megapixels",
         ));
     }
     Ok(Settings {

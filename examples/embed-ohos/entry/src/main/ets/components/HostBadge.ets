@@ -1,5 +1,5 @@
 import { ComponentContent, UIContext } from "@kit.ArkUI";
-import { NshNativeProperty, NshSurface } from "libnsh_platform_ohos.so";
+import { NshNativeProperty, NshSurface } from "@nsh/ohos";
 
 class BadgeParams {
   text: string;

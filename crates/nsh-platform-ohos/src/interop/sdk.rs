@@ -1,186 +1,16 @@
 //! NSH-owned SDK fragments that have no equivalent C attribute or constructor.
-//! Rust owns policy and D2 targets retain SDK owners on the UI thread; workers receive data only.
+//! Rust owns policy and native attachment targets retain SDK owners on the UI thread.
 
-use std::{cell::RefCell, path::PathBuf, rc::Weak, sync::Mutex};
+use std::{cell::RefCell, rc::Weak};
 
 use napi_derive_ohos::napi;
-use napi_ohos::{Result, Unknown};
-use openharmony_ability::{
-    BridgeContextRequirement, BridgeMainThreadEvent, BridgePlugin, MainThreadSyncBridge,
-    NativeAttachment, NativeNodeReady, NativeNodeRetiring, NativeSubtreeReady, OpenHarmonyApp,
-    impl_bridge_napi_type,
-};
+use napi_ohos::{Env, Error, Result, bindgen_prelude::Object};
 use rustc_hash::FxHashMap;
 
-use crate::render::node::{NativeNode, Node};
-
-#[derive(Default)]
-pub(crate) struct Plugin {
-    information: Mutex<Option<HostInformation>>,
-}
-struct HostInformation {
-    device_type: String,
-    cache_directory: PathBuf,
-}
-
-impl BridgePlugin for Plugin {
-    type Mode = MainThreadSyncBridge;
-    const ID: &'static str = "nsh.arkui";
-    const REQUIRED_CONTEXTS: &'static [BridgeContextRequirement] =
-        &[BridgeContextRequirement::Ability];
-
-    fn required_contexts_for_main_thread_event(
-        &self,
-        event: &str,
-    ) -> &'static [BridgeContextRequirement] {
-        if event == "device-info" {
-            &[BridgeContextRequirement::Ability]
-        } else if event == "native-node-retiring" {
-            &[]
-        } else {
-            &[BridgeContextRequirement::UiContext]
-        }
-    }
-
-    fn on_main_thread_event<'env>(
-        &self,
-        event: BridgeMainThreadEvent<'env>,
-    ) -> Result<Unknown<'env>> {
-        let accepted = match event.name() {
-            "device-info" => {
-                let info = event.decode::<DeviceInfo>()?;
-                let cache_directory = PathBuf::from(&info.cache_dir);
-                if !cache_directory.is_absolute() || info.cache_dir.contains('\0') {
-                    return Err(napi_ohos::Error::from_reason(
-                        "Ability cache directory must be an absolute path",
-                    ));
-                }
-                *self.information.lock().unwrap() = Some(HostInformation {
-                    device_type: info.device_type.clone(),
-                    cache_directory,
-                });
-                crate::app::session::device_type_changed(&info.device_type)?;
-                true
-            }
-            "native-node-ready" => {
-                event.decode::<NativeNodeReady>()?.attach(&event)?;
-                true
-            }
-            "editor-event" => {
-                let payload = event.decode::<EditorNotification>()?;
-                let count = NativeAttachment::dispatch(payload.target_id, || {
-                    let input = EDITORS.with(|routes| {
-                        routes
-                            .borrow()
-                            .get(&payload.target_id)
-                            .and_then(Weak::upgrade)
-                    });
-                    input
-                        .map(|input| {
-                            input
-                                .native_event(payload.event)
-                                .map_err(|error| napi_ohos::Error::from_reason(error.to_string()))
-                        })
-                        .transpose()
-                })??;
-                return event.respond(EditorReceipt {
-                    accepted: count.is_some(),
-                    count: count.unwrap_or(0),
-                });
-            }
-            "native-subtree-ready" => {
-                let ready = event.decode::<NativeSubtreeReady>()?;
-                let (_owner, inner) = VIEWS
-                    .with(|views| {
-                        views
-                            .borrow()
-                            .get(&ready.target_id)
-                            .and_then(|route| route.owner.upgrade().zip(route.inner.upgrade()))
-                    })
-                    .ok_or_else(|| {
-                        napi_ohos::Error::from_reason("Native subtree route is no longer live")
-                    })?;
-                // Prior SDK retirement may remove the receiver. Prepare the owned inner only
-                // here, after those removals and immediately before D2 transfers it once.
-                ohos_arkui_binding::common::node_registry::register(&inner.borrow(), inner.clone())
-                    .and_then(|()| inner.borrow().add_event_receiver())
-                    .map_err(|error| napi_ohos::Error::from_reason(error.to_string()))?;
-                ready.attach(&event)?;
-                true
-            }
-            "native-node-retiring" => {
-                event.decode::<NativeNodeRetiring>()?.detach()?;
-                true
-            }
-            "view-action" => {
-                let action = event.decode::<MenuAction>()?;
-                NativeAttachment::dispatch(action.target_id, || {
-                    let owner = VIEWS.with(|views| {
-                        views
-                            .borrow()
-                            .get(&action.target_id)
-                            .and_then(|route| route.owner.upgrade())
-                    });
-                    owner.is_some_and(|owner| {
-                        let mut accepted = false;
-                        crate::render::node::callback(|| {
-                            if action.kind.is_some() {
-                                accepted = owner.selection_action(&action)?;
-                            } else {
-                                let spec = owner.accessibility_state.spec.borrow();
-                                if !spec.hidden && !spec.state.disabled && owner.visible_in_tree() {
-                                    let registered = spec
-                                        .actions
-                                        .iter()
-                                        .any(|item| item.name.as_ref() == action.action);
-                                    drop(spec);
-                                    if registered {
-                                        owner.emit(
-                                            nsh_core::EventKind::AccessibilityAction,
-                                            nsh_core::EventPayload::Map(vec![(
-                                                "actionName",
-                                                nsh_core::PayloadValue::Str(action.action.clone()),
-                                            )]),
-                                        );
-                                        accepted = true;
-                                    } else if action.action == "activate"
-                                        && owner
-                                            .interaction
-                                            .mask()
-                                            .contains(nsh_core::EventKind::Press)
-                                    {
-                                        owner.emit(
-                                            nsh_core::EventKind::Press,
-                                            nsh_core::EventPayload::None,
-                                        );
-                                        accepted = true;
-                                    }
-                                }
-                            }
-                            Ok(())
-                        });
-                        accepted
-                    })
-                })?
-            }
-            _ => return Err(napi_ohos::Error::from_reason("Unknown NSH SDK event")),
-        };
-        event.respond(Acknowledgement { accepted })
-    }
-}
-
-#[napi(object)]
-pub(crate) struct DeviceInfo {
-    pub device_type: String,
-    pub cache_dir: String,
-}
-impl_bridge_napi_type!(DeviceInfo, "nsh.arkui.DeviceInfo");
-
-#[napi(object)]
-pub(crate) struct Acknowledgement {
-    pub accepted: bool,
-}
-impl_bridge_napi_type!(Acknowledgement, "ohos.node.Acknowledgement");
+use crate::{
+    interop::attachment::NativeAttachment,
+    render::node::{NativeNode, Node},
+};
 
 #[derive(Clone, Debug, PartialEq)]
 #[napi(object)]
@@ -247,18 +77,13 @@ pub(crate) struct EditorEvent {
     pub width: f64,
     pub height: f64,
 }
-#[napi(object)]
-pub(crate) struct EditorNotification {
-    pub target_id: u32,
-    pub event: EditorEvent,
-}
-impl_bridge_napi_type!(EditorNotification, "nsh.arkui.EditorNotification");
+
 #[napi(object)]
 pub(crate) struct EditorReceipt {
     pub accepted: bool,
     pub count: u32,
 }
-impl_bridge_napi_type!(EditorReceipt, "nsh.arkui.EditorReceipt");
+
 #[derive(Clone, Debug, PartialEq)]
 #[napi(object)]
 pub(crate) struct MenuItem {
@@ -284,7 +109,6 @@ pub(crate) struct MenuAction {
     pub kind: Option<String>,
     pub generation: Option<u32>,
 }
-impl_bridge_napi_type!(MenuAction, "nsh.arkui.MenuAction");
 
 #[derive(Clone, Debug, Default, PartialEq)]
 #[napi(object)]
@@ -321,14 +145,53 @@ pub(crate) struct ViewOptions {
     pub actions: Vec<MenuItem>,
     pub menu: Option<Menu>,
 }
-impl_bridge_napi_type!(ViewOptions, "nsh.arkui.ViewOptions");
+
+#[derive(Clone, Debug, PartialEq)]
+#[napi(object)]
+pub(crate) struct WebSettings {
+    pub target_id: u32,
+    pub url: Option<String>,
+    pub html: Option<String>,
+    pub html_base_url: Option<String>,
+    pub load_generation: u32,
+    pub java_script_enabled: bool,
+    pub scroll_enabled: bool,
+    pub user_agent: Option<String>,
+    pub injected_javascript: Option<String>,
+    pub document_start_script: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[napi(object)]
+pub(crate) struct WebCommand {
+    pub target_id: u32,
+    pub kind: String,
+    pub script: Option<String>,
+}
+
+#[napi(object)]
+pub(crate) struct WebEvent {
+    pub target_id: u32,
+    pub phase: String,
+    pub url: String,
+    pub title: String,
+    pub loading: bool,
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+    pub message: Option<String>,
+    pub code: Option<i32>,
+}
 
 // Only weak routes live here. Nodes, native targets and engines retain their own lifetime.
 struct ViewRegistration {
     owner: Weak<Node>,
     inner: std::rc::Weak<std::cell::RefCell<ohos_arkui_binding::common::node::ArkUINode>>,
 }
-thread_local! { static VIEWS: RefCell<FxHashMap<u32, ViewRegistration>> = RefCell::default(); }
+thread_local! {
+    static VIEWS: RefCell<FxHashMap<u32, ViewRegistration>> = RefCell::default();
+    static EDITORS: RefCell<FxHashMap<u32, Weak<crate::input::editor::Input>>> = RefCell::default();
+}
+
 pub(crate) struct ViewRoute {
     id: u32,
     owner: Weak<Node>,
@@ -361,68 +224,6 @@ impl Drop for ViewRoute {
     }
 }
 
-pub(crate) fn device_type(app: &OpenHarmonyApp) -> Option<String> {
-    let plugin = app.registered_plugin::<Plugin>().ok()??;
-    plugin
-        .information
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|info| info.device_type.clone())
-}
-
-pub(crate) fn cache_directory(app: &OpenHarmonyApp) -> Result<PathBuf> {
-    let plugin = app
-        .registered_plugin::<Plugin>()?
-        .ok_or_else(|| napi_ohos::Error::from_reason("NSH SDK plugin is unavailable"))?;
-    plugin
-        .information
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|info| info.cache_directory.clone())
-        .ok_or_else(|| napi_ohos::Error::from_reason("Ability cache directory is not ready"))
-}
-
-#[derive(Default, Clone)]
-#[napi(object)]
-pub(crate) struct Batch {
-    pub editors: Vec<EditorSettings>,
-    pub commands: Vec<EditorCommand>,
-    pub remove_editors: Vec<u32>,
-    pub views: Vec<ViewOptions>,
-    pub remove_views: Vec<u32>,
-}
-impl_bridge_napi_type!(Batch, "nsh.arkui.Batch");
-impl Batch {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.editors.is_empty()
-            && self.commands.is_empty()
-            && self.remove_editors.is_empty()
-            && self.views.is_empty()
-            && self.remove_views.is_empty()
-    }
-}
-
-pub(crate) fn apply(
-    context: &crate::render::mount::UiContext,
-    batch: Batch,
-) -> crate::render::node::Result<()> {
-    context
-        .host
-        .app()
-        .with_main_thread_bridge(&context.env, |bridge| {
-            let response: Acknowledgement = bridge.call_sync::<Plugin, _, _>("apply", batch)?;
-            if response.accepted {
-                Ok(())
-            } else {
-                Err(napi_ohos::Error::from_reason("NSH SDK batch rejected"))
-            }
-        })?;
-    Ok(())
-}
-
-thread_local! { static EDITORS: RefCell<FxHashMap<u32, Weak<crate::input::editor::Input>>> = RefCell::default(); }
 pub(crate) struct EditorRoute {
     id: u32,
 }
@@ -436,4 +237,155 @@ impl Drop for EditorRoute {
     fn drop(&mut self) {
         EDITORS.with(|routes| routes.borrow_mut().remove(&self.id));
     }
+}
+
+#[derive(Default, Clone)]
+#[napi(object)]
+pub(crate) struct Batch {
+    pub editors: Vec<EditorSettings>,
+    pub commands: Vec<EditorCommand>,
+    pub remove_editors: Vec<u32>,
+    pub views: Vec<ViewOptions>,
+    pub remove_views: Vec<u32>,
+    pub webs: Vec<WebSettings>,
+    pub web_commands: Vec<WebCommand>,
+    pub remove_webs: Vec<u32>,
+}
+
+impl Batch {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.editors.is_empty()
+            && self.commands.is_empty()
+            && self.remove_editors.is_empty()
+            && self.views.is_empty()
+            && self.remove_views.is_empty()
+            && self.webs.is_empty()
+            && self.web_commands.is_empty()
+            && self.remove_webs.is_empty()
+    }
+}
+
+pub(crate) fn apply(
+    context: &crate::render::mount::UiContext,
+    batch: Batch,
+) -> crate::render::node::Result<()> {
+    context.host.apply_batch(&context.env, batch)?;
+    Ok(())
+}
+
+#[napi]
+pub(crate) fn nsh_attach_native_node(
+    env: Env,
+    target_id: u32,
+    #[napi(ts_arg_type = "FrameNode")] content: Object<'_>,
+) -> Result<()> {
+    NativeAttachment::attach(&env, target_id, &content)
+}
+
+#[napi]
+pub(crate) fn nsh_attach_native_subtree(
+    env: Env,
+    target_id: u32,
+    #[napi(ts_arg_type = "FrameNode")] content: Object<'_>,
+    #[napi(ts_arg_type = "NodeContent")] slot: Object<'_>,
+) -> Result<()> {
+    let (_owner, inner) = VIEWS
+        .with(|views| {
+            views
+                .borrow()
+                .get(&target_id)
+                .and_then(|route| route.owner.upgrade().zip(route.inner.upgrade()))
+        })
+        .ok_or_else(|| Error::from_reason("Native subtree route is no longer live"))?;
+    ohos_arkui_binding::common::node_registry::register(&inner.borrow(), inner.clone())
+        .and_then(|()| inner.borrow().add_event_receiver())
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+    NativeAttachment::attach_subtree(&env, target_id, &content, &slot)
+}
+
+#[napi]
+pub(crate) fn nsh_retire_native_node(target_id: u32) -> Result<()> {
+    NativeAttachment::retire(target_id)
+}
+
+#[napi]
+pub(crate) fn nsh_editor_event(target_id: u32, event: EditorEvent) -> Result<EditorReceipt> {
+    let count = NativeAttachment::dispatch(target_id, || {
+        let input = EDITORS.with(|routes| routes.borrow().get(&target_id).and_then(Weak::upgrade));
+        input
+            .map(|input| {
+                input
+                    .native_event(event)
+                    .map_err(|error| Error::from_reason(error.to_string()))
+            })
+            .transpose()
+    })??;
+    Ok(EditorReceipt {
+        accepted: count.is_some(),
+        count: count.unwrap_or(0),
+    })
+}
+
+#[napi]
+pub(crate) fn nsh_view_action(action: MenuAction) -> Result<bool> {
+    NativeAttachment::dispatch(action.target_id, || {
+        let owner = VIEWS.with(|views| {
+            views
+                .borrow()
+                .get(&action.target_id)
+                .and_then(|route| route.owner.upgrade())
+        });
+        owner.is_some_and(|owner| {
+            let mut accepted = false;
+            crate::render::node::callback(|| {
+                if action.kind.is_some() {
+                    accepted = owner.selection_action(&action)?;
+                } else {
+                    let spec = owner.accessibility_state.spec.borrow();
+                    if !spec.hidden && !spec.state.disabled && owner.visible_in_tree() {
+                        let registered = spec
+                            .actions
+                            .iter()
+                            .any(|item| item.name.as_ref() == action.action);
+                        drop(spec);
+                        if registered {
+                            owner.emit(
+                                nsh_core::EventKind::AccessibilityAction,
+                                nsh_core::EventPayload::Map(vec![(
+                                    "actionName",
+                                    nsh_core::PayloadValue::Str(action.action.clone()),
+                                )]),
+                            );
+                            accepted = true;
+                        } else if action.action == "activate"
+                            && owner
+                                .interaction
+                                .mask()
+                                .contains(nsh_core::EventKind::Press)
+                        {
+                            owner.emit(nsh_core::EventKind::Press, nsh_core::EventPayload::None);
+                            accepted = true;
+                        }
+                    }
+                }
+                Ok(())
+            });
+            accepted
+        })
+    })
+}
+
+#[napi]
+pub(crate) fn nsh_web_controller_attached(target_id: u32, native_tag: String) -> Result<bool> {
+    crate::media::webview::on_controller_attached(target_id, &native_tag)
+}
+
+#[napi]
+pub(crate) fn nsh_web_navigate(target_id: u32, url: String) -> Result<bool> {
+    crate::media::webview::on_navigate(target_id, &url)
+}
+
+#[napi]
+pub(crate) fn nsh_web_event(event: WebEvent) -> Result<bool> {
+    crate::media::webview::on_event(event)
 }

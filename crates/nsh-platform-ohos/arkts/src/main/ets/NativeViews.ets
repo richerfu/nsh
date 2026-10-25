@@ -11,9 +11,7 @@ import {
 } from "@ohos.arkui.node";
 import { UIContext } from "@ohos.arkui.UIContext";
 import deviceInfo from "@ohos.deviceInfo";
-import {
-  BridgePluginContext,
-} from "@ohos-rs/ability";
+import { NshRuntimeContext } from "./NativeEditors";
 
 interface ViewAction {
   name: string;
@@ -285,7 +283,7 @@ class ViewEntry {
   readonly sourceController?: ViewController;
   readonly textureController?: ViewController;
   private node: BuilderNode<[ViewParameters]>;
-  private context: BridgePluginContext;
+  private context: NshRuntimeContext;
   private ui: UIContext;
   private menus: NativeMenuCleanup;
   private closed: boolean = false;
@@ -297,7 +295,7 @@ class ViewEntry {
   private retirement: NativeRetirement = new NativeRetirement();
   constructor(
     settings: Settings,
-    context: BridgePluginContext,
+    context: NshRuntimeContext,
     menus: NativeMenuCleanup,
     posting: PointerPosting,
   ) {
@@ -343,13 +341,12 @@ class ViewEntry {
       this.node.build(wrapBuilder(viewContent), params, { nestingBuilderSupported: true });
       if (this.closed || !this.context.isActive()) { throw new Error("Native wrapper creation was cancelled"); }
       stage = "attach";
-      const response = this.context.invokeNativeSync(
-        "native-subtree-ready",
-        "ohos.node.NativeSubtreeReady",
-        "ohos.node.Acknowledgement",
-        { targetId: this.settings.targetId, content: this.node.getFrameNode(), slot: this.slot },
-      ) as Acknowledgement;
-      if (response.accepted !== true) {
+      const accepted = this.context.attachNativeSubtree(
+        this.settings.targetId,
+        this.node.getFrameNode(),
+        this.slot,
+      );
+      if (!accepted) {
         throw new Error("Native wrapper attachment was rejected");
       }
       this.syncMenu();
@@ -522,20 +519,14 @@ class ViewEntry {
     ) {
       return false;
     }
-    const response = this.context.invokeNativeSync(
-      "view-action",
-      "nsh.arkui.MenuAction",
-      "ohos.node.Acknowledgement",
-      {
-        targetId: this.settings.targetId,
-        action: name,
-        kind: kind,
-        generation: generation,
-      },
-    ) as Acknowledgement;
-    return response.accepted === true;
+    return this.context.viewAction({
+      targetId: this.settings.targetId,
+      action: name,
+      kind: kind,
+      generation: generation,
+    });
   }
-  dispose(cleanup: BridgePluginContext = this.context): void {
+  dispose(cleanup: NshRuntimeContext = this.context): void {
     if (this.closed && !this.retirementFailure) { return; }
     this.closed = true;
     this.retirementFailure = undefined;
@@ -546,13 +537,7 @@ class ViewEntry {
       }
       this.retirement.detachThenDispose(
         (): void => {
-          const response = cleanup.invokeNativeSync(
-            "native-node-retiring",
-            "ohos.node.NativeNodeRetiring",
-            "ohos.node.Acknowledgement",
-            { targetId: this.settings.targetId },
-          ) as Acknowledgement;
-          if (response.accepted !== true) {
+          if (!cleanup.retireNativeNode(this.settings.targetId)) {
             throw new Error("Native wrapper retirement was rejected");
           }
         },
@@ -596,10 +581,10 @@ export class NativeViews {
   private entries: Map<number, ViewEntry> = new Map();
   private menus: NativeMenuCleanup = new NativeMenuCleanup();
   private pointerPosting: PointerPosting = new PointerPosting();
-  remove(ids: number[], context: BridgePluginContext): void {
+  remove(ids: number[], context: NshRuntimeContext): void {
     for (const id of ids) { this.entries.get(id)?.dispose(context); this.entries.delete(id); }
   }
-  update(states: Settings[], context: BridgePluginContext): void {
+  update(states: Settings[], context: NshRuntimeContext): void {
     for (const state of states) {
       if (!context.isActive()) { throw new Error("NSH SDK session is inactive"); }
       if (state.api26 && deviceInfo.sdkApiVersion < 26 || state.api23 && deviceInfo.sdkApiVersion < 23) {
@@ -618,7 +603,7 @@ export class NativeViews {
     }
   }
   async settled(): Promise<void> { await this.menus.settled(); }
-  dispose(context: BridgePluginContext): void {
+  dispose(context: NshRuntimeContext): void {
     let failure: Error | undefined;
     for (const id of Array.from(this.entries.keys())) {
       const entry = this.entries.get(id)!;

@@ -37,34 +37,6 @@
           "name": "default"
         }
       ]
-    },
-    {
-      "name": "native_ability",
-      "srcPath": "../../target/ohos/arkts-deps/ability"
-    },
-    {
-      "name": "plugin_clipboard",
-      "srcPath": "../../target/ohos/arkts-deps/clipboard"
-    },
-    {
-      "name": "plugin_resource",
-      "srcPath": "../../target/ohos/arkts-deps/resource"
-    },
-    {
-      "name": "plugin_window",
-      "srcPath": "../../target/ohos/arkts-deps/window"
-    },
-    {
-      "name": "plugin_accessibility",
-      "srcPath": "../../target/ohos/arkts-deps/accessibility"
-    },
-    {
-      "name": "plugin_url",
-      "srcPath": "../../target/ohos/arkts-deps/url"
-    },
-    {
-      "name": "plugin_webview",
-      "srcPath": "../../target/ohos/arkts-deps/webview"
     }
   ]
 }

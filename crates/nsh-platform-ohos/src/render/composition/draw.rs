@@ -41,7 +41,7 @@ struct Renderer<'a, F> {
     scale: f32,
     pixels: u64,
 }
-const MAX_PIXELS: u64 = 8_388_608;
+const MAX_PIXELS: u64 = 67_108_864;
 impl Plan {
     pub(crate) fn render<'a>(
         &self,

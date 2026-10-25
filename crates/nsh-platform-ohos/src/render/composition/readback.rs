@@ -560,7 +560,7 @@ mod layout {
     pub(super) fn validate_size(width: u32, height: u32) -> Result<Layout, Error> {
         if width == 0
             || height == 0
-            || u64::from(width) * u64::from(height) > 4_194_304
+            || u64::from(width) * u64::from(height) > 16_777_216
             || width > i32::MAX as u32
             || height > i32::MAX as u32
         {

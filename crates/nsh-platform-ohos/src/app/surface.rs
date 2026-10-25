@@ -24,7 +24,6 @@ use ohos_arkui_binding::{
     },
     types::advanced::LengthMetricUnit,
 };
-use openharmony_ability::ContentRoot;
 
 use crate::{
     app::{
@@ -32,7 +31,7 @@ use crate::{
         options::{Config, NshOptions},
         runtime::{App, Errors, Runtime},
     },
-    interop::component::Components,
+    interop::{attachment::ContentRoot, component::Components},
     render::{
         geometry::Size,
         node::{NativeNode, callback},
@@ -271,6 +270,7 @@ impl State {
             return Ok(());
         }
         self.check()?;
+        let _ = crate::app::entry::ensure_host_ready(&env);
         let size = self.logical_size()?;
         self.runtime = Some(Runtime::start(
             env,
@@ -362,6 +362,9 @@ impl State {
                 Ok(())
             }
             Message::Window(attached) => {
+                if attached {
+                    let _ = crate::app::entry::ensure_host_ready(&env);
+                }
                 self.attached = attached;
                 if let Some(runtime) = &self.runtime {
                     runtime.set_attached(attached && self.visible)?;
@@ -479,9 +482,10 @@ pub struct NshSurface {
 #[napi]
 impl NshSurface {
     /// Creates an empty view with validated per-instance limits and capability grants.
-    /// NativeAbility must already have initialized this module's session.
+    /// The host session and UI context attachment initialize automatically if needed.
     #[napi(constructor)]
     pub fn new(env: Env, options: Option<NshOptions>) -> Result<Self> {
+        crate::app::entry::ensure_host_ready(&env)?;
         let host = crate::app::session::current()?;
         let config = Config::new(host.clone(), options.unwrap_or_default())?;
         host.scale()?;
@@ -650,6 +654,7 @@ impl NshSurface {
     #[napi(getter, ts_return_type = "import('@ohos.arkui.node').NodeContent")]
     pub fn content<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
         self.check()?;
+        let _ = crate::app::entry::ensure_host_ready(env);
         self.state
             .try_borrow()
             .map_err(reentry)?
