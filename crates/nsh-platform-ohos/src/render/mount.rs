@@ -39,6 +39,7 @@ impl MountTarget {
 }
 
 pub(crate) struct UiContext {
+    pub(crate) flushing_batch: std::cell::Cell<bool>,
     pub(crate) texture_posting: std::cell::Cell<bool>,
     pub(crate) scene: std::cell::RefCell<Option<Rc<crate::render::composition::scene::Scene>>>,
     pub(crate) compositor:
@@ -483,6 +484,14 @@ impl Mounter {
     }
 
     pub(crate) fn apply(&mut self, batch: MountBatch) -> Result<()> {
+        struct BatchGuard(Rc<UiContext>);
+        impl Drop for BatchGuard {
+            fn drop(&mut self) {
+                self.0.flushing_batch.set(false);
+            }
+        }
+        self.flushing_batch.set(true);
+        let _batch_guard = BatchGuard(self.context.clone());
         if let Some(scene) = self.scene.borrow().as_ref() {
             scene.invalidate();
         }
@@ -964,10 +973,7 @@ impl Mounter {
                     MountItem::Overflow { id, extent } => {
                         let node = self.node(id)?;
                         node.overflow.set(extent.map(Rect::from));
-                        node.native.borrow().set_bool_attribute(
-                            ohos_arkui_binding::types::attribute::ArkUINodeAttributeType::Clip,
-                            node.clips_children(),
-                        )?;
+                        node.apply_clip()?;
                         node.interaction.hit_region(node)?;
                         node.invalidate_scene();
                     }

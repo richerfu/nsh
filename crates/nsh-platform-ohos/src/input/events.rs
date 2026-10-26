@@ -556,8 +556,13 @@ impl Interaction {
         Ok(())
     }
     pub(crate) fn opacity(&self, owner: &Node, opacity: f32) -> Result<()> {
-        self.opacity.set(Some(opacity));
-        self.apply_opacity(owner)
+        if self.opacity.replace(Some(opacity)) != Some(opacity) {
+            self.apply_opacity(owner)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn invalidate_opacity(&self) {
+        self.opacity.set(None);
     }
     fn apply_opacity(&self, owner: &Node) -> Result<()> {
         owner

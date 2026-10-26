@@ -373,8 +373,18 @@ impl Node {
                 .effects
                 .as_ref()
                 .is_some_and(|effects| !effects.filters.is_empty());
-        if !needs_texture && let Some(wrapper) = self.wrapper.borrow().as_ref() {
-            wrapper.composite.borrow_mut().take();
+        if !needs_texture
+            && let Some(wrapper) = self.wrapper.borrow().as_ref()
+            && wrapper.composite.borrow_mut().take().is_some()
+        {
+            wrapper.outer.borrow().reset_attribute(
+                ohos_arkui_binding::types::attribute::ArkUINodeAttributeType::Transform,
+            )?;
+            wrapper.outer.borrow().opacity(1.0)?;
+            wrapper.outer.borrow().set_i32_attribute(
+                ohos_arkui_binding::types::attribute::ArkUINodeAttributeType::Visibility,
+                0,
+            )?;
         }
         if needs_texture
             && let Some(wrapper) = self.wrapper.borrow().as_ref()

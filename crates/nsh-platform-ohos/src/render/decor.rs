@@ -45,6 +45,9 @@ struct ShadowPaint {
 struct Backgrounds {
     effects: Option<Arc<nsh_core::Effects>>,
     size: Size,
+    radii: [f32; 4],
+    continuous: bool,
+    path: Path,
     paints: Vec<Brush>,
 }
 #[derive(Clone, PartialEq)]
@@ -61,6 +64,13 @@ impl Default for NativeEffects {
     }
 }
 impl Decoration {
+    pub(crate) fn invalidate_native(&self) {
+        self.native.borrow_mut().take();
+    }
+    pub(crate) fn clear_paint_cache(&self) {
+        self.backgrounds.borrow_mut().take();
+        self.shadows.borrow_mut().take();
+    }
     pub(crate) fn native(&self, owner: &Node, style: &ViewStyle) -> Result<()> {
         use nsh_core::{BlendMode as M, Filter as F};
         for g in style
@@ -137,19 +147,32 @@ impl Decoration {
         Ok(())
     }
     pub(crate) fn background(&self, canvas: &Canvas, style: &ViewStyle, size: Size, scale: f32) {
+        let Some(effects) = style.effects.as_ref() else {
+            self.backgrounds.borrow_mut().take();
+            self.shadows.borrow_mut().take();
+            return;
+        };
+        if effects.background_images.is_empty() && effects.box_shadows.is_empty() {
+            self.backgrounds.borrow_mut().take();
+            self.shadows.borrow_mut().take();
+            return;
+        }
         self.shadows(canvas, style, size, scale, false);
-        let images = style
-            .effects
-            .as_ref()
-            .map_or(&[][..], |e| e.background_images.as_slice());
+        let images = effects.background_images.as_slice();
         if images.is_empty() {
             self.backgrounds.borrow_mut().take();
             self.shadows(canvas, style, size, scale, true);
             return;
         }
+        let radii = style
+            .corner_radius
+            .map(|radius| radius.unwrap_or(style.border_radius).0)
+            .to_array();
         let mut backgrounds = self.backgrounds.borrow_mut();
         if backgrounds.as_ref().is_none_or(|c| {
             c.size != size
+                || c.radii != radii
+                || c.continuous != style.continuous_corners
                 || match (&c.effects, &style.effects) {
                     (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
                     (None, None) => false,
@@ -159,16 +182,19 @@ impl Decoration {
             *backgrounds = Some(Backgrounds {
                 effects: style.effects.clone(),
                 size,
+                radii,
+                continuous: style.continuous_corners,
+                path: outline(style, size, 0.0),
                 paints: images.iter().rev().map(|g| gradient(g, size)).collect(),
             });
         }
+        let cache = backgrounds.as_ref().unwrap();
         canvas.save();
         canvas.scale(scale, scale);
-        let path = outline(style, size, 0.0);
-        canvas.clip_path(&path, ClipOperation::Intersect, true);
-        for brush in &backgrounds.as_ref().unwrap().paints {
+        canvas.clip_path(&cache.path, ClipOperation::Intersect, true);
+        for brush in &cache.paints {
             canvas.attach_brush(brush);
-            canvas.draw_path(&path);
+            canvas.draw_path(&cache.path);
             canvas.detach_brush();
         }
         canvas.restore();

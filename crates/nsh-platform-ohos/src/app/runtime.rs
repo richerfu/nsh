@@ -131,6 +131,7 @@ pub(crate) enum Message {
     Error(String),
     RequestFrame,
     Frame,
+    FrameSynced,
     Reclaim(u64),
     VideoRetired(u64),
     VideoUi(u64, crate::media::video::UiState),
@@ -139,6 +140,7 @@ pub(crate) struct Dispatcher {
     pub(crate) owner: std::sync::Weak<crate::app::surface::Queue>,
     queue: ThreadsafeFunction<Message, (), (), Status, false>,
     pub(crate) wants_back: std::sync::atomic::AtomicBool,
+    pub(crate) active: std::sync::atomic::AtomicBool,
     pub(crate) live: std::sync::atomic::AtomicBool,
     pub(crate) status_bar: std::sync::Mutex<Option<(nsh_core::StatusBarConfig, bool)>>,
     pub(crate) keyboard: std::sync::Mutex<crate::input::keyboard::Snapshot>,
@@ -351,13 +353,15 @@ impl State {
                 self.report(error);
             }
             Message::RequestFrame => self.request_frame()?,
-            Message::Frame => {
+            Message::Frame | Message::FrameSynced => {
                 self.frame_pending = false;
                 if !self.foreground || !self.attached {
                     self.frame_wanted = true;
                     return Ok(());
                 }
-                self.engine.as_ref().unwrap().control().frame();
+                if matches!(message, Message::Frame) {
+                    self.engine.as_ref().unwrap().control().frame();
+                }
                 if self.mounter.as_mut().unwrap().frame()? {
                     self.request_frame()?;
                 }
@@ -374,6 +378,10 @@ impl State {
     }
     fn update_back(&self) {
         if let Some(dispatcher) = self.dispatcher.upgrade() {
+            dispatcher.active.store(
+                self.running.get() && self.attached && self.foreground,
+                std::sync::atomic::Ordering::Release,
+            );
             dispatcher.wants_back.store(
                 self.attached
                     && self.foreground
@@ -410,12 +418,25 @@ impl State {
     }
     fn schedule(&self, message: Message) -> Result<()> {
         let dispatcher = self.dispatcher.upgrade();
+        let control = matches!(message, Message::Frame)
+            .then(|| self.engine.as_ref().map(|e| e.control()))
+            .flatten();
         let mut message = Some(message);
         // NativeVSync is available on API 12. Its callback may run off the UI
         // thread, so it only posts a message and never accesses ArkUI state.
         let status = self.vsync.request_frame_once(move |_| {
             if let (Some(dispatcher), Some(message)) = (&dispatcher, message.take()) {
+                let wake_engine = matches!(message, Message::Frame)
+                    && dispatcher.active.load(std::sync::atomic::Ordering::Acquire);
+                let message = if wake_engine {
+                    Message::FrameSynced
+                } else {
+                    message
+                };
                 dispatcher.send(message);
+                if wake_engine && let Some(control) = &control {
+                    control.frame();
+                }
             }
         });
         if status != 0 {
@@ -434,6 +455,9 @@ impl State {
     fn close(&mut self) -> Result<()> {
         self.running.set(false);
         if let Some(dispatcher) = self.dispatcher.upgrade() {
+            dispatcher
+                .active
+                .store(false, std::sync::atomic::Ordering::Release);
             dispatcher
                 .wants_back
                 .store(false, std::sync::atomic::Ordering::Release);
@@ -529,6 +553,7 @@ impl Runtime {
                     Ok(())
                 })?,
             wants_back: std::sync::atomic::AtomicBool::new(false),
+            active: std::sync::atomic::AtomicBool::new(config.host.is_foreground()),
             status_bar: std::sync::Mutex::new(None),
             keyboard: std::sync::Mutex::default(),
             live: std::sync::atomic::AtomicBool::new(true),
@@ -597,6 +622,7 @@ impl Runtime {
         images.set_disk_cache(engine.image_cache());
         let control = engine.control();
         let context = Rc::new(crate::render::mount::UiContext {
+            flushing_batch: std::cell::Cell::new(false),
             scene: RefCell::default(),
             compositor: std::cell::RefCell::default(),
             composite_nodes: std::cell::RefCell::default(),

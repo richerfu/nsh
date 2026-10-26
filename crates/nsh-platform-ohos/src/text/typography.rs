@@ -2,7 +2,7 @@
 //! native font, paragraph and bitmap objects are created and freed here.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -20,13 +20,28 @@ pub(crate) fn argb(color: Color) -> u32 {
     color.0.rotate_right(8)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct RawLine {
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+    pub(crate) x: Points,
+    pub(crate) y: Points,
+    pub(crate) width: Points,
+    pub(crate) height: Points,
+    pub(crate) ascender: Points,
+    pub(crate) descender: Points,
+    pub(crate) cap_height: Points,
+    pub(crate) x_height: Points,
+}
+
 pub(crate) struct RasterText {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) origin_y: f32,
     pub(crate) pixels: Mutex<Option<Vec<u8>>>,
     pub(crate) scale: f32,
-    pub(crate) lines: Vec<nsh_core::TextLine>,
+    pub(crate) text: Arc<str>,
+    pub(crate) lines: Vec<RawLine>,
     pub(crate) links: Vec<(nsh_core::TextLink, Vec<[f32; 4]>)>,
     pub(crate) attachments: Vec<Option<Point<Points>>>,
     pub(crate) exhausted: bool,
@@ -49,7 +64,10 @@ impl Drop for Reservation {
 }
 pub(crate) struct Prepared {
     paragraph: RefCell<Typography>,
-    utf16: Vec<u16>,
+    laid_out_width: Cell<Option<f64>>,
+    single_line_ltr: bool,
+    has_attachments: bool,
+    text: Arc<str>,
     no_wrap: bool,
     links: Vec<nsh_core::TextLink>,
     decorations: Vec<crate::text::decoration::Decoration>,
@@ -81,10 +99,58 @@ impl TextEngine for OhosTextEngine {
     type Prepared = Prepared;
 
     fn lines(&self, layout: &TextLayout) -> Vec<nsh_core::TextLine> {
-        layout
-            .0
-            .downcast_ref::<RasterText>()
-            .map_or_else(Vec::new, |raster| raster.lines.clone())
+        let Some(raster) = layout.0.downcast_ref::<RasterText>() else {
+            return Vec::new();
+        };
+        if raster.lines.is_empty() {
+            return Vec::new();
+        }
+        if raster.text.is_ascii() {
+            let bytes = raster.text.as_bytes();
+            return raster
+                .lines
+                .iter()
+                .map(|line| {
+                    let start = (line.start as usize).min(bytes.len());
+                    let end = (line.end as usize).min(bytes.len()).max(start);
+                    nsh_core::TextLine {
+                        text: raster.text[start..end].to_owned(),
+                        start: line.start,
+                        end: line.end,
+                        x: line.x,
+                        y: line.y,
+                        width: line.width,
+                        height: line.height,
+                        ascender: line.ascender,
+                        descender: line.descender,
+                        cap_height: line.cap_height,
+                        x_height: line.x_height,
+                    }
+                })
+                .collect();
+        }
+        let utf16: Vec<u16> = raster.text.encode_utf16().collect();
+        raster
+            .lines
+            .iter()
+            .map(|line| {
+                let start = (line.start as usize).min(utf16.len());
+                let end = (line.end as usize).min(utf16.len()).max(start);
+                nsh_core::TextLine {
+                    text: String::from_utf16_lossy(&utf16[start..end]),
+                    start: line.start,
+                    end: line.end,
+                    x: line.x,
+                    y: line.y,
+                    width: line.width,
+                    height: line.height,
+                    ascender: line.ascender,
+                    descender: line.descender,
+                    cap_height: line.cap_height,
+                    x_height: line.x_height,
+                }
+            })
+            .collect()
     }
     fn attachments(&self, layout: &TextLayout) -> Vec<Option<Point<Points>>> {
         layout
@@ -126,7 +192,8 @@ impl TextEngine for OhosTextEngine {
             TextAlign::Right => ohos_drawing_binding::TextAlign::Right,
             TextAlign::Justify => ohos_drawing_binding::TextAlign::Justify,
         });
-        style.set_text_direction(if text.writing_direction.unwrap_or(text.rtl) {
+        let rtl = text.writing_direction.unwrap_or(text.rtl);
+        style.set_text_direction(if rtl {
             TextDirection::Rtl
         } else {
             TextDirection::Ltr
@@ -148,7 +215,28 @@ impl TextEngine for OhosTextEngine {
         }
         let mut builder = TypographyBuilder::new(&mut style, &mut self.fonts.borrow_mut());
         // Core spans use UTF-16 offsets, including supplementary characters.
-        let utf16: Vec<u16> = text.text.encode_utf16().collect();
+        let single_plain_span = text.spans.len() == 1 && text.attachments.is_empty();
+        let is_ascii = text.text.is_ascii();
+        let utf16: Vec<u16> = if single_plain_span || is_ascii {
+            Vec::new()
+        } else {
+            text.text.encode_utf16().collect()
+        };
+        let add_slice = |builder: &mut TypographyBuilder, start: usize, end: usize| {
+            if single_plain_span {
+                builder.add_text(&text.text);
+            } else if is_ascii {
+                let len = text.text.len();
+                let s = start.min(len);
+                let e = end.min(len).max(s);
+                builder.add_text(&text.text[s..e]);
+            } else {
+                let len = utf16.len();
+                let s = start.min(len);
+                let e = end.min(len).max(s);
+                builder.add_text(&String::from_utf16_lossy(&utf16[s..e]));
+            }
+        };
         let mut decorations = Vec::new();
         for span in &text.spans {
             let mut style = TextStyle::new();
@@ -227,7 +315,7 @@ impl TextEngine for OhosTextEngine {
                 .filter(|a| a.index >= span.start && a.index < span.end)
             {
                 let at = attachment.index as usize;
-                builder.add_text(&String::from_utf16_lossy(&utf16[start..at]));
+                add_slice(&mut builder, start, at);
                 if let Err(error) =
                     builder.add_placeholder(&ohos_drawing_binding::PlaceholderSpan {
                         width: attachment.width.0 as f64,
@@ -243,7 +331,7 @@ impl TextEngine for OhosTextEngine {
                 }
                 start = at + 1;
             }
-            builder.add_text(&String::from_utf16_lossy(&utf16[start..span.end as usize]));
+            add_slice(&mut builder, start, span.end as usize);
             builder.pop_text_style();
             if custom_decoration {
                 decorations.push(crate::text::decoration::Decoration::new(
@@ -251,13 +339,17 @@ impl TextEngine for OhosTextEngine {
                 ));
             }
         }
+        let shared_text: Arc<str> = Arc::from(text.text.as_str());
         Prepared {
             paragraph: RefCell::new(builder.build()),
-            utf16,
+            laid_out_width: Cell::new(None),
+            single_line_ltr: !rtl && matches!(text.align, TextAlign::Auto | TextAlign::Left),
+            has_attachments: !text.attachments.is_empty(),
+            selectable: (text.selectable == Some(true)).then(|| shared_text.clone()),
+            text: shared_text,
             no_wrap: text.no_wrap,
             links: text.links.clone(),
             decorations,
-            selectable: (text.selectable == Some(true)).then(|| Arc::from(text.text.as_str())),
             selection_color: text.selection_color,
         }
     }
@@ -265,7 +357,11 @@ impl TextEngine for OhosTextEngine {
     fn measure(&self, prepared: &Prepared, max_width: Option<Points>) -> Size<Points> {
         let mut paragraph = prepared.paragraph.borrow_mut();
         let width = if prepared.no_wrap { None } else { max_width };
-        paragraph.layout(width.map_or(1_000_000.0, |w| w.0).max(0.0) as f64);
+        let target = width.map_or(1_000_000.0, |w| w.0).max(0.0) as f64;
+        if prepared.laid_out_width.get() != Some(target) {
+            paragraph.layout(target);
+            prepared.laid_out_width.set(Some(target));
+        }
         Size::new(
             Points(paragraph.longest_line().ceil() as f32),
             Points(paragraph.height().ceil() as f32),
@@ -275,11 +371,24 @@ impl TextEngine for OhosTextEngine {
     fn layout(&self, prepared: &Prepared, size: Size<Points>) -> TextLayout {
         let size = crate::render::geometry::Size::from(size);
         let mut paragraph = prepared.paragraph.borrow_mut();
-        paragraph.layout(if prepared.no_wrap {
+        let target = if prepared.no_wrap {
             1_000_000.0
         } else {
-            size.width as f64
-        });
+            size.width.max(0.0) as f64
+        };
+        if prepared.laid_out_width.get() != Some(target) {
+            let reuse_single_line = prepared.single_line_ltr
+                && prepared
+                    .laid_out_width
+                    .get()
+                    .is_some_and(|old| old >= target)
+                && paragraph.line_count() <= 1
+                && paragraph.longest_line().ceil() <= target;
+            if !reuse_single_line {
+                paragraph.layout(target);
+                prepared.laid_out_width.set(Some(target));
+            }
+        }
         let (mut top, mut bottom) = (0.0f32, size.height);
         for decoration in &prepared.decorations {
             if let Some((min, max)) = decoration.vertical_bounds(&paragraph, self.scale) {
@@ -296,6 +405,7 @@ impl TextEngine for OhosTextEngine {
             origin_y: -padding_top,
             pixels: Mutex::new(None),
             scale,
+            text: prepared.text.clone(),
             lines: Vec::new(),
             links: Vec::new(),
             attachments: Vec::new(),
@@ -307,42 +417,41 @@ impl TextEngine for OhosTextEngine {
         // Geometry remains available even if this block cannot obtain a raster.
         raster.lines = (0..paragraph.line_count().min(i32::MAX as usize))
             .filter_map(|index| paragraph.line_metrics(index as i32))
-            .map(|line| {
-                let start = line.start_index.min(prepared.utf16.len());
-                let end = line.end_index.min(prepared.utf16.len()).max(start);
-                nsh_core::TextLine {
-                    text: String::from_utf16_lossy(&prepared.utf16[start..end]),
-                    start: line.start_index as u32,
-                    end: line.end_index as u32,
-                    x: Points(line.x as f32),
-                    y: Points(line.y as f32),
-                    width: Points(line.width as f32),
-                    height: Points(line.height as f32),
-                    ascender: Points(line.ascender as f32),
-                    descender: Points(line.descender as f32),
-                    cap_height: Points(line.cap_height as f32),
-                    x_height: Points(line.x_height as f32),
-                }
+            .map(|line| RawLine {
+                start: line.start_index as u32,
+                end: line.end_index as u32,
+                x: Points(line.x as f32),
+                y: Points(line.y as f32),
+                width: Points(line.width as f32),
+                height: Points(line.height as f32),
+                ascender: Points(line.ascender as f32),
+                descender: Points(line.descender as f32),
+                cap_height: Points(line.cap_height as f32),
+                x_height: Points(line.x_height as f32),
             })
             .collect();
-        raster.links = prepared
-            .links
-            .iter()
-            .map(|link| {
-                (
-                    *link,
-                    paragraph.range_rectangles(link.start as usize, link.end as usize),
-                )
-            })
-            .collect();
-        raster.attachments = paragraph
-            .placeholder_rectangles()
-            .into_iter()
-            .map(|rect| {
-                (rect[3] > rect[1] && rect[1] < size.height && rect[0] < size.width)
-                    .then_some(Point::new(Points(rect[0]), Points(rect[1])))
-            })
-            .collect();
+        if !prepared.links.is_empty() {
+            raster.links = prepared
+                .links
+                .iter()
+                .map(|link| {
+                    (
+                        *link,
+                        paragraph.range_rectangles(link.start as usize, link.end as usize),
+                    )
+                })
+                .collect();
+        }
+        if prepared.has_attachments {
+            raster.attachments = paragraph
+                .placeholder_rectangles()
+                .into_iter()
+                .map(|rect| {
+                    (rect[3] > rect[1] && rect[1] < size.height && rect[0] < size.width)
+                        .then_some(Point::new(Points(rect[0]), Points(rect[1])))
+                })
+                .collect();
+        }
         if width > 0 && height > 0 {
             let selectable = prepared.selectable.as_ref().filter(|text| {
                 text.len() <= crate::text::selection::layout::MAX_TEXT_BYTES

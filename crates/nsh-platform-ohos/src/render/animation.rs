@@ -21,6 +21,7 @@ struct State {
 
 pub(crate) struct Animator {
     state: RefCell<State>,
+    dirty: std::cell::Cell<bool>,
     bindings: RefCell<Vec<Option<Bindings>>>,
     motion: RefCell<Vec<Option<Weak<Node>>>>,
     scrolls: RefCell<Vec<Option<Weak<Node>>>>,
@@ -39,6 +40,7 @@ impl Animator {
     ) -> Rc<Self> {
         Rc::new(Self {
             state: RefCell::default(),
+            dirty: std::cell::Cell::new(false),
             bindings: RefCell::default(),
             motion: RefCell::default(),
             scrolls: RefCell::default(),
@@ -56,11 +58,13 @@ impl Animator {
         }
     }
     pub(crate) fn apply(&self, op: AnimationOp) {
+        self.dirty.set(true);
         let mut state = self.state.borrow_mut();
         let State { graph, finished } = &mut *state;
         graph.apply(op, finished);
     }
     pub(crate) fn bind(&self, owner: &Rc<Node>, values: Vec<(AnimationProp, u32)>) -> Result<()> {
+        self.dirty.set(true);
         let mut bindings = self.bindings.borrow_mut();
         if bindings.len() <= owner.id as usize {
             bindings.resize_with(owner.id as usize + 1, || None);
@@ -84,6 +88,9 @@ impl Animator {
         }
     }
     pub(crate) fn set_sticky(&self, owner: &Rc<Node>, animated: bool) {
+        if animated {
+            self.dirty.set(true);
+        }
         let mut sticky = self.sticky.borrow_mut();
         if sticky.len() <= owner.id as usize {
             sticky.resize_with(owner.id as usize + 1, || None);
@@ -128,11 +135,14 @@ impl Animator {
         self.state.borrow().graph.value(node).unwrap_or_default()
     }
     pub(crate) fn tick(&self) -> Result<bool> {
-        let mut animating = {
+        let (was_animating, mut animating) = {
             let mut state = self.state.borrow_mut();
             let State { graph, finished } = &mut *state;
-            graph.tick(self.clock.elapsed().as_secs_f64(), finished);
-            graph.is_animating()
+            let was = graph.is_animating();
+            if was || self.dirty.get() {
+                graph.tick(self.clock.elapsed().as_secs_f64(), finished);
+            }
+            (was, graph.is_animating())
         };
         let now = self.now();
         let selection_root = self.selection.borrow().upgrade();
@@ -172,10 +182,13 @@ impl Animator {
                 *slot = None;
             }
         }
-        self.write()?;
+        if was_animating || animating || self.dirty.get() {
+            self.write()?;
+        }
         Ok(animating)
     }
     fn write(&self) -> Result<()> {
+        self.dirty.set(false);
         let mut values = Vec::new();
         for binding in self.bindings.borrow().iter().flatten() {
             let Some(owner) = binding.0.upgrade() else {

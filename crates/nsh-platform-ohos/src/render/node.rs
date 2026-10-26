@@ -48,6 +48,38 @@ pub(crate) enum Error {
 }
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone, Copy)]
+struct AppliedStyle {
+    visual_ptr: usize,
+    background_color: u32,
+    border_radius: [f32; 4],
+    border_width: [f32; 4],
+    border_color: [u32; 4],
+    border_style: i32,
+    shadow: Option<(f32, f32, f32, u32)>,
+    clip: bool,
+    visibility: i32,
+    transform: Option<[f32; 16]>,
+    transform_center: [f32; 3],
+}
+impl Default for AppliedStyle {
+    fn default() -> Self {
+        Self {
+            visual_ptr: 0,
+            background_color: 0,
+            border_radius: [0.0; 4],
+            border_width: [0.0; 4],
+            border_color: [0; 4],
+            border_style: 0,
+            shadow: None,
+            clip: false,
+            visibility: 0,
+            transform: None,
+            transform_center: [f32::NAN; 3],
+        }
+    }
+}
+
 pub(crate) struct Node {
     pub(crate) accessibility_state: crate::accessibility::state::State,
     #[cfg(feature = "api-23")]
@@ -77,6 +109,7 @@ pub(crate) struct Node {
     backface_away: Cell<bool>,
     pub(crate) interaction: Interaction,
     pub(crate) style: RefCell<ViewStyle>,
+    applied: Cell<AppliedStyle>,
     styled: Cell<bool>,
     pub(crate) live: RefCell<Option<Box<crate::render::transition::Live>>>,
     pub(crate) leaving: Cell<bool>,
@@ -113,6 +146,7 @@ impl Node {
         native
             .borrow()
             .set_length_metric_unit(LengthMetricUnit::Vp)?;
+        let visual_ptr = Rc::as_ptr(&native) as usize;
         let node = Rc::new(Self {
             accessibility_state: crate::accessibility::state::State::default(),
             #[cfg(feature = "api-23")]
@@ -142,6 +176,10 @@ impl Node {
             backface_away: Cell::new(false),
             interaction: Interaction::default(),
             style: RefCell::new(ViewStyle::default()),
+            applied: Cell::new(AppliedStyle {
+                visual_ptr,
+                ..AppliedStyle::default()
+            }),
             styled: Cell::new(false),
             live: RefCell::default(),
             leaving: Cell::new(false),
@@ -545,30 +583,39 @@ impl Node {
         self.interaction.events(self, events)
     }
     pub(crate) fn set_frame(&self, frame: Rect) -> Result<()> {
-        if self.frame.get() != frame
-            && let Some(canvas) = self.canvas.borrow().as_ref()
-        {
+        let old = self.frame.replace(frame);
+        if old == frame {
+            return Ok(());
+        }
+        let size_changed = old.width != frame.width || old.height != frame.height;
+        if size_changed && let Some(canvas) = self.canvas.borrow().as_ref() {
             canvas.invalidate()?;
         }
-        self.frame.set(frame);
         self.update_wrapper()?;
         self.interaction.hit_region(self)?;
-        if let Some(component) = self.component.borrow().as_ref() {
-            component.native.borrow().width(frame.width)?;
-            component.native.borrow().height(frame.height)?;
-        }
-        if let Some(image) = self.image.borrow().as_ref() {
-            image.frame(Size::new(frame.width, frame.height))?;
-        }
-        if let Some(web) = self.web.borrow().as_ref() {
-            web.frame(Size::new(frame.width, frame.height))?;
-        }
-        if let Some(video) = self.video.borrow().as_ref() {
-            video.frame(Size::new(frame.width, frame.height))?;
-        }
-        self.transform(&self.style.borrow(), |_| None)?;
-        if let Some(scroll) = self.scroll.borrow().as_ref() {
-            scroll.viewport(Size::new(frame.width, frame.height))?;
+        if size_changed {
+            if let Some(component) = self.component.borrow().as_ref() {
+                component.native.borrow().width(frame.width)?;
+                component.native.borrow().height(frame.height)?;
+            }
+            if let Some(image) = self.image.borrow().as_ref() {
+                image.frame(Size::new(frame.width, frame.height))?;
+            }
+            if let Some(web) = self.web.borrow().as_ref() {
+                web.frame(Size::new(frame.width, frame.height))?;
+            }
+            if let Some(video) = self.video.borrow().as_ref() {
+                video.frame(Size::new(frame.width, frame.height))?;
+            }
+            let style = self.style.borrow();
+            if !style.transform.is_identity()
+                || self.extra.get().1 != crate::render::transition::Extra::NONE
+            {
+                self.transform(&style, |_| None)?;
+            }
+            if let Some(scroll) = self.scroll.borrow().as_ref() {
+                scroll.viewport(Size::new(frame.width, frame.height))?;
+            }
         }
         self.native
             .borrow()
@@ -795,7 +842,139 @@ impl Node {
         self.ensure_wrapper()?;
         self.restore_style()
     }
+    fn sync_visual_node(&self, visual: &NativeNode) {
+        let ptr = Rc::as_ptr(visual) as usize;
+        let mut applied = self.applied.get();
+        if applied.visual_ptr != ptr {
+            applied.visual_ptr = ptr;
+            applied.visibility = 0;
+            applied.transform = None;
+            applied.transform_center = [f32::NAN; 3];
+            self.applied.set(applied);
+            self.interaction.invalidate_opacity();
+            self.decoration.invalidate_native();
+        }
+    }
+    fn apply_opacity(&self, style_opacity: f32) -> Result<()> {
+        let visual = self.visual_node();
+        self.sync_visual_node(&visual);
+        self.interaction.opacity(
+            self,
+            if self.scene_active() {
+                1.0
+            } else {
+                style_opacity
+                    * self.presentation.get().0
+                    * self.extra.get().0
+                    * self.navigation_presentation.get().0
+            },
+        )
+    }
+    fn apply_background_color(&self, color: nsh_core::Color) -> Result<()> {
+        let bg = argb(color);
+        let mut applied = self.applied.get();
+        if applied.background_color != bg {
+            self.native.borrow().background_color(bg)?;
+            applied.background_color = bg;
+            self.applied.set(applied);
+        }
+        Ok(())
+    }
+    fn apply_borders(&self, style: &ViewStyle) -> Result<()> {
+        let corners = style
+            .corner_radius
+            .map(|r| r.unwrap_or(style.border_radius).0);
+        let radius = [
+            corners.top_left,
+            corners.top_right,
+            corners.bottom_left,
+            corners.bottom_right,
+        ];
+        let widths = style.borders.widths.to_array().map(|v| v.0);
+        let colors = style.borders.colors.map(argb);
+        let border_style = match style.borders.style {
+            nsh_core::BorderStyle::Solid => 0,
+            nsh_core::BorderStyle::Dashed => 1,
+            nsh_core::BorderStyle::Dotted => 2,
+        };
+        let mut applied = self.applied.get();
+        let node = self.native.borrow();
+        if applied.border_radius != radius {
+            node.set_number_attribute(
+                Attribute::BorderRadius,
+                radius.into_iter().map(Number::Float).collect(),
+            )?;
+            applied.border_radius = radius;
+        }
+        if applied.border_width != widths {
+            node.set_number_attribute(
+                Attribute::BorderWidth,
+                widths.into_iter().map(Number::Float).collect(),
+            )?;
+            applied.border_width = widths;
+        }
+        if applied.border_color != colors {
+            node.set_number_attribute(
+                Attribute::BorderColor,
+                colors.into_iter().map(Number::Uint).collect(),
+            )?;
+            applied.border_color = colors;
+        }
+        if applied.border_style != border_style {
+            node.set_i32_attribute(Attribute::BorderStyle, border_style)?;
+            applied.border_style = border_style;
+        }
+        self.applied.set(applied);
+        Ok(())
+    }
+    fn apply_shadow(&self, shadow: nsh_core::Shadow) -> Result<()> {
+        let next = shadow.is_visible().then(|| {
+            (
+                shadow.radius.0,
+                shadow.offset_x.0 * self.scale,
+                shadow.offset_y.0 * self.scale,
+                argb(shadow.color.with_alpha(shadow.opacity)),
+            )
+        });
+        let mut applied = self.applied.get();
+        if applied.shadow != next {
+            let node = self.native.borrow();
+            if let Some((radius, ox, oy, color)) = next {
+                node.set_number_attribute(
+                    Attribute::CustomShadow,
+                    vec![
+                        Number::Float(radius),
+                        Number::Int(0),
+                        Number::Float(ox),
+                        Number::Float(oy),
+                        Number::Int(0),
+                        Number::Uint(color),
+                        Number::Uint(0),
+                    ],
+                )?;
+            } else {
+                node.reset_attribute(Attribute::CustomShadow)?;
+            }
+            applied.shadow = next;
+            self.applied.set(applied);
+        }
+        Ok(())
+    }
+    pub(crate) fn apply_clip(&self) -> Result<()> {
+        let clip = self.clips_children();
+        let mut applied = self.applied.get();
+        if applied.clip != clip {
+            self.native
+                .borrow()
+                .set_bool_attribute(Attribute::Clip, clip)?;
+            applied.clip = clip;
+            self.applied.set(applied);
+        }
+        Ok(())
+    }
     fn apply_style(&self, style: &ViewStyle) -> Result<()> {
+        let visual = self.visual_node();
+        self.sync_visual_node(&visual);
         if let Some(wrapper) = self.wrapper.borrow().as_ref()
             && let Some(composite) = wrapper.composite.borrow().as_ref()
         {
@@ -805,81 +984,12 @@ impl Node {
             image.style(style)?;
         }
         self.decoration.native(self, style)?;
-        self.interaction.opacity(
-            self,
-            if self.scene_active() {
-                1.0
-            } else {
-                style.opacity
-                    * self.presentation.get().0
-                    * self.extra.get().0
-                    * self.navigation_presentation.get().0
-            },
-        )?;
+        self.apply_opacity(style.opacity)?;
         self.transform(style, |_| None)?;
-        let node = self.native.borrow();
-        node.background_color(argb(style.background_color))?;
-        let corners = style
-            .corner_radius
-            .map(|r| r.unwrap_or(style.border_radius).0);
-        node.set_number_attribute(
-            Attribute::BorderRadius,
-            [
-                corners.top_left,
-                corners.top_right,
-                corners.bottom_left,
-                corners.bottom_right,
-            ]
-            .into_iter()
-            .map(Number::Float)
-            .collect(),
-        )?;
-        node.set_number_attribute(
-            Attribute::BorderWidth,
-            style
-                .borders
-                .widths
-                .to_array()
-                .into_iter()
-                .map(|v| Number::Float(v.0))
-                .collect(),
-        )?;
-        node.set_number_attribute(
-            Attribute::BorderColor,
-            style
-                .borders
-                .colors
-                .iter()
-                .map(|v| Number::Uint(argb(*v)))
-                .collect(),
-        )?;
-        node.set_i32_attribute(
-            Attribute::BorderStyle,
-            match style.borders.style {
-                nsh_core::BorderStyle::Solid => 0,
-                nsh_core::BorderStyle::Dashed => 1,
-                nsh_core::BorderStyle::Dotted => 2,
-            },
-        )?;
-        if style.shadow.is_visible() {
-            let shadow = style.shadow;
-            node.set_number_attribute(
-                Attribute::CustomShadow,
-                vec![
-                    Number::Float(shadow.radius.0),
-                    Number::Int(0),
-                    Number::Float(shadow.offset_x.0 * self.scale),
-                    Number::Float(shadow.offset_y.0 * self.scale),
-                    Number::Int(0),
-                    Number::Uint(argb(shadow.color.with_alpha(shadow.opacity))),
-                    Number::Uint(0),
-                ],
-            )?;
-        } else {
-            node.reset_attribute(Attribute::CustomShadow)?;
-        }
-        node.set_bool_attribute(Attribute::Clip, self.clips_children())?;
-
+        self.apply_background_color(style.background_color)?;
+        self.apply_borders(style)?;
+        self.apply_shadow(style.shadow)?;
+        self.apply_clip()?;
         Ok(())
     }
     pub(crate) fn pin(&self, x: f32, y: f32) -> Result<()> {
@@ -897,8 +1007,17 @@ impl Node {
         Ok(())
     }
     pub(crate) fn presentation(&self, alpha: f32, y: f32) -> Result<()> {
-        self.presentation.set((alpha, y));
-        self.restore_style()
+        let old = self.presentation.replace((alpha, y));
+        if old != (alpha, y) {
+            let style = self.style.borrow();
+            if old.0 != alpha {
+                self.apply_opacity(style.opacity)?;
+            }
+            if old.1 != y {
+                self.transform(&style, |_| None)?;
+            }
+        }
+        Ok(())
     }
     pub(crate) fn reset_text_tint(&self) -> Result<()> {
         if self.tint.take().is_some() {
@@ -917,7 +1036,13 @@ impl Node {
         )],
     ) -> Result<()> {
         use nsh_core::animation::AnimationProp as P;
-        let mut style = self.style.borrow().clone();
+        let style = self.style.borrow();
+        let mut opacity = None;
+        let mut bg = None;
+        let mut border_color = None;
+        let mut shadow = style.shadow;
+        let mut has_shadow = false;
+        let mut has_transform = false;
         for (prop, value) in values {
             match prop {
                 P::CanvasArg(slot) => {
@@ -931,32 +1056,76 @@ impl Node {
                         self.native.borrow().mark_dirty(NodeDirtyFlag::NeedRender)?;
                     }
                 }
-                P::Opacity => style.opacity = value.number().clamp(0.0, 1.0),
-                P::BackgroundColor => {
-                    style.background_color = crate::render::animation::color(*value)
+                P::Opacity => opacity = Some(value.number().clamp(0.0, 1.0)),
+                P::BackgroundColor => bg = Some(crate::render::animation::color(*value)),
+                P::BorderColor => border_color = Some(crate::render::animation::color(*value)),
+                P::ShadowColor => {
+                    shadow.color = crate::render::animation::color(*value);
+                    has_shadow = true;
                 }
-                P::BorderColor => style
-                    .borders
-                    .colors
-                    .fill(crate::render::animation::color(*value)),
-                P::ShadowColor => style.shadow.color = crate::render::animation::color(*value),
-                P::ShadowOpacity => style.shadow.opacity = value.number().clamp(0.0, 1.0),
-                P::ShadowRadius => style.shadow.radius = Points(value.number().max(0.0)),
+                P::ShadowOpacity => {
+                    shadow.opacity = value.number().clamp(0.0, 1.0);
+                    has_shadow = true;
+                }
+                P::ShadowRadius => {
+                    shadow.radius = Points(value.number().max(0.0));
+                    has_shadow = true;
+                }
+                P::Transform(_) => has_transform = true,
                 _ => {}
             }
         }
-        if values
-            .iter()
-            .all(|(p, _)| matches!(p, P::CanvasArg(_) | P::Color))
-        {
-            return Ok(());
+        if let Some(opacity) = opacity {
+            self.apply_opacity(opacity)?;
         }
-        self.apply_style(&style)?;
-        self.transform(&style, |i| {
-            values
-                .iter()
-                .find_map(|(p, v)| (*p == P::Transform(i as u8)).then(|| v.number()))
-        })
+        if let Some(bg) = bg {
+            self.apply_background_color(bg)?;
+        }
+        if let Some(color) = border_color {
+            let colors = [argb(color); 4];
+            let mut applied = self.applied.get();
+            if applied.border_color != colors {
+                self.native.borrow().set_number_attribute(
+                    Attribute::BorderColor,
+                    colors.into_iter().map(Number::Uint).collect(),
+                )?;
+                applied.border_color = colors;
+                self.applied.set(applied);
+            }
+        }
+        if has_shadow {
+            self.apply_shadow(shadow)?;
+        }
+        if has_transform {
+            self.transform(&style, |i| {
+                values
+                    .iter()
+                    .find_map(|(p, v)| (*p == P::Transform(i as u8)).then(|| v.number()))
+            })?;
+        }
+        if let Some(wrapper) = self.wrapper.borrow().as_ref()
+            && let Some(composite) = wrapper.composite.borrow().as_ref()
+            && (opacity.is_some()
+                || bg.is_some()
+                || border_color.is_some()
+                || has_shadow
+                || has_transform)
+        {
+            composite.update(self)?;
+        }
+        if let Some(image) = self.image.borrow().as_ref()
+            && (bg.is_some() || border_color.is_some())
+        {
+            let mut animated_style = style.clone();
+            if let Some(bg) = bg {
+                animated_style.background_color = bg;
+            }
+            if let Some(color) = border_color {
+                animated_style.borders.colors.fill(color);
+            }
+            image.style(&animated_style)?;
+        }
+        Ok(())
     }
     pub(crate) fn transform(
         &self,
@@ -964,15 +1133,45 @@ impl Node {
         value: impl Fn(usize) -> Option<f32>,
     ) -> Result<()> {
         use nsh_core::{Matrix, TransformKind as K};
+        let visual = self.visual_node();
+        self.sync_visual_node(&visual);
         let extra = self.extra.get().1;
-        let mut m = style.transform.matrix(value);
-        if self.parent_node.borrow().upgrade().is_some_and(|parent| {
+        let pinned = self.pinned.get();
+        let nav_x = self.navigation_presentation.get().1;
+        let pres_y = self.presentation.get().1;
+        let parent_mirrored = self.parent_node.borrow().upgrade().is_some_and(|parent| {
             parent
                 .scroll
                 .borrow()
                 .as_ref()
                 .is_some_and(|scroll| scroll.mirrored())
-        }) {
+        });
+        let is_identity = style.transform.ops().is_empty()
+            && !parent_mirrored
+            && extra == crate::render::transition::Extra::NONE
+            && pinned == (0.0, 0.0)
+            && nav_x == 0.0
+            && pres_y == 0.0;
+        let mut applied = self.applied.get();
+        let native = visual.borrow();
+        if is_identity {
+            if applied.transform.is_some() {
+                native.reset_attribute(Attribute::Transform)?;
+                applied.transform = None;
+            }
+            self.backface_away.set(false);
+            let visibility = i32::from(style.hidden);
+            if applied.visibility != visibility {
+                native.set_i32_attribute(Attribute::Visibility, visibility)?;
+                applied.visibility = visibility;
+            }
+            self.applied.set(applied);
+            self.input_transform.set(Matrix::IDENTITY);
+            self.invalidate_scene();
+            return Ok(());
+        }
+        let mut m = style.transform.matrix(value);
+        if parent_mirrored {
             m = Matrix::of(K::ScaleX, -1.0).mul(&m);
         }
         let m = if extra == crate::render::transition::Extra::NONE {
@@ -987,33 +1186,33 @@ impl Node {
                 .mul(&m)
         };
         let mut matrix = m.0;
-        matrix[12] += (self.pinned.get().0 + self.navigation_presentation.get().1) as f64;
-        matrix[13] += (self.presentation.get().1 + self.pinned.get().1) as f64;
+        matrix[12] += (pinned.0 + nav_x) as f64;
+        matrix[13] += (pres_y + pinned.1) as f64;
         // ArkUI matrices translate in pixels; core matrices use surface vp.
-        let values = matrix
-            .into_iter()
-            .enumerate()
-            .map(|(i, v)| {
-                Number::Float(
-                    (v * if matches!(i, 12..=14) {
-                        self.scale as f64
-                    } else if matches!(i, 3 | 7 | 11) {
-                        1.0 / self.scale as f64
-                    } else {
-                        1.0
-                    }) as f32,
-                )
-            })
-            .collect();
-        let visual = self.visual_node();
-        let native = visual.borrow();
-        native.set_number_attribute(Attribute::Transform, values)?;
+        let mut raw_values = [0.0f32; 16];
+        for (i, v) in matrix.into_iter().enumerate() {
+            raw_values[i] = (v * if matches!(i, 12..=14) {
+                self.scale as f64
+            } else if matches!(i, 3 | 7 | 11) {
+                1.0 / self.scale as f64
+            } else {
+                1.0
+            }) as f32;
+        }
+        if applied.transform != Some(raw_values) {
+            native.set_number_attribute(
+                Attribute::Transform,
+                raw_values.into_iter().map(Number::Float).collect(),
+            )?;
+            applied.transform = Some(raw_values);
+        }
         self.backface_away
             .set(style.backface_hidden && m.0[10] < 0.0);
-        native.set_i32_attribute(
-            Attribute::Visibility,
-            i32::from(style.hidden || self.backface_away.get()),
-        )?;
+        let visibility = i32::from(style.hidden || self.backface_away.get());
+        if applied.visibility != visibility {
+            native.set_i32_attribute(Attribute::Visibility, visibility)?;
+            applied.visibility = visibility;
+        }
         let frame = self.frame.get();
         let ox = style
             .transform_origin
@@ -1032,7 +1231,12 @@ impl Node {
             )
             .0;
         let oz = style.transform_origin.z.0;
-        native.set_attribute(Attribute::TransformCenter, vec![ox, oy, oz].into())?;
+        let center = [ox, oy, oz];
+        if applied.transform_center != center {
+            native.set_attribute(Attribute::TransformCenter, vec![ox, oy, oz].into())?;
+            applied.transform_center = center;
+        }
+        self.applied.set(applied);
         let origin = (ox as f64, oy as f64, oz as f64);
         let mut before = Matrix::IDENTITY;
         before.0[12] = -origin.0;
@@ -1048,8 +1252,17 @@ impl Node {
         Ok(())
     }
     pub(crate) fn navigation_presentation(&self, alpha: f32, x: f32) -> Result<()> {
-        self.navigation_presentation.set((alpha, x));
-        self.restore_style()
+        let old = self.navigation_presentation.replace((alpha, x));
+        if old != (alpha, x) {
+            let style = self.style.borrow();
+            if old.0 != alpha {
+                self.apply_opacity(style.opacity)?;
+            }
+            if old.1 != x {
+                self.transform(&style, |_| None)?;
+            }
+        }
+        Ok(())
     }
     pub(crate) fn text(
         self: &Rc<Self>,
@@ -1069,15 +1282,27 @@ impl Node {
             // The core retains layout/selection geometry, but the transfer pixels
             // belong exclusively to this UI bitmap after upload.
             let pixels = raster.pixels.lock().expect("text pixels").take();
-            let bitmap = pixels.and_then(|pixels| {
-                let mut bitmap = Bitmap::new(raster.width, raster.height, BitmapFormat::default());
-                if bitmap.pixels_mut().len() != pixels.len() {
-                    return None;
+            let mut slot = self.bitmap.borrow_mut();
+            if let Some(pixels) = pixels {
+                let reuse = slot
+                    .as_ref()
+                    .is_some_and(|b| b.width() == raster.width && b.height() == raster.height);
+                if !reuse {
+                    *slot = Some(Bitmap::new(
+                        raster.width,
+                        raster.height,
+                        BitmapFormat::default(),
+                    ));
                 }
-                bitmap.pixels_mut().copy_from_slice(&pixels);
-                Some(bitmap)
-            });
-            *self.bitmap.borrow_mut() = bitmap;
+                let bitmap = slot.as_mut().unwrap();
+                if bitmap.pixels_mut().len() == pixels.len() {
+                    bitmap.pixels_mut().copy_from_slice(&pixels);
+                } else {
+                    *slot = None;
+                }
+            } else {
+                *slot = None;
+            }
         }
         self.selection_clear()?;
         *self.raster.borrow_mut() = Some(layout);
@@ -1303,16 +1528,33 @@ impl Node {
         Ok(())
     }
     fn draw(&self, event: &NodeCustomEvent) {
+        let has_effects = self
+            .style
+            .borrow()
+            .effects
+            .as_ref()
+            .is_some_and(|e| !e.background_images.is_empty() || !e.box_shadows.is_empty());
+        if !has_effects {
+            self.decoration.clear_paint_cache();
+            if self.canvas.borrow().is_none()
+                && self.bitmap.borrow().is_none()
+                && self.selection.range.get().is_none()
+            {
+                return;
+            }
+        }
         if let Some(raw) = event.draw_context_in_draw().and_then(|ctx| ctx.canvas()) {
             // SAFETY: ArkUI owns this canvas for the duration of this draw callback.
             let canvas = unsafe { Canvas::from_raw_borrowed(raw) };
-            let frame = self.frame.get();
-            self.decoration.background(
-                &canvas,
-                &self.style.borrow(),
-                Size::new(frame.width, frame.height),
-                self.scale,
-            );
+            if has_effects {
+                let frame = self.frame.get();
+                self.decoration.background(
+                    &canvas,
+                    &self.style.borrow(),
+                    Size::new(frame.width, frame.height),
+                    self.scale,
+                );
+            }
             if let Some(drawing) = self.canvas.borrow().as_ref() {
                 callback(|| drawing.draw(&canvas));
             }

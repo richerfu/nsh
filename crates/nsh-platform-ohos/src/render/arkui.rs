@@ -99,7 +99,9 @@ impl crate::render::mount::UiContext {
         None
     }
     fn editor_wake(&self) {
-        if let Some(route) = self.dispatcher.upgrade() {
+        if !self.flushing_batch.get()
+            && let Some(route) = self.dispatcher.upgrade()
+        {
             route.send(crate::app::runtime::Message::Arkui);
         }
     }
