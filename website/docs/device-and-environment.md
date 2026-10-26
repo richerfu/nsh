@@ -339,12 +339,8 @@ const hapticsSupported = platform.os === "ios" || (platform.os === "android" && 
 
 `nsh test` runs headless as iOS.
 
-On [OHOS](./embedding-ohos.md), the host supplies the surface's size and pixel ratio.
-The embedding defaults are `platform.version` `"0.0"`, the phone idiom, zero safe-area
-insets and keyboard height, text scale `1.0`, and a light system appearance. The host
-places the surface inside its safe content bounds. These values describe the
-embedding configuration; the [backend reference](../../docs/dev/ohos.md#environment-observations)
-records environment forwarding and its verification scope.
+On [OHOS](./ohos.md), `platform.os` is `"ohos"`, `platform.version` is the system API level (`"20"`), and safe-area
+insets and keyboard height report the portion overlapping each `NshSurface`.
 
 On [Linux](./linux.md), `platform.os` is `"linux"`, the idiom `"desktop"` and `platform.version` the kernel's major
 and minor version (`"6.12"`): distributions number their releases in ways that cannot be compared. There, the safe

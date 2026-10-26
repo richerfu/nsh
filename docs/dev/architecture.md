@@ -36,13 +36,9 @@ Input                        native gestures -> EngineControl::dispatch_event ->
 - **Android**: the engine thread typesets with `StaticLayout` through JNI; each commit is one `byte[]` plus an object
   table handed to `Mounter.java` on the UI thread, and animation items stay in Rust (the flow, the units and the JNI
   rules: `crates/nsh-platform-android/src/encode.rs`).
-- **OHOS** (ArkUI, [ohos.md](ohos.md)): each `NshSurface` owns its NodeContent,
-  engine and native tree. One UI-queue wake applies each commit through the
-  surface's shared `UiContext`. Typography and composition workers publish owned
-  pixels; native input and frame callbacks stay on the UI thread. The standard
-  Ability WebView and the NSH-owned HAR retain their SDK platform objects while
-  Rust owns layout, editor algorithms, media/composition and event semantics. Implementation domains and their boundaries are
-  listed in the [OHOS source map](ohos.md#source-map).
+- **OHOS** (ArkUI, `ohos.md`): the engine thread typesets with native `OH_Drawing_Typography`; each commit is a
+  `MountBatch` sent via a N-API threadsafe function to the ArkUI UI thread, which creates/updates ArkUI custom nodes and
+  runs `NativeVSync` animations.
 - **Linux** (GTK 4, `linux.md`): one `NshView` widget per node, placed at the core's frames in `size_allocate` and
   drawn with GSK nodes in `snapshot`; each commit wakes the GTK main loop once (`MainContext::invoke`); native
   animations run on the frame clock.

@@ -9,7 +9,7 @@ group: platforms
 
 NSH runs on phones, desktops and the web: iOS, Android, OHOS, macOS, Windows, Linux, GPUI and web pages. Each has a backend of its own that draws with the platform's own UI, so an app is UIKit views on an iPhone, ArkUI custom nodes on OHOS, AppKit views on a Mac, GTK 4 widgets on Linux, GPUI elements in a GPUI app and HTML in a browser, with the platform's text, input, accessibility and dark mode. Everything above the backend is shared: the reactive graph, the renderer, Taffy layout, the components and the native modules are the same Rust code everywhere, so one app runs on all of them. An app written in Rust is that code and your crate, with no JavaScript VM; a TSX app runs its modules on QuickJS on top of it ([Building with Rust](./rust.md)).
 
-On every platform, an app is used the same two ways: packaged as an installable app of that platform (`nsh package`), or embedded in a native app of your own, whether the host links a Rust root or loads TSX at run time. You develop it with `nsh run` (Rust edits rebuild and restart the app, TSX edits are hot updates). OHOS uses the [DevEco embedding workflow](./embedding-ohos.md).
+On every platform, an app is used the same two ways: packaged as an installable app of that platform (`nsh package`), or embedded in a native app of your own, whether the host links a Rust root or loads TSX at run time. You develop it with `nsh run` (Rust edits rebuild and restart the app, TSX edits are hot updates). OHOS uses the [DevEco embedding workflow](./ohos.md).
 
 ## At a glance
 
@@ -17,7 +17,7 @@ On every platform, an app is used the same two ways: packaged as an installable 
 |---|---|---|---|---|
 | [iOS](./ios.md) | UIKit; CoreText | iOS 15.0+, devices and the simulator | `nsh run --target ios` | `.app` (simulator), signed `.ipa` |
 | [Android](./android.md) | Android views; `StaticLayout` | Android 9 (API 28)+, `arm64-v8a`, `armeabi-v7a` and `x86_64` | `nsh run --target android` | signed `.apk` |
-| [OHOS](./embedding-ohos.md) | ArkUI custom nodes; native typography | API 12 baseline, arm64 | `cargo xtask ohos`, DevEco host | host HAP built with DevEco |
+| [OHOS](./ohos.md) | ArkUI custom nodes; native typography | API 20+, `arm64-v8a` | `cargo xtask ohos`, DevEco host | host HAP built with DevEco |
 | [macOS](./macos.md) | AppKit and Core Animation; CoreText | macOS 14+ | `nsh run --target macos` | ad hoc signed `.app` |
 | [Windows](./windows.md) | Win32 windows drawn with Direct2D; DirectWrite | Windows 10 1809+, Windows 11 | `nsh run` (the default on Windows) | a directory and a `.zip` |
 | [Linux](./linux.md) | GTK 4 widgets; Pango | GTK 4.14+ | `nsh run` (the default on Linux) | a directory and a `.tar.gz` |
@@ -57,7 +57,7 @@ Each desktop OS packages apps with its own backend, built for the machine it run
 | iOS | `AppView` (a `UIView`) | a Rust root, TSX bundles | the `nsh-platform-ios` crate | Rust |
 | iOS | `NshAppView` (a `UIView`) | TSX bundles, signed packages | `NativeShell.xcframework` | Swift |
 | Android | `NshView` (a `FrameLayout`) | TSX bundles, signed packages | `nsh.aar` | Java or Kotlin |
-| [OHOS](./embedding-ohos.md) | `NshSurface` in an ArkTS `NshView` | TSX bundles, signed packages | shared library and generated declarations | ArkTS |
+| [OHOS](./ohos.md) | `NshSurface` (with `ContentSlot`) | TSX bundles, signed packages | `@nsh/ohos` and `libnsh_platform_ohos.so` | ArkTS |
 | Web | `createPlayer` (a page element) or an iframe | TSX bundles; a Rust app as its published site | the runtime files from `nsh package --target web` | JavaScript or HTML |
 
 A Rust host mounts a Rust root (`Root::of::<App>()`) as `AppSource::Rust` or `App::Rust`, and gives its engines the app's UI sets with `set_ui_sets`, so TSX it loads imports the app's own components and modules. Each view is one engine, and an app can show several. The host registers its own native views for apps to use on every platform ([Native components](./native-components.md)).

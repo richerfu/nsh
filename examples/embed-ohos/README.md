@@ -1,49 +1,73 @@
-# Embedding Native Shell in an OpenHarmony / HarmonyOS Next app
+# Embedding NSH in an OHOS app
 
-An ArkTS (`UIAbility`) app that embeds Native Shell (`NshSurface`) below its own native UI (`entry/src/main/ets/pages/Index.ets`), registers a custom ArkUI component (`embed.badge` in `entry/src/main/ets/components/HostBadge.ets`), and runs `examples/embedded` (or any NSH app).
+This is a minimal OHOS `UIAbility` app that embeds `examples/embedded/App.tsx` using `@nsh/ohos` and `NshSurface`, below its own native toolbar.
 
-## Prerequisites
+1. Build the SDK (requires DevEco Studio with the API 20+ OpenHarmony NDK, `aarch64-unknown-linux-ohos` and `ohrs`):
 
-- OpenHarmony / HarmonyOS Next SDK with API 20+ NDK (`OHOS_NDK_HOME`)
-- DevEco Studio (`DEVECO_CONTENTS=/Applications/DevEco-Studio.app/Contents`)
-- `ohrs` CLI (`cargo install ohrs`)
-- Rust target `aarch64-unknown-linux-ohos` (`rustup target add aarch64-unknown-linux-ohos`)
+   ```sh
+   export DEVECO_CONTENTS=/path/to/DevEco-Studio.app/Contents
+   export OHOS_NDK_HOME="$DEVECO_CONTENTS/sdk/default/openharmony"
+   cargo xtask ohos --release
+   ```
 
-## Build
+2. Bundle the embedded app and build the HAP:
 
-From the repository root, build the NSH CLI and the OHOS embedding SDK:
+   ```sh
+   cargo build -p nsh-cli
+   NSH_PROFILE=release examples/embed-ohos/build.sh
+   ```
 
-```sh
-export DEVECO_CONTENTS="/Applications/DevEco-Studio.app/Contents"
-export OHOS_NDK_HOME="$DEVECO_CONTENTS/sdk/default/openharmony"
+3. Open `examples/embed-ohos` in DevEco Studio, configure signing for `com.example.nsh`, and run on an `arm64-v8a` device or emulator:
 
-cargo build -p nsh-cli
-cargo xtask ohos --release
+   ```sh
+   hdc -t <target> install -r examples/embed-ohos/entry/build/default/outputs/default/entry-default-signed.hap
+   hdc -t <target> shell aa start -a EntryAbility -b com.example.nsh
+   ```
+
+The example also registers a native component (`embed.badge`) used by `examples/embedded/App.tsx`:
+
+```ts
+surface.registerComponent('embed.badge', (id: number) => createHostBadge(this.getUIContext(), surface, id));
 ```
 
-`cargo xtask ohos --release` compiles `libnsh_platform_ohos.so` and `index.d.ts` into `target/ohos/release/` and stages the companion ArkTS packages under `target/ohos/arkts-deps/`. Pass `--dev` for hot reload and error overlay support (`target/ohos/release-dev/`), or `--features api-23` / `--features api-26` to opt into higher API baselines.
+And talks to the app over the [`nsh/host`](../../website/modules/nsh-host.md) channel without a view:
 
-Then assemble the HAP:
-
-```sh
-cd examples/embed-ohos
-NSH_PROFILE=release ./build.sh
+```ts
+surface.setParams({ host: 'OHOS (ArkTS)', initialCount: 10 });
+surface.handle('host.OrderTicket.submit', (data, reply) => {
+  reply.resolve({ orderId: 'ORD-1', status: 'filled' });
+});
+surface.send('host.OrderTicket.symbol', { symbol: 'NVDA' });
 ```
 
-By default `build.sh` bundles `examples/embedded` into `entry/src/main/resources/rawfile/`. Set `NSH_EXAMPLE=examples/counter` (or another app path) to bundle a different example, and `NSH_SPLIT=1` to emit lazy-loaded chunk bundles.
+And switches the app's theme at runtime with `setThemeOverrides`:
 
-## Run on a simulator or device
-
-Configure signing in DevEco Studio (`File -> Project Structure -> Signing Configs`), rebuild, and install with `hdc`:
-
-```sh
-hdc install entry/build/default/outputs/default/entry-default-signed.hap
-hdc shell aa start -a EntryAbility -b com.example.nsh
+```ts
+surface.setThemeOverrides(JSON.stringify({
+  cssVars: {
+    theme: { radius: '0.75rem' },
+    light: { primary: '#e11d48', 'primary-foreground': '#ffffff' },
+    dark: { primary: '#fb7185', 'primary-foreground': '#1c1917' },
+  },
+}));
 ```
 
-## What `Index.ets` shows
+## Signed packages
 
-- **`EntryAbility` (`entry/src/main/ets/entryability/EntryAbility.ets`)**: Standard HarmonyOS `UIAbility` (`extends UIAbility`) with no custom base class required.
-- **`NshSurface`**: Each `NshSurface` owns an independent NSH engine and exposes `surface.content` (`NodeContent`) for `ContentSlot(surface.content)`. Multiple surfaces can be mounted side by side (`Split` / `Single`).
-- **Native component (`embed.badge`)**: Registered per surface with `surface.registerComponent("embed.badge", ...)`, backed by an ArkUI `ComponentContent` builder (`HostBadge.ets`) that receives prop diffs, reports its intrinsic size via `surface.setComponentSize`, and emits events via `surface.emitComponentEvent`.
-- **Lifecycle**: `surface.loadResource("bundle.js")` loads a bundled app from `rawfile/`, `surface.stop()` stops the engine while preserving the slot, and `surface.dispose()` permanently releases native resources when the page disappears.
+To verify and run a signed `.nsh` package downloaded at runtime:
+
+```ts
+import { NshTrust } from 'libnsh_platform_ohos.so';
+
+const trust = await NshTrust.open(`${context.filesDir}/nsh-trust`, ['<base64 root.pub>']);
+const pkg = await trust.openPackage(downloadedFilePath);
+surface.runPackage(pkg);
+```
+
+## Connecting to `nsh dev`
+
+Build the `--dev` SDK (`cargo xtask ohos --dev`) and call:
+
+```ts
+surface.connectDevServer('ws://127.0.0.1:8790/ws'); // with `hdc rport tcp:8790 tcp:8790`
+```

@@ -339,10 +339,7 @@ const hapticsSupported = platform.os === "ios" || (platform.os === "android" && 
 
 `nsh test` 以 iOS 身份无界面运行。
 
-在 [OHOS](./embedding-ohos.md) 上，宿主提供 surface 尺寸与像素比例。嵌入配置的默认值为
-`platform.version` `"0.0"`、手机界面风格、安全区域与键盘高度 0、文字缩放 `1.0` 和浅色
-系统外观。宿主将 surface 放在自己的安全内容区域内。这些数值描述嵌入配置，环境转发
-及其验证范围见[后端参考](../../../docs/dev/ohos.md#environment-observations)。
+在 [OHOS](./ohos.md) 上，`platform.os` 为 `"ohos"`，`platform.version` 为系统 API 级别（`"20"`），安全区域与键盘高度只将与各个 `NshSurface` 重叠的部分作为 insets 上报。
 
 在 [Linux](./linux.md) 上，`platform.os` 为 `"linux"`，界面风格为 `"desktop"`，`platform.version` 为内核的主、次版本号（`"6.12"`）：
 各发行版给版本编号的方式无法相互比较。在那里，安全区域和键盘高度为 0，`colorScheme()` 实时跟随桌面的设置（XDG 设置门户），

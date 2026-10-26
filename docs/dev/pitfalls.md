@@ -507,46 +507,11 @@ Things that were found the hard way. Read the section of the area you change bef
 
 ## OHOS
 
-- **Use `FontCollection::shared()` for the engine's typography cache.** The native
-  collection behind `FontCollection::new()` can serve only one typography
-  builder. Reusing it for a second text node crashes in
-  `FontCollection::CreateSktFontCollection` on the API 26 emulator. Shared here
-  means reusable by multiple paragraphs; keep the collection on the engine thread.
-- **Register native clicks only for nodes with `onPress`.** Registering a no-op
-  handler on every custom node makes passive text participate in hit testing and
-  compete with its pressable parent.
-- **Apply custom layout inside the native callbacks.** Measurement and layout
-  methods belong to the matching `NodeCustomEvent` phase. Detach tree edges during
-  mount commits, then dispose retired nodes after a frame and a subsequent UI
-  turn. See [OHOS](ohos.md) for the embedding ownership model.
-- **Schedule native frames through VSync.** Each surface uses
-  `ohos-vsync-binding` to request native VSync and posts its result to the UI
-  thread. ArkUI's `post_frame_callback` requires API 18. Drawing's `api-20`
-  feature selects its API-20 encoded-text entry point. Construct inline
-  placeholders with the binding's explicit alignment and baseline descriptor.
-
-- **NodeContent callback cleanup keeps the static trampoline.**
-  `OH_ArkUI_NodeContent_RegisterCallback(handle, NULL)` returns `PARAM_INVALID`
-  on the API 26 emulator. Reset user data before releasing the owned callback;
-  the binding trampoline checks for null data. Clone the callback before
-  invocation so a callback can clear itself safely.
-- **ContentSlot disappearance is not instance disposal.** A retained
-  `NshSurface` owns its NodeContent and engine even while detached. The host
-  calls `stop()` to clear a module or `dispose()` to release the view. This
-  matches independently owned embedded views on the other platforms.
-
-- **ArkUI mixed-event getters write into caller arrays.** API 12's
-  `OH_ArkUI_NodeEvent_GetNumberValue` writes `value[index]`; allocate the full
-  indexed array. `OH_ArkUI_NodeEvent_GetStringValue` consumes writable buffer
-  and capacity arrays. A null pointer and zero capacity do not query a string
-  length. The native implementation also reports a parameter error for a
-  successful zero-returning secure copy; the binding recognizes a populated,
-  terminated caller buffer and rejects untouched/truncated data. Keep this
-  ABI handling in the binding. See the [API-12 implementation](https://github.com/openharmony/arkui_ace_engine/blob/OpenHarmony-5.0-Release/interfaces/native/node/event_converter.cpp).
-
-- **OHOS pinch centers use physical pixels.** `OH_ArkUI_PinchGesture_GetCenterX/Y`
-  keep pixel coordinates even when the receiver's node length metric is vp.
-  Convert with the surface density before computing a focal content point.
-  Native touch-event coordinates use the configured node unit instead. Device
-  tests use an off-center two-contact gesture and check the retained focal
-  point, so a density error cannot pass as a successful scale update.
+- **Use `FontCollection::shared()` for the engine's typography cache**: `FontCollection::new()` serves only one
+  typography builder and crashes in `FontCollection::CreateSktFontCollection` when reused across text nodes.
+- **Register native clicks only for nodes with `onPress`**: registering a no-op handler on every custom node makes
+  passive text participate in hit testing and compete with its pressable parent.
+- **`OH_ArkUI_NodeContent_RegisterCallback(handle, NULL)` returns `PARAM_INVALID`**: reset user data before releasing
+  the owned callback instead of passing a null function pointer.
+- **Pinch gesture centers are physical pixels** (`OH_ArkUI_PinchGesture_GetCenterX/Y`) even when the node length metric
+  is `vp`: divide by the surface density before computing the focal point.

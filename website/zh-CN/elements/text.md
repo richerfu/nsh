@@ -208,8 +208,7 @@ Rust 用 `measure_text(..)` 在布局之前测量字符串。
 
 ## 平台说明
 
-- 选区只在一个文本块（一个文本及其片段）之内，不跨越多个文本块。iOS 显示其编辑菜单（拷贝、全选、查询、翻译、共享），Android 显示浮动工具栏（复制、全选、分享），OHOS 显示原生 Copy/Select All 菜单。OHOS 的 Ctrl+C 复制、Ctrl+A 全选当前文本块、Esc 清除当前选区。
-- OHOS 上，将选择柄拖到滚动区域边缘并保持，会持续滚动内容并扩展选区；松手后停止滚动。
+- 选区在一个文本块（一个文本及其片段）之内。iOS 显示其编辑菜单（拷贝、全选、查询、翻译、共享），Android 显示浮动工具栏（复制、全选、分享），OHOS 显示复制、全选菜单。
 - 在 iOS 上，非实线单线的文本装饰线（`double`、`dotted`、`dashed`、`wavy`）由 NSH 自行绘制。
 - iOS 上的文本绘制纯色背景和外阴影。
 - [`nsh/device`](../modules/nsh-device.md) 的 `fontScale()`（Rust 中为 `font_scale()`）给出当前系统的文字缩放比例。

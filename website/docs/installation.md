@@ -15,7 +15,7 @@ Apps written in Rust also need a Rust toolchain ([below](#for-apps-written-in-ru
 |---|---|---|
 | iOS | macOS | Xcode and an iOS simulator runtime |
 | Android | macOS, Windows or Linux | The Android SDK and a JDK; an emulator or a device |
-| [OHOS](./embedding-ohos.md) | macOS source SDK and DevEco host workflow | DevEco Studio, its SDK, Rust and ohrs; an arm64 target |
+| [OHOS](./ohos.md) | macOS | DevEco Studio (API 20+), Rust and `ohrs`; an `arm64-v8a` device or emulator |
 | macOS | macOS | Xcode's command line tools; apps run on macOS 14+ |
 | Windows | Windows | Windows 10 1809+; the WebView2 Runtime for web views |
 | Linux | Linux | GTK 4.14+ (and its development packages to build the runtime) |
@@ -205,11 +205,7 @@ Building the Android runtime from a checkout (`cargo xtask android`) additionall
 
 ### Building the OHOS embedding SDK
 
-The [OHOS guide](./embedding-ohos.md) covers the API 12 arm64 embedding workflow.
-From a source checkout with the matching binding repository, set
-`OHOS_NDK_HOME` to the SDK's `openharmony` directory and build the native library
-and declarations with `cargo xtask ohos`. The DevEco host loads the module's
-`bundle.js` from raw resources and uses OHPM/Hvigor to build its HAP.
+See [OHOS](./ohos.md). Set `OHOS_NDK_HOME` to the HarmonyOS SDK's `openharmony` directory and run `cargo xtask ohos` to build `libnsh_platform_ohos.so` and `@nsh/ohos` (API 20+, `arm64-v8a`).
 
 ## What works where
 

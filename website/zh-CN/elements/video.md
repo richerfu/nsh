@@ -8,7 +8,7 @@ demo: el-video
 
 # Video
 
-视频视图用平台自带的播放器播放视频文件或视频流：iOS 和 Mac Catalyst 上是 AVPlayer，Android 上是 MediaPlayer，OHOS 通过标准 Ability 插件使用 AVPlayer。播放通过属性控制（`paused`、`muted`、`rate` 等），因此播放器会像其他视图一样跟随你的状态。Rust 用 `video(url)` 创建，TSX 用从 `nsh` 导入的 `<Video>`。
+视频视图用平台自带的播放器播放视频文件或视频流：iOS、Mac Catalyst 和 OHOS 上是 AVPlayer，Android 上是 MediaPlayer。播放通过属性控制（`paused`、`muted`、`rate` 等），因此播放器会像其他视图一样跟随你的状态。Rust 用 `video(url)` 创建，TSX 用从 `nsh` 导入的 `<Video>`。
 
 ```rust tabs
 use nsh_core::ui::prelude::*;
@@ -75,8 +75,6 @@ function Player() {
 
 在 TSX 中 `src` 必填（参见 [Video API](../modules/nsh-video.md)）。另见 [Web view 与视频指南](../docs/web-view-and-video.md)。
 
-[OHOS 接入文档](../docs/embedding-ohos.md#原生-webview-和视频)说明 API 12 的播放速率、下载校验和资源上限。
-
 ## 属性
 
 视频接受 [view](./view.md) 的属性（它没有子元素），另外还有：
@@ -136,7 +134,3 @@ const ratio = signal(16 / 9);
 
 - iOS 在 `AVPlayerLayer` 中绘制视频，设置 `controls` 时使用系统播放器视图；AVFoundation 在第一次创建视频时才加载。
 - Android 用 MediaPlayer 在 TextureView 上播放，`controls` 使用 MediaController。
-
-本地视频可直接导入：`import clip from "./clip.mp4"`，再使用
-`<Video source={clip} style={{ height: 220 }} />`。构建时会打包原始文件并生成资源 URL。
-支持 `.mp4`、`.m4v`、`.webm`、`.mov` 导入，具体编码格式由系统播放器支持范围决定。

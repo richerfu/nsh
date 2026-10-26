@@ -159,10 +159,5 @@
   patterns count each time they are drawn) is refused with an `svg::Error`. A panic in usvg or resvg is an
   `svg::Error` too (`catch_unwind`): the decoders run in GCD blocks and JNI functions, where an unwinding panic aborts.
   Android's decode threads also catch `OutOfMemoryError`, so a load that runs out of memory fails instead of hanging.
-
-On OHOS, scoped worker IO validates redirects and encoded/natural-size bounds,
-and ArkUI owns decoding and presentation. The internal Image receives the
-node's corner radii, a source-alpha-preserving tint matrix, native blur and a
-VSync fade over `fadeDuration` (default zero). Reduced motion completes fades
-immediately. The API 26 image fixture checks actual native pixels, dynamic
-tint changes, transparent margins, blur, remount and independent surfaces.
+  On OHOS, worker IO validates redirects and encoded/natural-size bounds, and ArkUI presents `PixelMap`s /
+  `DrawableDescriptor`s with corner radii, a source-alpha-preserving tint matrix, native blur and VSync fade.

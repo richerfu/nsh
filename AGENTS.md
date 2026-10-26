@@ -190,11 +190,11 @@ are never linked into the CLI: it reads their UI sets as data (`nsh_core::ui::de
 | the Linux backend (`nsh-platform-linux`, GTK 4) | `docs/dev/linux.md` |
 | the macOS backend (`nsh-platform-macos`, AppKit) | `docs/dev/macos.md` |
 | the Windows backend (`nsh-platform-windows`, Win32 / Direct2D) | `docs/dev/windows.md` |
+| the OHOS backend (`nsh-platform-ohos`, ArkUI) | `docs/dev/ohos.md` |
 | the GPUI backend (`nsh-platform-gpui`, macOS / Windows / Linux) | `docs/dev/gpui.md` |
 | anything apps use: exports, `nsh:rt`, props, events, style keys, Tailwind, declarations, behavior, formats | `docs/dev/compatibility.md` |
 | a hot path | `docs/dev/performance.md` (baselines) |
 | anything platform-specific | `docs/dev/pitfalls.md` (verified constraints, by area) |
-| the OHOS backend and SDK | `docs/dev/ohos.md` (binding setup, API 20 compatibility, ownership, verification and remaining work) |
 | Rust components (`nsh-base`'s, apps' UI sets) | `docs/dev/components.md` |
 | `TextView`: Markdown / HTML documents, their parsers, parts and extensions | `docs/dev/text-view.md` |
 | `DockArea` and `ResizablePanelGroup`: the layout data, render keys, drag and drop, compact presentation | `docs/dev/dock.md` |
@@ -242,7 +242,7 @@ echo 'await app.screenshot("a.png"); await app.press("label:Navigation"); await 
 ./target/debug/nsh package examples/gallery --target web --run             # a static site (files named by content), served on this machine
 ./target/debug/nsh package examples/gallery --target ios-simulator --run   # installable app (.app / .ipa / .apk)
 cargo xtask android [--release] [--dev]                                            # Android runtime into target/android/<profile>[-dev]
-cargo xtask ohos [--release]                                                      # OHOS arm64 embedding SDK into target/ohos/<profile>
+cargo xtask ohos [--release] [--dev]                                               # OHOS arm64 embedding SDK into target/ohos/<profile>[-dev]
 cargo xtask dist                                                                   # the distribution in dist/nsh
 ./target/debug/nsh dev examples/counter --server-only                      # dev server only (for simulators / devices); prints local and LAN URLs
 ./target/debug/nsh build examples/counter --release                        # writes bundle.js / bundle.nshc
@@ -272,16 +272,12 @@ cargo test -p nsh-platform-windows -p nsh-windows-host -p nsh-windows-app       
 cd website && bun run dev                                                       # the documentation site (builds the player too)
 ```
 
-`nsh-platform-ohos` only compiles for `target_env = "ohos"`; use `cargo xtask ohos` or `ohrs cargo` to check its native
-code with the OHOS SDK. OHOS also reports `target_os = "linux"`, so Linux-only crates exclude `target_env = "ohos"`.
-Use binding crates for OHOS capabilities and add missing wrappers to the binding repository; keep direct OHOS sys
-dependencies out of NSH. Preserve the API 20 baseline and audit final imports when enabling newer binding features.
-See `docs/dev/ohos.md` for the sibling binding checkout required by the current workspace.
-
 `nsh-platform-ios` only compiles for `target_os = "ios"` (iOS devices, the iOS simulator and Catalyst); on a macOS
 host it is an empty crate, so always run clippy on platform code with the Catalyst target. Likewise
 `nsh-platform-android` is empty off Android: check it with `cargo xtask android` (which sets up the NDK linker, `CC`,
-`AR` and bindgen's sysroot) and `cargo xtask clippy-android`. `nsh-platform-linux` and its hosts are empty off Linux:
+`AR` and bindgen's sysroot) and `cargo xtask clippy-android`. `nsh-platform-ohos` only compiles for
+`target_env = "ohos"` (OHOS also sets `target_os = "linux"`, so Linux-only crates exclude `target_env = "ohos"`):
+check it with `cargo xtask ohos` and `ohrs cargo -- clippy -p nsh-platform-ohos`. `nsh-platform-linux` and its hosts are empty off Linux:
 check them on Linux, with the GTK 4 (≥ 4.14) development packages installed. `nsh-platform-macos` and its hosts are
 empty off macOS (`target_os = "macos"`, not Catalyst). `nsh-platform-windows` and its hosts are empty off Windows:
 check them on Windows, with the MSVC Build Tools, the Windows SDK and LLVM (libclang for QuickJS' bindings);

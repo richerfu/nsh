@@ -27,7 +27,8 @@
   with the NDK's `llvm-objdump` before copying it into the runtime; `cargo xtask dist` uses the same checked libraries
   for the APK runtimes and AARs. APK ZIP alignment is checked separately by `zipalign -c -P 16 -v 4 <app.apk>`.
 - Embedding: iOS apps link `NativeShell.xcframework` and `import NativeShell` (Swift: `NshAppView`, a `UIView`;
-  `NshTrust`, `NshPackage`, `NshLimits`, `NshError`); Android apps add `nsh.aar` and use `com.longbridge.nsh.NshView`.
+  `NshTrust`, `NshPackage`, `NshLimits`, `NshError`); Android apps add `nsh.aar` and use `com.longbridge.nsh.NshView`;
+  OHOS apps add `@nsh/ohos` and `libnsh_platform_ohos.so` and use `NshSurface` (`ohos.md`).
   `*Dev` / `-dev` variants can also load from a dev server. See `examples/embed-*`. Rust desktop apps use the platform
   crate itself: `nsh_platform_linux::AppView` (a GTK widget), `nsh_platform_macos::AppView` (an `NSView`) or
   `nsh_platform_windows::AppView` (a child window of the app's `HWND`, run by the app's message loop; `windows.md`).
@@ -298,29 +299,3 @@ NSH draws (`src/layers.rs`).
   handler with the error's text. The engine reports them through `MountSink::report`, whose default calls
   `MountSink::report_error` with the text, so the other platforms' text callbacks (`NshAppView.onError`,
   `NshView.ErrorListener`) are unchanged.
-
-## OHOS embedding
-
-`NshSurface` is an independently owned native view, with one NodeContent and
-one engine/VM per active module. The host places `surface.content` in a standard
-ContentSlot and controls its layout, order and lifetime through ordinary ArkUI
-containers. Rust observes native size/attachment and loads resources off the
-UI thread. Removing a slot preserves retained instance state; `stop()` clears
-the module, while `dispose()` permanently releases the instance.
-
-`@nsh/ohos` automatically attaches to the active `UIContext`, `UIAbilityContext`
-and window lifecycle in a standard `UIAbility` host without requiring a custom
-`UIAbility` base class or Rust entry adapter. The paired `@nsh/ohos` HAR supplies
-SDK-only controls and subtree exports.
-
-`cargo xtask ohos` builds the arm64 library and generated declarations.
-Every instance exposes source/resource and verified-package loading, development
-connections (the dev SDK), options/grants, environment
-and error handling, and native component registration. See [OHOS](ohos.md)
-for binding setup, ownership and verification.
-
-The [embedding guide](../../website/docs/embedding-ohos.md) documents the full
-DevEco setup, generated library/declarations, ArkTS component, API parameters,
-limits, signing and diagnostics. The [implementation status](ohos.md#implementation-status)
-compares the native adapters, host policy, signed delivery and toolchain with
-the iOS and Android SDKs.
