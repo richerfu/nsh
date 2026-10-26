@@ -277,7 +277,7 @@ host it is an empty crate, so always run clippy on platform code with the Cataly
 `nsh-platform-android` is empty off Android: check it with `cargo xtask android` (which sets up the NDK linker, `CC`,
 `AR` and bindgen's sysroot) and `cargo xtask clippy-android`. `nsh-platform-ohos` only compiles for
 `target_env = "ohos"` (OHOS also sets `target_os = "linux"`, so Linux-only crates exclude `target_env = "ohos"`):
-check it with `cargo xtask ohos` and `ohrs cargo -- clippy -p nsh-platform-ohos`. `nsh-platform-linux` and its hosts are empty off Linux:
+check it with `cargo xtask ohos` and `cargo xtask clippy-ohos`. `nsh-platform-linux` and its hosts are empty off Linux:
 check them on Linux, with the GTK 4 (≥ 4.14) development packages installed. `nsh-platform-macos` and its hosts are
 empty off macOS (`target_os = "macos"`, not Catalyst). `nsh-platform-windows` and its hosts are empty off Windows:
 check them on Windows, with the MSVC Build Tools, the Windows SDK and LLVM (libclang for QuickJS' bindings);

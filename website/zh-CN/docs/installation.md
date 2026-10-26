@@ -15,7 +15,7 @@ NSH 的所有操作都通过一个命令 `nsh` 完成：构建用 Rust 或 TSX �
 |---|---|---|
 | iOS | macOS | Xcode 和一个 iOS 模拟器运行时 |
 | Android | macOS、Windows 或 Linux | Android SDK 和 JDK；一个模拟器或设备 |
-| [OHOS](./ohos.md) | macOS | DevEco Studio（API 20+）、Rust 和 `ohrs`；`arm64-v8a` 设备或模拟器 |
+| [OHOS](./ohos.md) | macOS、Windows 或 Linux | DevEco Studio 或 OpenHarmony SDK（API 20+）与 Rust；`arm64-v8a` 设备或模拟器 |
 | macOS | macOS | Xcode 命令行工具；应用运行在 macOS 14+ |
 | Windows | Windows | Windows 10 1809+；网页视图需要 WebView2 Runtime |
 | Linux | Linux | GTK 4.14+（构建运行时还需要它的开发包） |
@@ -206,7 +206,7 @@ sdkmanager "platforms;android-35" "build-tools;35.0.1" "platform-tools"
 
 ### 构建 OHOS 嵌入 SDK
 
-参见 [OHOS](./ohos.md)。将 `OHOS_NDK_HOME` 指向 HarmonyOS SDK 的 `openharmony` 目录，使用 `cargo xtask ohos` 构建 `libnsh_platform_ohos.so` 与 `@nsh/ohos`（API 20+，`arm64-v8a`）。
+参见 [OHOS](./ohos.md)。安装 DevEco Studio 或将 `OHOS_NDK_HOME` 指向 SDK 的 `openharmony` 目录后，运行 `cargo xtask ohos` 即可构建 `libnsh_platform_ohos.so` 与 `@nsh/ohos`（API 20+，`arm64-v8a`）。
 
 ## 各平台可用的命令
 

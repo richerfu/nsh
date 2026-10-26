@@ -11,8 +11,8 @@ NSH 应用在 OHOS 上用 ArkUI 自定义节点和原生文本排版运行，要
 
 ## 环境要求
 
-- **DevEco Studio** 与 HarmonyOS SDK（API 20 或更高版本）、OHPM、Hvigor，以及 `arm64-v8a` 真机或模拟器。
-- 从源码构建 SDK 时需要 **Rust**（`aarch64-unknown-linux-ohos`）和 **ohrs**。见[安装](./installation.md#构建-ohos-嵌入-sdk)。
+- **DevEco Studio** 与 HarmonyOS / OpenHarmony SDK（API 20 或更高版本）、OHPM、Hvigor，以及 `arm64-v8a` 真机或模拟器。
+- 在 macOS、Windows 或 Linux 上从源码构建 SDK 时需要 **Rust**（`rustup target add aarch64-unknown-linux-ohos`）。见[安装](./installation.md#构建-ohos-嵌入-sdk)。
 
 ## 嵌入 OHOS 应用
 
@@ -27,11 +27,9 @@ NSH 应用在 OHOS 上用 ArkUI 自定义节点和原生文本排版运行，要
 
 ## 获取库
 
-在 NSH 仓库根目录构建 SDK：
+在 NSH 仓库根目录构建 SDK（`xtask` 会自动从 DevEco Studio 默认目录或 `OHOS_NDK_HOME` 查找 OpenHarmony NDK）：
 
 ```sh
-export DEVECO_CONTENTS=/path/to/DevEco-Studio.app/Contents
-export OHOS_NDK_HOME="$DEVECO_CONTENTS/sdk/default/openharmony"
 cargo xtask ohos --release          # release：bundle 和签名包
 cargo xtask ohos --release --dev    # 同时支持连接 `nsh dev` 开发服务器
 ```

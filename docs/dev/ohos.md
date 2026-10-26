@@ -6,21 +6,17 @@ one QuickJS VM. User-facing page: [website/docs/ohos.md](../../website/docs/ohos
 
 ## Building and checking
 
-Building requires the OpenHarmony NDK (`OHOS_NDK_HOME` pointing to the SDK's `openharmony` directory containing
-`native`), the `aarch64-unknown-linux-ohos` Rust target, and `ohrs`. Off `target_env = "ohos"` the crate is a host stub,
-so check the real backend with `ohrs`:
+Building requires the OpenHarmony NDK (discovered from `OHOS_NDK_HOME`, `DEVECO_SDK_HOME` or DevEco Studio's default
+location on macOS, Windows and Linux) and the `aarch64-unknown-linux-ohos` Rust target. Off `target_env = "ohos"` the
+crate is a host stub, so check the real backend with `xtask`:
 
 ```sh
 cargo xtask ohos                         # target/ohos/debug
 cargo xtask ohos --release               # target/ohos/release
 cargo xtask ohos --dev                   # target/ohos/debug-dev
-cargo xtask ohos --features api-23        # target/ohos/debug-api-23
-cargo xtask ohos --features api-26        # target/ohos/debug-api-26
-
-ohrs cargo -- clippy -p nsh-platform-ohos --lib -- -D warnings
-ohrs cargo -- clippy -p nsh-platform-ohos --lib --features dev -- -D warnings
-ohrs cargo -- clippy -p nsh-platform-ohos --lib --features api-23 -- -D warnings
-ohrs cargo -- clippy -p nsh-platform-ohos --lib --features api-26 -- -D warnings
+cargo xtask ohos --features api-23       # target/ohos/debug-api-23
+cargo xtask ohos --features api-26       # target/ohos/debug-api-26
+cargo xtask clippy-ohos                  # clippy across default, dev, api-23 and api-26
 ```
 
 `cargo xtask ohos` builds `libnsh_platform_ohos.so`, generates `index.d.ts`, and stages the companion `@nsh/ohos`

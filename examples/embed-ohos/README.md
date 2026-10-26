@@ -2,11 +2,9 @@
 
 This is a minimal OHOS `UIAbility` app that embeds `examples/embedded/App.tsx` using `@nsh/ohos` and `NshSurface`, below its own native toolbar.
 
-1. Build the SDK (requires DevEco Studio with the API 20+ OpenHarmony NDK, `aarch64-unknown-linux-ohos` and `ohrs`):
+1. Build the SDK (requires DevEco Studio or `OHOS_NDK_HOME` with the API 20+ OpenHarmony NDK, and the `aarch64-unknown-linux-ohos` Rust target):
 
    ```sh
-   export DEVECO_CONTENTS=/path/to/DevEco-Studio.app/Contents
-   export OHOS_NDK_HOME="$DEVECO_CONTENTS/sdk/default/openharmony"
    cargo xtask ohos --release
    ```
 

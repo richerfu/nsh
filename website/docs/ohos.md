@@ -11,8 +11,8 @@ NSH apps run on OHOS with ArkUI custom nodes and native typography, from API 20,
 
 ## Requirements
 
-- **DevEco Studio** with the HarmonyOS SDK (API 20 or later), OHPM, Hvigor, and an `arm64-v8a` device or emulator.
-- **Rust** (`aarch64-unknown-linux-ohos`) and **ohrs** when building the SDK from source. See [Installation](./installation.md#building-the-ohos-embedding-sdk).
+- **DevEco Studio** with the HarmonyOS / OpenHarmony SDK (API 20 or later), OHPM, Hvigor, and an `arm64-v8a` device or emulator.
+- **Rust** (`rustup target add aarch64-unknown-linux-ohos`) when building the SDK from source on macOS, Windows or Linux. See [Installation](./installation.md#building-the-ohos-embedding-sdk).
 
 ## Embedding in an OHOS app
 
@@ -27,11 +27,9 @@ Every `NshSurface` is an engine of its own with its own JS VM and `NodeContent`;
 
 ## Get the library
 
-Build the SDK from the NSH repository:
+Build the SDK from the NSH repository (`xtask` finds the OpenHarmony NDK in DevEco Studio's default location or from `OHOS_NDK_HOME`):
 
 ```sh
-export DEVECO_CONTENTS=/path/to/DevEco-Studio.app/Contents
-export OHOS_NDK_HOME="$DEVECO_CONTENTS/sdk/default/openharmony"
 cargo xtask ohos --release          # release: bundles and signed packages
 cargo xtask ohos --release --dev    # also connects to a `nsh dev` server
 ```

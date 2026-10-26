@@ -69,7 +69,7 @@ enum Task {
         #[arg(long)]
         abi: Vec<String>,
     },
-    /// Build the arm64 OHOS embedding SDK (requires ohrs and OHOS_NDK_HOME).
+    /// Build the arm64 OHOS embedding SDK.
     Ohos {
         /// Optimized build.
         #[arg(long)]
@@ -83,6 +83,8 @@ enum Task {
     },
     /// Run clippy on the Android crate (with the NDK set up).
     ClippyAndroid,
+    /// Run clippy on the OHOS crate (with the NDK set up).
+    ClippyOhos,
     /// Build the distribution in `dist/nsh`.
     Dist,
     /// Build only the iOS embedding XCFrameworks.
@@ -165,6 +167,7 @@ fn task(task: Task) -> anyhow::Result<()> {
             features,
         } => ohos::build(release, dev, features),
         Task::ClippyAndroid => android::clippy(),
+        Task::ClippyOhos => ohos::clippy(),
         Task::Dist => dist::dist(),
         Task::IosEmbed(options) => ios::build(options).map(|out| term::note(out.display())),
         Task::Web { out } => web::build(&out),
