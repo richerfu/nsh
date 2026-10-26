@@ -94,8 +94,10 @@ pub(crate) fn build(release: bool, dev: bool, mut features: Vec<String>) -> anyh
     let binding_source = *bindings.first().context("OHOS bindings")?;
     let path_development = std::env::var_os("NSH_ALLOW_PATH_DEPENDENCIES").is_some();
     ensure!(
-        path_development || binding_source.starts_with("git+"),
-        "SDK dependencies must use pinned binding Git revisions"
+        path_development
+            || binding_source.starts_with("registry+")
+            || binding_source.starts_with("git+"),
+        "SDK dependencies must use crates.io releases or pinned binding Git revisions"
     );
     let step = term::Step::start("building OHOS embedding SDK");
     let mut command = Command::new("ohrs");

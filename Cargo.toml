@@ -94,28 +94,28 @@ markup5ever_rcdom = "0.3.0"
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy"] }
 two-face = { version = "0.4.5", default-features = false, features = ["syntect-fancy"] }
 jni = "0.21"
-napi-ohos = { version = "1.2", default-features = false, features = ["napi8", "serde-json", "tokio_rt"] }
-napi-derive-ohos = "1.2"
-napi-build-ohos = "1.2"
-ohos-arkui-binding = { version = "0.4.2", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["napi", "xcomponent", "api-20"] }
-ohos-accessibility-binding = { version = "0.1.2", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
-ohos-display-binding = { version = "0.1.4", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
-ohos-drawing-binding = { version = "0.2.4", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
-ohos-native-image-binding = { version = "0.1.0", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
-ohos-resource-manager-binding = { version = "0.3.4", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["napi", "api-20"] }
-ohos-vsync-binding = { version = "0.3.1", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false }
-ohos-web-binding = { version = "0.3.0", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
-ohos-window-manager-binding = { version = "0.1.1", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["input", "api-20"] }
-ohos-image-native-binding = { version = "0.0.7", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false }
-ohos-pasteboard-binding = { version = "0.0.7", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
-ohos-udmf-binding = { git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
-ohos-avplayer-binding = { git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
+napi-ohos = { version = "1.2.0", default-features = false, features = ["napi8", "serde-json", "tokio_rt"] }
+napi-derive-ohos = "1.2.0"
+napi-build-ohos = "1.2.0"
+ohos-arkui-binding = { version = "0.5.0", default-features = false, features = ["napi", "xcomponent", "api-20"] }
+ohos-accessibility-binding = { version = "0.2.0", default-features = false, features = ["api-20"] }
+ohos-display-binding = { version = "0.1.5", default-features = false, features = ["api-20"] }
+ohos-drawing-binding = { version = "0.2.5", default-features = false, features = ["api-20"] }
+ohos-native-image-binding = { version = "0.1.0", default-features = false, features = ["api-20"] }
+ohos-resource-manager-binding = { version = "0.3.5", default-features = false, features = ["napi", "api-20"] }
+ohos-vsync-binding = { version = "0.3.1", default-features = false }
+ohos-web-binding = { version = "0.3.1", default-features = false, features = ["api-20"] }
+ohos-window-manager-binding = { version = "0.1.2", default-features = false, features = ["input", "api-20"] }
+ohos-image-native-binding = { version = "0.0.8", default-features = false }
+ohos-pasteboard-binding = { version = "0.0.8", default-features = false, features = ["api-20"] }
+ohos-udmf-binding = { version = "0.0.8", default-features = false, features = ["api-20"] }
+ohos-avplayer-binding = { version = "0.1.0", default-features = false, features = ["api-20"] }
 glow = "0.18"
 khronos-egl = { version = "6", default-features = false, features = ["static", "no-pkg-config", "1_5"] }
-ohos-xcomponent-binding = { git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["callbacks", "multi_mode", "api-20"] }
-ohos-native-window-binding = { git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false, features = ["api-20"] }
-ohos-hilog-binding = { git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", features = ["log"] }
-ohos-net-connection-binding = { version = "0.1.4", git = "https://github.com/ohos-rs/ohos-native-bindings", rev = "43aec6c125503a47f7e875c793aaf2462e91ad19", default-features = false }
+ohos-xcomponent-binding = { version = "0.6.0", default-features = false, features = ["callbacks", "multi_mode", "api-20"] }
+ohos-native-window-binding = { version = "0.3.3", default-features = false, features = ["api-20"] }
+ohos-hilog-binding = { version = "0.2.5", features = ["log"] }
+ohos-net-connection-binding = { version = "0.1.4", default-features = false }
 windows-sys = "0.61"
 dunce = "1"
 semver = "1"
