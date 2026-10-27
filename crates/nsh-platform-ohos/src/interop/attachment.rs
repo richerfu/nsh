@@ -309,26 +309,42 @@ impl Target {
             Error::from_reason(format!("Native attachment target {} {error}", self.id))
         })?;
         self.detach_inner()?;
-        if let Some(inner) = self.inner.borrow_mut().take()
-            && inner.borrow().is_owned()
-            && Rc::strong_count(&inner) == 1
-        {
+        let dispose_inner = self
+            .inner
+            .borrow()
+            .as_ref()
+            .is_some_and(|inner| inner.borrow().is_owned() && Rc::strong_count(inner) == 1);
+        if dispose_inner {
+            let inner = self.inner.borrow();
+            let inner = inner.as_ref().expect("live inner node");
             inner
                 .borrow()
                 .remove_from_parent()
-                .and_then(|()| inner.borrow_mut().dispose())
+                .map_err(|error| Error::from_reason(error.to_string()))?;
+            inner
+                .borrow_mut()
+                .dispose()
                 .map_err(|error| Error::from_reason(error.to_string()))?;
         }
-        if let Some(parent) = self.parent.borrow_mut().take()
-            && parent.borrow().is_owned()
-            && Rc::strong_count(&parent) == 1
-        {
+        self.inner.borrow_mut().take();
+        let dispose_parent = self
+            .parent
+            .borrow()
+            .as_ref()
+            .is_some_and(|parent| parent.borrow().is_owned() && Rc::strong_count(parent) == 1);
+        if dispose_parent {
+            let parent = self.parent.borrow();
+            let parent = parent.as_ref().expect("live parent node");
             parent
                 .borrow()
                 .remove_from_parent()
-                .and_then(|()| parent.borrow_mut().dispose())
+                .map_err(|error| Error::from_reason(error.to_string()))?;
+            parent
+                .borrow_mut()
+                .dispose()
                 .map_err(|error| Error::from_reason(error.to_string()))?;
         }
+        self.parent.borrow_mut().take();
         Ok(())
     }
 }
@@ -489,7 +505,7 @@ impl NativeAttachment {
             .borrow_mut()
             .add_existing_node(child.clone())
             .map_err(|error| Error::from_reason(error.to_string()))?;
-        *target.child.borrow_mut() = Some(child);
+        *target.child.borrow_mut() = Some(child.clone());
         *target.retained.borrow_mut() = Some(retained);
         if let (Some(handle), Some(inner)) = (handle, inner.as_ref()) {
             if let Err(error) = NodeContent::from_handle(handle).add_node(&inner.borrow()) {
@@ -515,6 +531,18 @@ impl NativeAttachment {
                 .borrow()
                 .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedRender);
         }
+        let _ = child
+            .borrow()
+            .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedMeasure);
+        let _ = child
+            .borrow()
+            .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedLayout);
+        let _ = parent
+            .borrow()
+            .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedMeasure);
+        let _ = parent
+            .borrow()
+            .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedLayout);
         Ok(())
     }
 

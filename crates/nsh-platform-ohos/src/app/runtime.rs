@@ -92,7 +92,6 @@ pub(crate) enum Message {
     HotFailed,
     Chunk(std::result::Result<nsh_engine::Chunk, (String, String)>),
     Active(bool),
-    NativeContext(bool),
     Back,
     ReconcileNavigation,
     ScrollPosition {
@@ -200,6 +199,7 @@ struct State {
     frame_pending: bool,
     foreground: bool,
     attached: bool,
+    visible: bool,
     frame_wanted: bool,
     #[cfg(feature = "dev")]
     reload: Option<(u64, std::sync::Weak<crate::app::surface::Queue>)>,
@@ -260,9 +260,6 @@ impl State {
                     Ok(chunk) => control.chunk_loaded(chunk),
                     Err((id, error)) => control.chunk_failed(id, error),
                 }
-            }
-            Message::NativeContext(ready) => {
-                self.mounter.as_ref().unwrap().native_context(ready)?;
             }
             Message::Active(active) => {
                 self.foreground = active;
@@ -355,14 +352,14 @@ impl State {
             Message::RequestFrame => self.request_frame()?,
             Message::Frame | Message::FrameSynced => {
                 self.frame_pending = false;
-                if !self.foreground || !self.attached {
+                if !self.is_active() {
                     self.frame_wanted = true;
                     return Ok(());
                 }
                 if matches!(message, Message::Frame) {
                     self.engine.as_ref().unwrap().control().frame();
                 }
-                if self.mounter.as_mut().unwrap().frame()? {
+                if self.mounter.as_mut().unwrap().frame()? || self.frame_wanted {
                     self.request_frame()?;
                 }
                 self.retire()?;
@@ -376,16 +373,17 @@ impl State {
         self.update_back();
         Ok(())
     }
+    fn is_active(&self) -> bool {
+        self.running.get() && self.attached && self.visible && self.foreground
+    }
     fn update_back(&self) {
+        let active = self.is_active();
         if let Some(dispatcher) = self.dispatcher.upgrade() {
-            dispatcher.active.store(
-                self.running.get() && self.attached && self.foreground,
-                std::sync::atomic::Ordering::Release,
-            );
+            dispatcher
+                .active
+                .store(active, std::sync::atomic::Ordering::Release);
             dispatcher.wants_back.store(
-                self.attached
-                    && self.foreground
-                    && self.mounter.as_ref().is_some_and(Mounter::wants_back),
+                active && self.mounter.as_ref().is_some_and(Mounter::wants_back),
                 std::sync::atomic::Ordering::Release,
             );
         }
@@ -406,7 +404,7 @@ impl State {
     }
     fn request_frame(&mut self) -> Result<()> {
         self.frame_wanted = true;
-        if !self.foreground || !self.attached {
+        if !self.is_active() {
             return Ok(());
         }
         if !self.frame_pending {
@@ -530,6 +528,7 @@ impl Runtime {
             frame_pending: false,
             foreground: config.host.is_foreground(),
             attached: true,
+            visible: true,
             frame_wanted: false,
             environment: Environment::default(),
             #[cfg(feature = "dev")]
@@ -676,12 +675,33 @@ impl Runtime {
         if state.engine.is_none() {
             return Ok(());
         }
+        let changed = state.attached != attached;
         state.attached = attached;
-        if !attached && let Some(mounter) = &state.mounter {
+        if let Some(mounter) = &state.mounter {
+            if !attached {
+                mounter.cancel_input().map_err(napi_error)?;
+            }
+            if changed {
+                mounter.native_context(attached).map_err(napi_error)?;
+            }
+        }
+        state.update_back();
+        if state.is_active() && state.frame_wanted {
+            state.request_frame().map_err(napi_error)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn set_visible(&self, visible: bool) -> napi_ohos::Result<()> {
+        let mut state = self.state.try_borrow_mut().map_err(reentry)?;
+        if state.engine.is_none() {
+            return Ok(());
+        }
+        state.visible = visible;
+        if !visible && let Some(mounter) = &state.mounter {
             mounter.cancel_input().map_err(napi_error)?;
         }
         state.update_back();
-        if attached && state.frame_wanted {
+        if state.is_active() && state.frame_wanted {
             state.request_frame().map_err(napi_error)?;
         }
         Ok(())

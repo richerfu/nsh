@@ -30,9 +30,10 @@ Features:
 
 ## Architecture
 
-- **One `NshSurface` per embedded view** (`src/app/`): the host places `surface.content` (`NodeContent`) inside a
-  standard ArkUI `ContentSlot`. `@nsh/ohos` attaches automatically to the active `UIContext`, `UIAbilityContext` and
-  `Window` in a standard `UIAbility` without a custom base class.
+- **One `NshSurface` per embedded view** (`src/app/`): the host creates `new NshSurface(this.getUIContext())` and places
+  `surface.content` (`NodeContent`) inside a standard ArkUI `ContentSlot`. `@nsh/ohos` binds each window session
+  explicitly from the provided `UIContext` (`UIAbilityContext` and `Window`) in a standard `UIAbility` without a custom
+  base class or process-global context guessing.
 - **Commits and frames** (`src/render/`): the engine submits each `MountBatch` through a N-API threadsafe function to
   the ArkUI UI thread. Per-surface `NativeVSync` callbacks drive animations on the UI thread; idle surfaces request no
   frames.

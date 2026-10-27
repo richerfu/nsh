@@ -5,7 +5,6 @@ import {
   Configuration,
   EnvironmentCallback,
   UIAbility,
-  application,
   common,
 } from "@kit.AbilityKit";
 import { accessibility } from "@kit.AccessibilityKit";
@@ -62,35 +61,34 @@ interface HostCommandPayload {
 }
 
 interface NshNativeModule {
-  nshRegisterBootstrap(sdkApiVersion: number, bootstrap: () => void): void;
-  nshInitHost(
+  nshRegisterSessionBinder(sdkApiVersion: number, binder: (uiContext: UIContext) => number): void;
+  nshFindSession(windowName: string): number;
+  nshCreateSession(
     init: HostInitPayload,
+    windowName: string,
+    platformWindowId: number,
     resourceManager: object,
+    applyBatch: (batch: Batch) => void,
     onCommand: (command: HostCommandPayload) => void,
-  ): void;
-  nshDestroyHost(): void;
-  nshSetForeground(foreground: boolean): void;
+  ): number;
+  nshCloseSession(sessionId: number): void;
+  nshSetForeground(sessionId: number, foreground: boolean): void;
   nshUpdateConfig(
+    sessionId: number,
     colorMode: number,
     fontSizeScale: number,
     language: string,
     deviceType?: string,
   ): void;
-  nshUpdateAccessibility(screenReader?: boolean, reduceMotion?: boolean): void;
-  nshAttachUi(
-    renderOwner: string,
-    platformWindowId: number | undefined,
-    applyBatch: (batch: Batch) => void,
-  ): void;
-  nshDetachUi(renderOwner: string): void;
+  nshUpdateAccessibility(sessionId: number, screenReader?: boolean, reduceMotion?: boolean): void;
   nshUpdateWindow(
-    renderOwner: string,
+    sessionId: number,
     platformWindowId: number,
     visual: AvoidAreaPayload[],
     keyboard: AvoidAreaPayload,
   ): void;
-  nshOpenUrlResult(openId: number, opened: boolean): void;
-  nshReportHostError(message: string): void;
+  nshOpenUrlResult(sessionId: number, openId: number, opened: boolean): void;
+  nshReportHostError(sessionId: number, message: string): void;
   nshAttachNativeNode(targetId: number, content: FrameNode): void;
   nshAttachNativeSubtree(targetId: number, content: FrameNode, slot: NodeContent): void;
   nshRetireNativeNode(targetId: number): void;
@@ -99,8 +97,7 @@ interface NshNativeModule {
   nshWebControllerAttached(targetId: number, nativeTag: string): boolean;
   nshWebNavigate(targetId: number, url: string): boolean;
   nshWebEvent(event: WebEventPayload): boolean;
-  disposeAllRenders(): void;
-  onBackPressIntercept(): boolean;
+  onBackPressIntercept(uiContext?: UIContext): boolean;
 }
 
 let cachedNativeModule: NshNativeModule | undefined = undefined;
@@ -117,9 +114,9 @@ function getNativeModule(): NshNativeModule {
     throw new Error(`${libraryName} failed to load: ${String(error)}`);
   }
   const candidate: ESObject =
-    typeof loaded?.nshInitHost === "function" ? loaded : loaded?.default;
+    typeof loaded?.nshRegisterSessionBinder === "function" ? loaded : loaded?.default;
   const mod = candidate as NshNativeModule;
-  if (!mod || typeof mod.nshInitHost !== "function") {
+  if (!mod || typeof mod.nshRegisterSessionBinder !== "function") {
     throw new Error(`${libraryName} does not export the Native Shell OHOS host ABI`);
   }
   cachedNativeModule = mod;
@@ -163,8 +160,6 @@ function safeAvoidArea(win: window.Window, type: window.AvoidAreaType): AvoidAre
     return emptyAvoidArea();
   }
 }
-
-let nextRenderOwnerSequence = 1;
 
 class ComponentRuntimeContext implements NshRuntimeContext {
   private readonly ui: UIContext;
@@ -281,8 +276,8 @@ class ComponentRuntimeContext implements NshRuntimeContext {
 }
 
 class HostEnvironmentListener extends EnvironmentCallback {
-  private readonly owner: NshHostRuntime;
-  constructor(owner: NshHostRuntime) {
+  private readonly owner: HostSession;
+  constructor(owner: HostSession) {
     super();
     this.owner = owner;
   }
@@ -293,8 +288,8 @@ class HostEnvironmentListener extends EnvironmentCallback {
 }
 
 class HostStateChangeListener extends ApplicationStateChangeCallback {
-  private readonly owner: NshHostRuntime;
-  constructor(owner: NshHostRuntime) {
+  private readonly owner: HostSession;
+  constructor(owner: HostSession) {
     super();
     this.owner = owner;
   }
@@ -307,59 +302,61 @@ class HostStateChangeListener extends ApplicationStateChangeCallback {
 }
 
 class HostLifecycleListener extends AbilityLifecycleCallback {
-  private readonly owner: NshHostRuntime;
-  constructor(owner: NshHostRuntime) {
+  private readonly owner: HostSession;
+  constructor(owner: HostSession) {
     super();
     this.owner = owner;
   }
-  onAbilityCreate(ability: UIAbility): void {
-    this.owner.onAbilityCaptured(ability.context);
-  }
-  onWindowStageCreate(ability: UIAbility, windowStage: window.WindowStage): void {
-    this.owner.onWindowStageCaptured(ability.context, windowStage);
-  }
-  onWindowStageActive(_ability: UIAbility, _windowStage: window.WindowStage): void {
-    this.owner.onForegroundChanged(true);
+  onAbilityCreate(_ability: UIAbility): void {}
+  onWindowStageCreate(_ability: UIAbility, _windowStage: window.WindowStage): void {}
+  onWindowStageActive(ability: UIAbility, windowStage: window.WindowStage): void {
+    if (this.owner.matchesWindowStage(ability.context, windowStage)) {
+      this.owner.onForegroundChanged(true);
+    }
   }
   onWindowStageInactive(_ability: UIAbility, _windowStage: window.WindowStage): void {}
-  onWindowStageDestroy(_ability: UIAbility, windowStage: window.WindowStage): void {
-    this.owner.onWindowStageDestroyed(windowStage);
+  onWindowStageDestroy(ability: UIAbility, windowStage: window.WindowStage): void {
+    if (this.owner.matchesWindowStage(ability.context, windowStage)) {
+      this.owner.close();
+    }
   }
   onAbilityDestroy(ability: UIAbility): void {
-    this.owner.onAbilityDestroyed(ability.context);
+    if (this.owner.matchesAbility(ability.context)) {
+      this.owner.close();
+    }
   }
-  onAbilityForeground(_ability: UIAbility): void {
-    this.owner.onForegroundChanged(true);
+  onAbilityForeground(ability: UIAbility): void {
+    if (this.owner.matchesAbility(ability.context)) {
+      this.owner.onForegroundChanged(true);
+    }
   }
-  onAbilityBackground(_ability: UIAbility): void {
-    this.owner.onForegroundChanged(false);
+  onAbilityBackground(ability: UIAbility): void {
+    if (this.owner.matchesAbility(ability.context)) {
+      this.owner.onForegroundChanged(false);
+    }
   }
   onAbilityContinue(_ability: UIAbility): void {}
 }
 
-class NshHostRuntime {
-  private mod?: NshNativeModule;
-  private hostInitialized: boolean = false;
-  private appContext?: common.ApplicationContext;
-  private abilityContext?: common.UIAbilityContext;
-  private observedWindowStage?: window.WindowStage;
-  private mainWindow?: window.Window;
-  private uiContext?: UIContext;
-  private renderOwner: string = "";
-  private windowId: number = 0;
-  private runtimeContext?: ComponentRuntimeContext;
-  private plugin: NshPlugin = new NshPlugin();
+class HostSession {
+  readonly sessionId: number;
+  private readonly mod: NshNativeModule;
+  private readonly abilityContext: common.UIAbilityContext;
+  private readonly appContext?: common.ApplicationContext;
+  private readonly windowStage?: window.WindowStage;
+  private readonly mainWindow: window.Window;
+  private readonly windowId: number;
+  private readonly runtimeContext: ComponentRuntimeContext;
+  private readonly plugin: NshPlugin = new NshPlugin();
+  private closed: boolean = false;
   private envCallbackId?: number;
   private lifecycleCallbackId?: number;
-  private stateListenerRegistered: boolean = false;
   private stateListener?: HostStateChangeListener;
   private screenReaderHandler?: (enabled: boolean) => void;
   private reduceMotionHandler?: (enabled: boolean) => void;
-  private windowResolving: boolean = false;
 
   private readonly onWindowStageEvent = (event: window.WindowStageEventType): void => {
-    const mod = this.mod;
-    if (!mod) {
+    if (this.closed) {
       return;
     }
     if (
@@ -367,13 +364,13 @@ class NshHostRuntime {
       event === window.WindowStageEventType.ACTIVE ||
       event === window.WindowStageEventType.RESUMED
     ) {
-      mod.nshSetForeground(true);
+      this.onForegroundChanged(true);
     } else if (
       event === window.WindowStageEventType.INACTIVE ||
       event === window.WindowStageEventType.PAUSED ||
       event === window.WindowStageEventType.HIDDEN
     ) {
-      mod.nshSetForeground(false);
+      this.onForegroundChanged(false);
     }
   };
 
@@ -389,418 +386,269 @@ class NshHostRuntime {
     this.syncWindowMetrics();
   };
 
-  registerBootstrap(): void {
-    const mod = getNativeModule();
+  private constructor(
+    mod: NshNativeModule,
+    uiContext: UIContext,
+    abilityContext: common.UIAbilityContext,
+    mainWindow: window.Window,
+    windowName: string,
+  ) {
     this.mod = mod;
-    mod.nshRegisterBootstrap(deviceInfo.sdkApiVersion, (): void => {
-      this.ensureReady();
-    });
-  }
-
-  ensureReady(): void {
-    const mod = this.mod ?? getNativeModule();
-    this.mod = mod;
-
-    let resolvedUi: UIContext | undefined = this.uiContext;
-    if (resolvedUi !== undefined) {
-      try {
-        if (!resolvedUi.isAvailable()) {
-          resolvedUi = undefined;
-        }
-      } catch {
-        resolvedUi = undefined;
-      }
-    }
-
-    let resolvedAbility: common.UIAbilityContext | undefined = this.abilityContext;
-    let resolvedWindow: window.Window | undefined = this.mainWindow;
-
-    if (resolvedAbility === undefined || resolvedWindow === undefined || resolvedUi === undefined) {
-      try {
-        const ctx = getContext() as common.UIAbilityContext | undefined;
-        if (ctx !== undefined && typeof ctx.cacheDir === "string") {
-          resolvedAbility = ctx;
-          if (ctx.windowStage !== undefined) {
-            this.observeWindowStage(ctx.windowStage);
-            resolvedWindow = ctx.windowStage.getMainWindowSync();
-            resolvedUi = resolvedWindow.getUIContext();
-          }
-        }
-      } catch {}
-    }
-
-    if (resolvedUi === undefined) {
-      try {
-        const resolved = UIContext.resolveUIContext();
-        if (resolved !== undefined && resolved.isAvailable()) {
-          resolvedUi = resolved;
-        }
-      } catch {}
-    }
-
-    if (resolvedUi === undefined) {
-      try {
-        const all = UIContext.getAllUIContexts();
-        if (all.length > 0 && all[0].isAvailable()) {
-          resolvedUi = all[0];
-        }
-      } catch {}
-    }
-
-    if (resolvedUi !== undefined && resolvedAbility === undefined) {
-      try {
-        const hostCtx = resolvedUi.getHostContext() as common.UIAbilityContext | undefined;
-        if (hostCtx !== undefined && typeof hostCtx.cacheDir === "string") {
-          resolvedAbility = hostCtx;
-          if (hostCtx.windowStage !== undefined) {
-            this.observeWindowStage(hostCtx.windowStage);
-          }
-        }
-      } catch {}
-    }
-
-    if (resolvedWindow === undefined) {
-      if (resolvedAbility !== undefined && resolvedAbility.windowStage !== undefined) {
-        try {
-          resolvedWindow = resolvedAbility.windowStage.getMainWindowSync();
-        } catch {}
-      }
-      if (resolvedWindow === undefined && resolvedUi !== undefined) {
-        try {
-          const windowName = resolvedUi.getWindowName();
-          if (windowName !== undefined && windowName.length > 0) {
-            resolvedWindow = window.findWindow(windowName);
-          }
-        } catch {}
-      }
-    }
-
-    if (resolvedAbility !== undefined) {
-      this.abilityContext = resolvedAbility;
-    }
-
-    let appCtx = this.appContext;
-    if (appCtx === undefined) {
-      try {
-        appCtx =
-          resolvedAbility !== undefined
-            ? resolvedAbility.getApplicationContext()
-            : application.getApplicationContext();
-        this.appContext = appCtx;
-      } catch {}
-    }
-
-    const baseCtx: common.Context | undefined = resolvedAbility ?? appCtx;
-    if (!this.hostInitialized && baseCtx !== undefined) {
-      let screenReader = false;
-      try {
-        screenReader = accessibility.isScreenReaderOpenSync();
-      } catch {}
-
-      let reduceMotion: boolean | undefined = undefined;
-      if (deviceInfo.sdkApiVersion >= 23) {
-        try {
-          reduceMotion = accessibility.isAnimationReduceEnabledSync();
-        } catch {}
-      }
-
-      const config = resolvedAbility?.config;
-      mod.nshInitHost(
-        {
-          sdkApiVersion: deviceInfo.sdkApiVersion,
-          deviceType: deviceInfo.deviceType ?? "phone",
-          cacheDir: baseCtx.cacheDir ?? "",
-          colorMode: config?.colorMode ?? -1,
-          fontSizeScale: config?.fontSizeScale ?? 1.0,
-          language: config?.language ?? "",
-          screenReader,
-          reduceMotion,
-        },
-        baseCtx.resourceManager,
-        (command: HostCommandPayload): void => {
-          this.handleHostCommand(command);
-        },
-      );
-      this.hostInitialized = true;
-      this.subscribeProcessListeners(appCtx);
-      this.subscribeAccessibility();
-    } else if (this.hostInitialized && resolvedAbility?.config !== undefined) {
-      const cfg = resolvedAbility.config;
-      try {
-        mod.nshUpdateConfig(
-          cfg.colorMode ?? -1,
-          cfg.fontSizeScale ?? 1.0,
-          cfg.language ?? "",
-          deviceInfo.deviceType,
-        );
-      } catch {}
-    }
-
-    if (resolvedUi !== undefined) {
-      this.attachUiAndWindow(resolvedUi, resolvedWindow);
-    } else if (!this.windowResolving && baseCtx !== undefined) {
-      this.windowResolving = true;
-      window
-        .getLastWindow(baseCtx)
-        .then((win: window.Window): void => {
-          this.windowResolving = false;
-          try {
-            const ui = win.getUIContext();
-            const hostCtx = ui.getHostContext() as common.UIAbilityContext | undefined;
-            if (hostCtx !== undefined) {
-              this.onAbilityCaptured(hostCtx);
-            }
-            this.attachUiAndWindow(ui, win);
-          } catch {}
-        })
-        .catch((): void => {
-          this.windowResolving = false;
-        });
-    }
-  }
-
-  onAbilityCaptured(context: common.UIAbilityContext): void {
-    this.abilityContext = context;
-    if (this.hostInitialized && context.config !== undefined) {
-      this.onConfigurationUpdated(context.config);
-    }
-  }
-
-  onWindowStageCaptured(context: common.UIAbilityContext, stage: window.WindowStage): void {
-    this.abilityContext = context;
-    this.observeWindowStage(stage);
+    this.abilityContext = abilityContext;
+    this.windowStage = abilityContext.windowStage;
+    this.mainWindow = mainWindow;
     try {
-      const win = stage.getMainWindowSync();
-      const ui = win.getUIContext();
-      this.attachUiAndWindow(ui, win);
+      this.appContext = abilityContext.getApplicationContext();
     } catch {}
-  }
 
-  onWindowStageDestroyed(stage: window.WindowStage): void {
-    if (this.observedWindowStage === stage) {
+    let windowId = 0;
+    try {
+      windowId = mainWindow.getWindowProperties().id;
+    } catch {}
+    this.windowId = windowId;
+
+    this.runtimeContext = new ComponentRuntimeContext(uiContext, mod);
+
+    let screenReader = false;
+    try {
+      screenReader = accessibility.isScreenReaderOpenSync();
+    } catch {}
+
+    let reduceMotion: boolean | undefined = undefined;
+    if (deviceInfo.sdkApiVersion >= 23) {
       try {
-        stage.off("windowStageEvent", this.onWindowStageEvent);
+        reduceMotion = accessibility.isAnimationReduceEnabledSync();
       } catch {}
-      this.observedWindowStage = undefined;
     }
-    this.detachUi();
-    this.mod?.disposeAllRenders();
+
+    const config = abilityContext.config;
+    this.sessionId = mod.nshCreateSession(
+      {
+        sdkApiVersion: deviceInfo.sdkApiVersion,
+        deviceType: deviceInfo.deviceType ?? "phone",
+        cacheDir: abilityContext.cacheDir ?? "",
+        colorMode: config?.colorMode ?? -1,
+        fontSizeScale: config?.fontSizeScale ?? 1.0,
+        language: config?.language ?? "",
+        screenReader,
+        reduceMotion,
+      },
+      windowName,
+      windowId,
+      abilityContext.resourceManager,
+      (batch: Batch): void => {
+        if (!this.closed) {
+          this.plugin.apply(batch, this.runtimeContext);
+        }
+      },
+      (command: HostCommandPayload): void => {
+        this.handleHostCommand(command);
+      },
+    );
+
+    this.bindWindowListeners();
+    this.subscribeLifecycleListeners();
+    this.subscribeAccessibility();
+    this.syncWindowMetrics();
   }
 
-  onAbilityDestroyed(context: common.UIAbilityContext): void {
-    if (this.abilityContext === context) {
-      this.abilityContext = undefined;
+  static bind(uiContext: UIContext): number {
+    const mod = getNativeModule();
+    if (!uiContext || typeof uiContext.isAvailable !== "function" || !uiContext.isAvailable()) {
+      throw new Error("NshSurface requires an available UIContext");
     }
-    this.detachUi();
+    const windowName = uiContext.getWindowName() ?? "";
+    if (!windowName) {
+      throw new Error("OHOS UIContext does not have an associated window name");
+    }
+    const existing = mod.nshFindSession(windowName);
+    if (existing > 0) {
+      return existing;
+    }
+    const abilityContext = uiContext.getHostContext() as common.UIAbilityContext | undefined;
+    if (
+      !abilityContext ||
+      typeof abilityContext.cacheDir !== "string" ||
+      !abilityContext.resourceManager
+    ) {
+      throw new Error("OHOS UIContext is not bound to a UIAbilityContext");
+    }
+    let mainWindow: window.Window | undefined = undefined;
+    try {
+      mainWindow = window.findWindow(windowName);
+    } catch {}
+    if (!mainWindow && abilityContext.windowStage !== undefined) {
+      try {
+        const candidate = abilityContext.windowStage.getMainWindowSync();
+        if (candidate.getUIContext().getWindowName() === windowName) {
+          mainWindow = candidate;
+        }
+      } catch {}
+    }
+    if (!mainWindow) {
+      throw new Error(`OHOS window '${windowName}' could not be resolved from UIContext`);
+    }
+    const session = new HostSession(mod, uiContext, abilityContext, mainWindow, windowName);
+    return session.sessionId;
   }
 
-  onForegroundChanged(foreground: boolean): void {
-    this.mod?.nshSetForeground(foreground);
+  matchesAbility(context: common.UIAbilityContext): boolean {
+    return this.abilityContext === context;
   }
 
-  onConfigurationUpdated(newConfig: Configuration): void {
-    this.mod?.nshUpdateConfig(
-      newConfig.colorMode ?? -1,
-      newConfig.fontSizeScale ?? 1.0,
-      newConfig.language ?? "",
-      deviceInfo.deviceType,
+  matchesWindowStage(context: common.UIAbilityContext, stage: window.WindowStage): boolean {
+    return (
+      this.abilityContext === context &&
+      (this.windowStage === undefined || this.windowStage === stage)
     );
   }
 
-  private observeWindowStage(stage: window.WindowStage): void {
-    if (this.observedWindowStage === stage) {
+  onForegroundChanged(foreground: boolean): void {
+    if (this.closed) {
       return;
     }
-    if (this.observedWindowStage !== undefined) {
-      try {
-        this.observedWindowStage.off("windowStageEvent", this.onWindowStageEvent);
-      } catch {}
-    }
-    this.observedWindowStage = stage;
     try {
-      stage.on("windowStageEvent", this.onWindowStageEvent);
+      this.mod.nshSetForeground(this.sessionId, foreground);
     } catch {}
   }
 
-  private attachUiAndWindow(ui: UIContext, win: window.Window | undefined): void {
-    const mod = this.mod;
-    if (!mod || !this.hostInitialized) {
+  onConfigurationUpdated(newConfig: Configuration): void {
+    if (this.closed) {
       return;
     }
-    if (this.renderOwner && this.uiContext === ui) {
-      if (win !== undefined && this.mainWindow !== win) {
-        this.bindWindowListeners(win);
-        this.syncWindowMetrics();
+    try {
+      this.mod.nshUpdateConfig(
+        this.sessionId,
+        newConfig.colorMode ?? -1,
+        newConfig.fontSizeScale ?? 1.0,
+        newConfig.language ?? "",
+        deviceInfo.deviceType,
+      );
+    } catch {}
+  }
+
+  close(): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+
+    if (this.windowStage !== undefined) {
+      try {
+        this.windowStage.off("windowStageEvent", this.onWindowStageEvent);
+      } catch {}
+    }
+
+    try {
+      this.mainWindow.off("avoidAreaChange", this.onAvoidAreaChange);
+    } catch {}
+    try {
+      this.mainWindow.off("windowSizeChange", this.onWindowSizeChange);
+    } catch {}
+    try {
+      this.mainWindow.off("keyboardHeightChange", this.onKeyboardHeightChange);
+    } catch {}
+
+    if (this.appContext !== undefined) {
+      if (this.envCallbackId !== undefined) {
+        try {
+          this.appContext.off("environment", this.envCallbackId);
+        } catch {}
+        this.envCallbackId = undefined;
       }
-      return;
-    }
-    if (this.renderOwner) {
-      this.detachUi();
+      if (this.lifecycleCallbackId !== undefined) {
+        try {
+          this.appContext.off("abilityLifecycle", this.lifecycleCallbackId);
+        } catch {}
+        this.lifecycleCallbackId = undefined;
+      }
+      if (this.stateListener !== undefined) {
+        try {
+          this.appContext.off("applicationStateChange", this.stateListener);
+        } catch {}
+        this.stateListener = undefined;
+      }
     }
 
-    const renderOwner = `nsh-ui-${nextRenderOwnerSequence++}`;
-    this.renderOwner = renderOwner;
-    this.uiContext = ui;
-
-    let resolvedWin = win;
-    if (resolvedWin === undefined) {
+    if (this.screenReaderHandler !== undefined) {
       try {
-        const windowName = ui.getWindowName();
-        if (windowName) {
-          resolvedWin = window.findWindow(windowName);
-        }
+        accessibility.off("screenReaderStateChange", this.screenReaderHandler);
       } catch {}
+      this.screenReaderHandler = undefined;
     }
-
-    let windowId = 0;
-    if (resolvedWin !== undefined) {
+    if (deviceInfo.sdkApiVersion >= 23 && this.reduceMotionHandler !== undefined) {
       try {
-        windowId = resolvedWin.getWindowProperties().id;
+        accessibility.offAnimationReduceStateChange(this.reduceMotionHandler);
       } catch {}
+      this.reduceMotionHandler = undefined;
     }
-    this.windowId = windowId;
 
-    const runtimeCtx = new ComponentRuntimeContext(ui, mod);
-    this.runtimeContext = runtimeCtx;
-
-    mod.nshAttachUi(renderOwner, windowId, (batch: Batch): void => {
-      this.plugin.apply(batch, runtimeCtx);
-    });
-
-    if (resolvedWin !== undefined) {
-      this.bindWindowListeners(resolvedWin);
-      this.syncWindowMetrics();
-    }
-  }
-
-  private bindWindowListeners(win: window.Window): void {
-    if (this.mainWindow === win) {
-      return;
-    }
-    if (this.mainWindow !== undefined) {
-      try {
-        this.mainWindow.off("avoidAreaChange", this.onAvoidAreaChange);
-      } catch {}
-      try {
-        this.mainWindow.off("windowSizeChange", this.onWindowSizeChange);
-      } catch {}
-      try {
-        this.mainWindow.off("keyboardHeightChange", this.onKeyboardHeightChange);
-      } catch {}
-    }
-    this.mainWindow = win;
     try {
-      this.windowId = win.getWindowProperties().id;
+      this.plugin.dispose(this.runtimeContext);
     } catch {}
+    this.runtimeContext.deactivate();
+    void this.plugin.settled();
+
     try {
-      win.on("avoidAreaChange", this.onAvoidAreaChange);
-    } catch {}
-    try {
-      win.on("windowSizeChange", this.onWindowSizeChange);
-    } catch {}
-    try {
-      win.on("keyboardHeightChange", this.onKeyboardHeightChange);
+      this.mod.nshCloseSession(this.sessionId);
     } catch {}
   }
 
-  private detachUi(): void {
-    const win = this.mainWindow;
-    this.mainWindow = undefined;
-    if (win !== undefined) {
+  private bindWindowListeners(): void {
+    if (this.windowStage !== undefined) {
       try {
-        win.off("avoidAreaChange", this.onAvoidAreaChange);
-      } catch {}
-      try {
-        win.off("windowSizeChange", this.onWindowSizeChange);
-      } catch {}
-      try {
-        win.off("keyboardHeightChange", this.onKeyboardHeightChange);
+        this.windowStage.on("windowStageEvent", this.onWindowStageEvent);
       } catch {}
     }
-
-    const runtimeCtx = this.runtimeContext;
-    this.runtimeContext = undefined;
-    this.uiContext = undefined;
-    if (runtimeCtx !== undefined) {
-      try {
-        this.plugin.dispose(runtimeCtx);
-      } catch {}
-      runtimeCtx.deactivate();
-      void this.plugin.settled();
-    }
-
-    if (this.mod !== undefined && this.renderOwner) {
-      try {
-        this.mod.nshDetachUi(this.renderOwner);
-      } catch {}
-    }
-    this.renderOwner = "";
-  }
-
-  private syncWindowMetrics(): void {
-    const mod = this.mod;
-    const win = this.mainWindow;
-    const owner = this.renderOwner;
-    if (!mod || !win || !owner) {
-      return;
-    }
-    const visual: AvoidAreaPayload[] = [
-      safeAvoidArea(win, window.AvoidAreaType.TYPE_SYSTEM),
-      safeAvoidArea(win, window.AvoidAreaType.TYPE_CUTOUT),
-      safeAvoidArea(win, window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR),
-    ];
-    const keyboard = safeAvoidArea(win, window.AvoidAreaType.TYPE_KEYBOARD);
     try {
-      mod.nshUpdateWindow(owner, this.windowId, visual, keyboard);
+      this.mainWindow.on("avoidAreaChange", this.onAvoidAreaChange);
+    } catch {}
+    try {
+      this.mainWindow.on("windowSizeChange", this.onWindowSizeChange);
+    } catch {}
+    try {
+      this.mainWindow.on("keyboardHeightChange", this.onKeyboardHeightChange);
     } catch {}
   }
 
-  private subscribeProcessListeners(appCtx: common.ApplicationContext | undefined): void {
+  private subscribeLifecycleListeners(): void {
+    const appCtx = this.appContext;
     if (!appCtx) {
       return;
     }
-    if (this.envCallbackId === undefined) {
-      try {
-        this.envCallbackId = appCtx.on("environment", new HostEnvironmentListener(this));
-      } catch {}
-    }
-    if (this.lifecycleCallbackId === undefined) {
-      try {
-        this.lifecycleCallbackId = appCtx.on("abilityLifecycle", new HostLifecycleListener(this));
-      } catch {}
-    }
-    if (!this.stateListenerRegistered) {
-      try {
-        const listener = new HostStateChangeListener(this);
-        appCtx.on("applicationStateChange", listener);
-        this.stateListener = listener;
-        this.stateListenerRegistered = true;
-      } catch {}
-    }
+    try {
+      this.envCallbackId = appCtx.on("environment", new HostEnvironmentListener(this));
+    } catch {}
+    try {
+      this.lifecycleCallbackId = appCtx.on("abilityLifecycle", new HostLifecycleListener(this));
+    } catch {}
+    try {
+      const listener = new HostStateChangeListener(this);
+      appCtx.on("applicationStateChange", listener);
+      this.stateListener = listener;
+    } catch {}
   }
 
   private subscribeAccessibility(): void {
-    const mod = this.mod;
-    if (!mod) {
-      return;
-    }
-    if (this.screenReaderHandler === undefined) {
-      const srHandler = (enabled: boolean): void => {
+    const srHandler = (enabled: boolean): void => {
+      if (!this.closed) {
         try {
-          mod.nshUpdateAccessibility(enabled, undefined);
+          this.mod.nshUpdateAccessibility(this.sessionId, enabled, undefined);
         } catch {}
-      };
-      try {
-        accessibility.on("screenReaderStateChange", srHandler);
-        this.screenReaderHandler = srHandler;
-      } catch {}
-    }
+      }
+    };
+    try {
+      accessibility.on("screenReaderStateChange", srHandler);
+      this.screenReaderHandler = srHandler;
+    } catch {}
 
-    if (deviceInfo.sdkApiVersion >= 23 && this.reduceMotionHandler === undefined) {
+    if (deviceInfo.sdkApiVersion >= 23) {
       const rmHandler = (enabled: boolean): void => {
-        try {
-          mod.nshUpdateAccessibility(undefined, enabled);
-        } catch {}
+        if (!this.closed) {
+          try {
+            this.mod.nshUpdateAccessibility(this.sessionId, undefined, enabled);
+          } catch {}
+        }
       };
       try {
         accessibility.onAnimationReduceStateChange(rmHandler);
@@ -809,41 +657,59 @@ class NshHostRuntime {
     }
   }
 
+  private syncWindowMetrics(): void {
+    if (this.closed) {
+      return;
+    }
+    const visual: AvoidAreaPayload[] = [
+      safeAvoidArea(this.mainWindow, window.AvoidAreaType.TYPE_SYSTEM),
+      safeAvoidArea(this.mainWindow, window.AvoidAreaType.TYPE_CUTOUT),
+      safeAvoidArea(this.mainWindow, window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR),
+    ];
+    const keyboard = safeAvoidArea(this.mainWindow, window.AvoidAreaType.TYPE_KEYBOARD);
+    try {
+      this.mod.nshUpdateWindow(this.sessionId, this.windowId, visual, keyboard);
+    } catch {}
+  }
+
   private bundleName(): string {
     return (
-      this.abilityContext?.abilityInfo?.bundleName ??
+      this.abilityContext.abilityInfo?.bundleName ??
       this.appContext?.applicationInfo?.name ??
       ""
     );
   }
 
   private handleHostCommand(command: HostCommandPayload): void {
-    const mod = this.mod;
-    if (!mod) {
+    if (command.kind === "close") {
+      this.close();
       return;
     }
+    if (this.closed) {
+      return;
+    }
+
     if (command.kind === "status-bar") {
-      const win = this.mainWindow;
-      if (!win) {
-        return;
-      }
       const enabled = command.enabled ?? true;
       const animated = command.animated ?? false;
       const lightContent = command.lightContent ?? false;
-      win
+      this.mainWindow
         .setSpecificSystemBarEnabled("status", enabled, animated)
         .then((): Promise<void> => {
-          return win.setWindowSystemBarProperties({
+          return this.mainWindow.setWindowSystemBarProperties({
             statusBarContentColor: lightContent ? "#FFFFFFFF" : "#FF000000",
           });
         })
         .catch((error: Error): void => {
-          mod.nshReportHostError(`OHOS status bar update failed: ${String(error)}`);
+          this.mod.nshReportHostError(
+            this.sessionId,
+            `OHOS status bar update failed: ${String(error)}`,
+          );
         });
       return;
     }
 
-    if (command.kind === "announce") {
+    if (command.kind === "announce" || command.kind === "accessibility-live") {
       const text = command.text ?? "";
       if (!text) {
         return;
@@ -877,32 +743,33 @@ class NshHostRuntime {
     if (command.kind === "open-url") {
       const openId = command.openId ?? 0;
       const url = command.url ?? "";
-      const abilityCtx = this.abilityContext;
-      if (!url || !/^[A-Za-z][A-Za-z0-9+.-]*:\S+$/.test(url) || !abilityCtx) {
-        mod.nshOpenUrlResult(openId, false);
+      if (!url || !/^[A-Za-z][A-Za-z0-9+.-]*:\S+$/.test(url)) {
+        this.mod.nshOpenUrlResult(this.sessionId, openId, false);
         return;
       }
-      abilityCtx
+      this.abilityContext
         .openLink(url)
         .then((): void => {
-          mod.nshOpenUrlResult(openId, true);
+          this.mod.nshOpenUrlResult(this.sessionId, openId, true);
         })
         .catch((): void => {
-          abilityCtx
+          this.abilityContext
             .startAbility({
               action: "ohos.want.action.viewData",
               uri: url,
             })
             .then((): void => {
-              mod.nshOpenUrlResult(openId, true);
+              this.mod.nshOpenUrlResult(this.sessionId, openId, true);
             })
             .catch((): void => {
-              mod.nshOpenUrlResult(openId, false);
+              this.mod.nshOpenUrlResult(this.sessionId, openId, false);
             });
         });
     }
   }
 }
 
-const hostRuntime = new NshHostRuntime();
-hostRuntime.registerBootstrap();
+getNativeModule().nshRegisterSessionBinder(
+  deviceInfo.sdkApiVersion,
+  (uiContext: UIContext): number => HostSession.bind(uiContext),
+);

@@ -65,7 +65,7 @@ import { NshSurface } from '@nsh/ohos';
 @Entry
 @Component
 struct Index {
-  private surface: NshSurface = new NshSurface();
+  private surface: NshSurface = new NshSurface(this.getUIContext());
 
   aboutToAppear(): void {
     this.surface.setErrorHandler((message: string) => {
@@ -76,6 +76,10 @@ struct Index {
 
   aboutToDisappear(): void {
     this.surface.dispose();
+  }
+
+  onBackPress(): boolean {
+    return this.surface.onBackPress();
   }
 
   build() {
@@ -109,7 +113,7 @@ Column() {
 
 | 成员 | 说明 |
 |---|---|
-| `new NshSurface(options?: NshOptions)` | 创建一个空视图，可配置 VM 限制、授予的能力、资源目录和初始环境。 |
+| `new NshSurface(uiContext: UIContext, options?: NshOptions)` | 创建一个绑定到 `uiContext` 的空视图，可配置 VM 限制、授予的能力、资源目录和初始环境。 |
 | `readonly content: NodeContent` | 挂载到标准 `ContentSlot` 中的平台 `NodeContent` 对象。 |
 | `setErrorHandler(handler: (message: string) => void)` | 在 UI 线程上接收应用的致命错误（加载失败、未捕获的 JS 异常、VM 因触及限制而停止）。错误总会写入日志。 |
 | `setThemeOverrides(json?: string \| null)` | 把宿主的品牌加在应用的[主题](./tailwind.md#主题-token)之上：格式与 `nsh.json` 的 `"theme"` 相同的主题文件。立即生效，并作用于之后加载的应用；`null` 恢复应用自己的主题。无法解析时抛出异常。 |
@@ -127,6 +131,7 @@ Column() {
 | `connectDevServer(url: string)` | 开发用：从 `nsh dev` 服务器加载，每次修改后重新加载（需使用 `--dev` SDK）。 |
 | `disconnectDevServer()` | 断开开发服务器连接，保持当前应用继续运行。 |
 | `activate()` | 在多个视图之间切换时，将该视图标记为系统返回手势的当前活动目标。 |
+| `onBackPress(): boolean` | 将页面的 `onBackPress()` 事件路由到该视图所属的窗口会话；应用消费返回动作时返回 `true`。 |
 | `stop()` | 停止正在运行的应用并取消未完成的加载，保留视图、配置和已注册的原生组件供后续加载使用。 |
 | `dispose()` | 永久停止应用并释放该视图的原生资源。 |
 
@@ -194,7 +199,7 @@ surface.setOpenUrlHandler((url: string): boolean => {
 创建视图时通过 `NshOptions` 传入 VM 与节点限制：
 
 ```ts
-const surface = new NshSurface({
+const surface = new NshSurface(this.getUIContext(), {
   memoryBytes: 128 * 1024 * 1024, // 128 MiB 堆
   stackBytes: 4 * 1024 * 1024,    // 4 MiB 栈
   loadBudgetMs: 10_000,           // 加载 10 s
@@ -210,7 +215,7 @@ const surface = new NshSurface({
 通过 `NshOptions.capabilities` 传入宿主的授权（JSON 格式与 `nsh.json` 的 `capabilities` 相同）：
 
 ```ts
-const surface = new NshSurface({
+const surface = new NshSurface(this.getUIContext(), {
   capabilities: JSON.stringify({
     network: { hosts: ['api.example.com'] },
     webview: { hosts: ['help.example.com'] },

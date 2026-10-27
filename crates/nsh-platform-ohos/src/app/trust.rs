@@ -8,7 +8,10 @@ use std::{
 };
 
 use napi_derive_ohos::napi;
-use napi_ohos::{Env, Error, Result, bindgen_prelude::PromiseRaw};
+use napi_ohos::{
+    Env, Error, Result,
+    bindgen_prelude::{Object, PromiseRaw},
+};
 
 use crate::services::assets::AssetDirectory;
 
@@ -161,16 +164,23 @@ impl NshTrust {
         .await
     }
 
-    /// Verifies a signed HAP rawfile using the current Ability resource manager.
+    /// Verifies a signed HAP rawfile using the Ability resource manager bound to `uiContext`
+    /// (or an active host session when `uiContext` is omitted).
     #[napi(ts_return_type = "Promise<NshPackage>")]
     pub fn open_resource<'env>(
         &self,
         env: &'env Env,
         name: String,
+        #[napi(ts_arg_type = "import('@ohos.arkui.UIContext').UIContext")] ui_context: Option<
+            Object<'env>,
+        >,
     ) -> Result<PromiseRaw<'env, NshPackage>> {
-        crate::app::entry::ensure_host_ready(env)?;
         crate::app::session::resource_name(&name)?;
-        let host = crate::app::session::current()?;
+        let host = if let Some(ui_context) = ui_context {
+            crate::app::entry::bind_session(env, &ui_context)?
+        } else {
+            crate::app::session::any_active()?
+        };
         let permit = host.reserve_load()?;
         let store = self.store.clone();
         let assets = self.assets.clone();

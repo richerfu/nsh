@@ -33,11 +33,17 @@ use crate::app::{
 
 const MAX_RESOURCE: usize = 64 << 20;
 
-static SESSION: LazyLock<Mutex<Option<Arc<Services>>>> = LazyLock::new(Mutex::default);
+static NEXT_SESSION_ID: AtomicU32 = AtomicU32::new(1);
+static SESSIONS: LazyLock<Mutex<FxHashMap<u32, Weak<Services>>>> = LazyLock::new(Mutex::default);
+
+struct UiSession {
+    apply_batch: Option<FunctionRef<crate::interop::sdk::Batch, ()>>,
+    surfaces: Vec<crate::app::surface::LifecycleRoute>,
+}
 
 thread_local! {
-    static UI_BATCH_APPLIER: RefCell<Option<FunctionRef<crate::interop::sdk::Batch, ()>>> =
-        RefCell::default();
+    static UI_SESSIONS: RefCell<FxHashMap<u32, UiSession>> = RefCell::default();
+    static PENDING_SESSION: RefCell<Option<Arc<Services>>> = RefCell::default();
 }
 
 #[napi(object)]
@@ -90,16 +96,96 @@ pub(crate) struct HostCommand {
 pub(crate) type HostCommandCallback =
     ThreadsafeFunction<HostCommand, (), HostCommand, Status, false>;
 
-pub(crate) fn current() -> Result<Arc<Services>> {
-    let services = SESSION.lock().unwrap().clone().ok_or_else(|| {
-        Error::from_reason("initialize NSH host session before loading a surface")
-    })?;
+pub(crate) fn clear_pending() {
+    PENDING_SESSION.with(|slot| {
+        slot.borrow_mut().take();
+    });
+}
+
+pub(crate) fn find_by_window_name(window_name: &str) -> u32 {
+    if window_name.is_empty() {
+        return 0;
+    }
+    let found = {
+        let mut sessions = SESSIONS.lock().unwrap();
+        sessions.retain(|_, weak| weak.strong_count() > 0);
+        sessions.values().find_map(|weak| {
+            let services = weak.upgrade()?;
+            (services.window_name == window_name && services.check().is_ok()).then_some(services)
+        })
+    };
+    if let Some(services) = found {
+        let id = services.id;
+        PENDING_SESSION.with(|slot| *slot.borrow_mut() = Some(services));
+        id
+    } else {
+        0
+    }
+}
+
+pub(crate) fn get(session_id: u32) -> Result<Arc<Services>> {
+    let services = {
+        let mut sessions = SESSIONS.lock().unwrap();
+        sessions.retain(|_, weak| weak.strong_count() > 0);
+        sessions
+            .get(&session_id)
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| Error::from_reason("OHOS host session is closed"))?
+    };
     services.check()?;
     Ok(services)
 }
 
-pub(crate) fn set_ui_batch_applier(applier: Option<FunctionRef<crate::interop::sdk::Batch, ()>>) {
-    UI_BATCH_APPLIER.with(|slot| *slot.borrow_mut() = applier);
+pub(crate) fn take_pending_or_get(session_id: u32) -> Result<Arc<Services>> {
+    if let Some(services) = PENDING_SESSION.with(|slot| slot.borrow_mut().take())
+        && services.id == session_id
+    {
+        services.check()?;
+        return Ok(services);
+    }
+    get(session_id)
+}
+
+pub(crate) fn any_active() -> Result<Arc<Services>> {
+    let mut sessions = SESSIONS.lock().unwrap();
+    sessions.retain(|_, weak| weak.strong_count() > 0);
+    sessions
+        .values()
+        .filter_map(Weak::upgrade)
+        .find(|services| services.check().is_ok())
+        .ok_or_else(|| Error::from_reason("create an NshSurface or pass UIContext first"))
+}
+
+pub(crate) fn handle_back_any() -> bool {
+    let candidates: Vec<Arc<Services>> = {
+        let mut sessions = SESSIONS.lock().unwrap();
+        sessions.retain(|_, weak| weak.strong_count() > 0);
+        sessions
+            .values()
+            .filter_map(Weak::upgrade)
+            .filter(|s| s.check().is_ok() && s.is_foreground())
+            .collect()
+    };
+    candidates.into_iter().any(|host| host.handle_back())
+}
+
+pub(crate) fn close_ui_session(session_id: u32) {
+    let ui_session = UI_SESSIONS.with(|sessions| sessions.borrow_mut().remove(&session_id));
+    if let Some(ui_session) = ui_session {
+        for surface in ui_session.surfaces {
+            if let Err(error) = surface.dispose() {
+                log::error!("OHOS session surface teardown: {error}");
+            }
+        }
+    }
+    let services = SESSIONS
+        .lock()
+        .unwrap()
+        .remove(&session_id)
+        .and_then(|weak| weak.upgrade());
+    if let Some(services) = services {
+        services.close_internal(false);
+    }
 }
 
 enum Operation {
@@ -118,6 +204,8 @@ enum Operation {
 }
 
 pub(crate) struct Services {
+    id: u32,
+    window_name: String,
     active: AtomicBool,
     foreground: AtomicBool,
     ui_ready: AtomicBool,
@@ -132,7 +220,7 @@ pub(crate) struct Services {
     overlays: Mutex<Vec<(u64, Weak<Dispatcher>)>>,
     next_overlay: AtomicU64,
     keyboard: Mutex<Option<crate::input::keyboard::KeyboardWindow>>,
-    window_identity: Mutex<Option<(String, i32)>>,
+    window_id: AtomicU32,
     window_avoid: Mutex<Option<([AvoidArea; 3], AvoidArea)>>,
     command_tsfn: HostCommandCallback,
     next_open_id: AtomicU32,
@@ -181,48 +269,29 @@ impl Services {
         if !self.has_ui_context() {
             return Err(Error::from_reason("UI context is not ready").into());
         }
-        UI_BATCH_APPLIER.with(|slot| {
-            let borrow = slot.borrow();
-            let applier = borrow.as_ref().ok_or_else(|| {
-                crate::render::node::Error::Host(Error::from_reason(
-                    "ArkUI batch applier is not attached",
-                ))
-            })?;
+        UI_SESSIONS.with(|sessions| {
+            let borrow = sessions.borrow();
+            let applier = borrow
+                .get(&self.id)
+                .and_then(|slot| slot.apply_batch.as_ref())
+                .ok_or_else(|| {
+                    crate::render::node::Error::Host(Error::from_reason(
+                        "ArkUI batch applier is not attached",
+                    ))
+                })?;
             let callback = applier.borrow_back(env)?;
             callback.call(batch)?;
             Ok(())
         })
     }
 
-    pub(crate) fn set_render_window(self: &Arc<Self>, owner: &str, id: Option<i32>) -> Result<()> {
-        let id = id.unwrap_or(0);
-        if id < 0 {
-            return Err(Error::from_reason("platformWindowId must be nonnegative"));
-        }
-        *self.window_identity.lock().unwrap() = Some((owner.to_owned(), id));
-        if id > 0 && self.has_ui_context() {
-            self.ensure_keyboard_filter(id);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn clear_render_window(&self, owner: &str) {
-        let removed = {
-            let mut identity = self.window_identity.lock().unwrap();
-            if identity
-                .as_ref()
-                .is_some_and(|(current, _)| current == owner)
-            {
-                identity.take();
-                true
-            } else {
-                false
+    pub(crate) fn register_surface(&self, route: crate::app::surface::LifecycleRoute) {
+        UI_SESSIONS.with(|sessions| {
+            if let Some(slot) = sessions.borrow_mut().get_mut(&self.id) {
+                slot.surfaces.retain(|surface| surface.is_alive());
+                slot.surfaces.push(route);
             }
-        };
-        if removed {
-            self.keyboard.lock().unwrap().take();
-            *self.window_avoid.lock().unwrap() = None;
-        }
+        });
     }
 
     fn ensure_keyboard_filter(self: &Arc<Self>, id: i32) {
@@ -241,7 +310,6 @@ impl Services {
 
     pub(crate) fn update_window(
         self: &Arc<Self>,
-        owner: &str,
         id: i32,
         visual: [AvoidArea; 3],
         keyboard: AvoidArea,
@@ -253,18 +321,13 @@ impl Services {
         if id <= 0 {
             return Err(Error::from_reason("platformWindowId must be positive"));
         }
-        {
-            let mut current = self.window_identity.lock().unwrap();
-            let Some((current_owner, current_id)) = current.as_mut() else {
-                return Ok(());
-            };
-            if current_owner != owner || (*current_id > 0 && *current_id != id) {
-                return Err(Error::from_reason(
-                    "resolved window differs from the render owner",
-                ));
-            }
-            *current_id = id;
+        let current = self.window_id.load(Ordering::Acquire);
+        if current > 0 && current != id as u32 {
+            return Err(Error::from_reason(
+                "resolved window differs from the session window",
+            ));
         }
+        self.window_id.store(id as u32, Ordering::Release);
         self.ensure_keyboard_filter(id);
         *self.window_avoid.lock().unwrap() = Some((visual, keyboard));
         self.broadcast(|| Message::HostWindow(visual, keyboard));
@@ -488,40 +551,34 @@ impl Services {
         Ok(scale)
     }
 
-    pub(crate) fn set_ui_ready(self: &Arc<Self>, ready: bool) -> Result<()> {
-        if !ready {
-            self.keyboard.lock().unwrap().take();
-        }
-        self.ui_ready.store(ready, Ordering::Release);
-        self.broadcast(|| Message::NativeContext(ready));
-        if ready {
-            let id = self
-                .window_identity
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map_or(0, |(_, id)| *id);
-            if id > 0 {
-                self.ensure_keyboard_filter(id);
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn new(
+    pub(crate) fn create(
         init: HostInit,
+        window_name: String,
+        platform_window_id: i32,
         resource_manager: ResourceManager,
+        apply_batch: FunctionRef<crate::interop::sdk::Batch, ()>,
         command_tsfn: HostCommandCallback,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<u32> {
+        if window_name.is_empty() {
+            return Err(Error::from_reason("windowName must not be empty"));
+        }
+        if platform_window_id < 0 {
+            return Err(Error::from_reason("platformWindowId must be nonnegative"));
+        }
+        let id = NEXT_SESSION_ID
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .map_err(|_| Error::from_reason("OHOS host session IDs exhausted"))?;
         let environment = environment_from_init(&init);
         environment
             .clone()
             .apply(nsh_engine::Environment::default())?;
         let (queue, receiver) = mpsc::sync_channel(256);
         let services = Arc::new(Self {
+            id,
+            window_name,
             active: AtomicBool::new(true),
             foreground: AtomicBool::new(true),
-            ui_ready: AtomicBool::new(false),
+            ui_ready: AtomicBool::new(true),
             loads: AtomicUsize::new(0),
             resource_lock: Mutex::new(()),
             resource_manager: Arc::new(resource_manager),
@@ -533,7 +590,7 @@ impl Services {
             overlays: Mutex::default(),
             next_overlay: AtomicU64::new(1),
             keyboard: Mutex::default(),
-            window_identity: Mutex::default(),
+            window_id: AtomicU32::new(platform_window_id as u32),
             window_avoid: Mutex::default(),
             command_tsfn,
             next_open_id: AtomicU32::new(1),
@@ -542,7 +599,7 @@ impl Services {
         });
         let weak = Arc::downgrade(&services);
         thread::Builder::new()
-            .name("nsh-ohos-host".into())
+            .name(format!("nsh-ohos-host-{id}"))
             .spawn(move || {
                 while let Ok(operation) = receiver.recv() {
                     if matches!(operation, Operation::Stop) {
@@ -571,7 +628,25 @@ impl Services {
                 }
             })
             .map_err(|error| Error::from_reason(error.to_string()))?;
-        Ok(services)
+        if platform_window_id > 0 {
+            services.ensure_keyboard_filter(platform_window_id);
+        }
+        UI_SESSIONS.with(|sessions| {
+            sessions.borrow_mut().insert(
+                id,
+                UiSession {
+                    apply_batch: Some(apply_batch),
+                    surfaces: Vec::new(),
+                },
+            );
+        });
+        {
+            let mut sessions = SESSIONS.lock().unwrap();
+            sessions.retain(|_, weak| weak.strong_count() > 0);
+            sessions.insert(id, Arc::downgrade(&services));
+        }
+        PENDING_SESSION.with(|slot| *slot.borrow_mut() = Some(services));
+        Ok(id)
     }
 
     pub(crate) fn check(&self) -> Result<()> {
@@ -631,12 +706,22 @@ impl Services {
         Ok(())
     }
 
-    pub(crate) fn close(&self) {
+    fn close_internal(&self, notify_host: bool) {
+        self.ui_ready.store(false, Ordering::Release);
         if self.active.swap(false, Ordering::AcqRel) {
             self.keyboard.lock().unwrap().take();
             self.open_urls.lock().unwrap().clear();
             self.broadcast(|| Message::HostClosed);
             let _ = self.queue.try_send(Operation::Stop);
+            if notify_host {
+                let _ = self.command_tsfn.call(
+                    HostCommand {
+                        kind: "close".into(),
+                        ..Default::default()
+                    },
+                    ThreadsafeFunctionCallMode::NonBlocking,
+                );
+            }
         }
     }
 
@@ -880,7 +965,7 @@ fn read_clipboard_text() -> Result<Option<String>> {
 }
 
 pub(crate) fn idiom(device_type: &str) -> &'static str {
-    match device_type {
+    match device_type.trim() {
         "tablet" | "pad" => "pad",
         "2in1" | "pc" | "desktop" => "desktop",
         "tv" => "tv",
@@ -910,7 +995,9 @@ pub(crate) fn environment_from_config(
         }),
         idiom: device_type
             .filter(|v| !v.is_empty())
-            .map(|value| idiom(value).to_owned()),
+            .map(idiom)
+            .or_else(|| ohos_device_binding::device_type().map(idiom))
+            .map(str::to_owned),
         locale: (!language.is_empty()).then_some(language),
         ..NshEnvironment::default()
     }
@@ -931,10 +1018,9 @@ fn environment_from_init(init: &HostInit) -> NshEnvironment {
     env
 }
 
-pub(crate) fn replace_session(session: Option<Arc<Services>>) {
-    let previous = std::mem::replace(&mut *SESSION.lock().unwrap(), session);
-    if let Some(previous) = previous {
-        previous.close();
+impl Drop for Services {
+    fn drop(&mut self) {
+        self.close_internal(true);
     }
 }
 
@@ -972,17 +1058,12 @@ impl std::io::Read for ResourceReader {
         if count == 0 {
             return Ok(0);
         }
-        // The baseline binding returns a capacity-sized Vec; verify its actual
-        // consumption using the native file offset before publishing bytes.
-        let before = file.offset();
-        let bytes = file.read(count);
         let read = file
-            .offset()
-            .checked_sub(before)
-            .filter(|n| *n > 0 && *n as usize <= count)
-            .ok_or_else(|| std::io::Error::other("raw resource read failed"))?
-            as usize;
-        buffer[..read].copy_from_slice(&bytes[..read]);
+            .read_into(&mut buffer[..count])
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if read == 0 {
+            return Err(std::io::Error::other("raw resource read failed"));
+        }
         Ok(read)
     }
 }

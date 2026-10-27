@@ -142,17 +142,21 @@ impl Wrapper {
         outer.borrow_mut().on_custom_measure(move |event| {
             callback(|| {
                 if let Some(owner) = weak.upgrade() {
-                    let mut frame = owner.frame.get();
                     if let Some(modal) = owner.modal.borrow().as_ref() {
                         let size = modal.measure(event)?;
-                        frame.width = size.width;
-                        frame.height = size.height;
-                        owner.frame.set(frame);
+                        let mut raw = owner.raw_frame.get();
+                        raw.width = size.width;
+                        raw.height = size.height;
+                        owner.set_frame(raw)?;
                     }
-                    event.set_measured_size(
-                        (frame.width * owner.scale).round() as i32,
-                        (frame.height * owner.scale).round() as i32,
-                    )?;
+                    let frame = owner.frame.get();
+                    let mut width = (frame.width * owner.scale).round() as i32;
+                    let mut height = (frame.height * owner.scale).round() as i32;
+                    if !owner.clips_children() && !owner.children.borrow().is_empty() {
+                        width = width.max(1);
+                        height = height.max(1);
+                    }
+                    event.set_measured_size(width, height)?;
                     if let Some(wrapper) = owner.wrapper.borrow().as_ref()
                         && let Some(result) =
                             wrapper.with_child(|node| event.measure_child(node))?
@@ -188,7 +192,6 @@ impl Wrapper {
                 Ok(())
             })
         });
-        crate::render::node::node_receivers_only();
         Ok(Self {
             closed: std::cell::Cell::new(false),
             outer,
@@ -361,7 +364,17 @@ impl Node {
                     restored?;
                     return Err(error.into());
                 }
+                parent.mark_dirty(NodeDirtyFlag::NeedMeasure)?;
+                parent.mark_dirty(NodeDirtyFlag::NeedLayout)?;
             }
+            wrapper
+                .outer
+                .borrow()
+                .mark_dirty(NodeDirtyFlag::NeedMeasure)?;
+            wrapper
+                .outer
+                .borrow()
+                .mark_dirty(NodeDirtyFlag::NeedLayout)?;
             *self.wrapper.borrow_mut() = Some(wrapper);
             // The wrapper owns this node's semantics; native descendants keep their own entries.
             #[cfg(feature = "api-23")]

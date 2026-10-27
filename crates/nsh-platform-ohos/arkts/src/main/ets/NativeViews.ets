@@ -192,6 +192,8 @@ function nativeView(params: ViewParameters) {
   Stack({ alignContent: Alignment.TopStart }) {
     ContentSlot(params.entry.slot)
   }
+  .width(params.settings.width)
+  .height(params.settings.height)
   .attributeModifier(new ViewModifier(params.entry, params.settings))
   .onAccessibilityActionIntercept(
     (action: AccessibilityAction): AccessibilityActionInterceptResult => {
@@ -267,12 +269,20 @@ function textureContainer(params: ViewParameters) {
       params.entry.postMouseTouch(event);
     });
 }
+@Component
+struct DirectRoot {
+  entry!: ViewEntry;
+  @ObjectLink state!: ViewState;
+  build() {
+    nativeView({ entry: this.entry, settings: this.state.settings });
+  }
+}
 @Builder
 function viewContent(params: ViewParameters) {
   if (params.entry.textureNode) {
     textureContainer(params);
   } else {
-    nativeView(params);
+    DirectRoot({ entry: params.entry, state: params.entry.state });
   }
 }
 class ViewEntry {

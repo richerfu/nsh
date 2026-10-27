@@ -51,7 +51,9 @@ struct Playback {
     _window: NativeWindow,
     _source: Option<SourceFile>,
     generation: u64,
+    initialized: bool,
     prepared: bool,
+    applied_rate: f32,
 }
 pub(super) struct Worker {
     host: Arc<Services>,
@@ -314,9 +316,11 @@ impl Worker {
             _window: window,
             _source: file,
             generation: self.generation,
+            initialized: false,
             prepared: false,
+            applied_rate: 1.0,
         };
-        let prepared = (|| {
+        let configured = (|| {
             // SAFETY: immutable callback generation and Box storage survive until
             // successful explicit clear; callbacks only copy metadata and enqueue.
             unsafe { playback.player.set_info_callback(Some(info), userdata) }
@@ -335,24 +339,34 @@ impl Worker {
                     .set_fd(source.file().as_fd(), 0, size)
                     .map_err(|e| e.to_string())?;
             }
-            // SAFETY: playback owns its window reference and UI retains the producer
-            // through successful synchronous close; release runs on this worker.
-            unsafe {
-                playback
-                    .player
-                    .set_video_surface(NonNull::new(playback._window.raw().cast()).unwrap())
+            if matches!(playback.player.state(), Ok(av::STATE_INITIALIZED)) {
+                Self::initialize_playback(&mut playback)?;
             }
-            .map_err(|e| e.to_string())?;
-            playback.player.prepare().map_err(|e| e.to_string())
+            Ok(())
         })();
         self.playback = Some(playback);
-        if let Err(error) = prepared {
+        if let Err(error) = configured {
             self.retire_player();
             return Err(error);
         }
         self.ui = UiState::default();
         self.publish_ui();
         Ok(())
+    }
+    fn initialize_playback(playback: &mut Playback) -> std::result::Result<(), String> {
+        if playback.initialized {
+            return Ok(());
+        }
+        playback.initialized = true;
+        // SAFETY: playback owns its window reference and UI retains the producer
+        // through successful synchronous close; release runs on this worker.
+        unsafe {
+            playback
+                .player
+                .set_video_surface(NonNull::new(playback._window.raw().cast()).unwrap())
+        }
+        .map_err(|e| e.to_string())?;
+        playback.player.prepare().map_err(|e| e.to_string())
     }
     fn apply(&mut self) -> std::result::Result<(), String> {
         self.progress_failed = false;
@@ -374,10 +388,14 @@ impl Worker {
             .looping(props.repeat)
             .map_err(|e| e.to_string())?;
         if props.rate > 0.0 {
-            playback
-                .player
-                .playback_rate(props.rate.clamp(0.125, 4.0))
-                .map_err(|e| e.to_string())?;
+            let rate = props.rate.clamp(0.125, 4.0);
+            if (rate - playback.applied_rate).abs() > 1e-4 {
+                playback
+                    .player
+                    .playback_rate(rate)
+                    .map_err(|e| e.to_string())?;
+                playback.applied_rate = rate;
+            }
         }
         let paused = self.paused || props.rate == 0.0 || !self.ui_ready;
         let state = playback.player.state().map_err(|e| e.to_string())?;
@@ -397,6 +415,11 @@ impl Worker {
             self.progress_failed = false;
         }
         match notice {
+            NoticeKind::State(state) if state == av::STATE_INITIALIZED as i32 => {
+                if let Some(playback) = self.playback.as_mut() {
+                    Self::initialize_playback(playback)?;
+                }
+            }
             NoticeKind::State(state) if state == av::STATE_PREPARED as i32 => {
                 let playback = self.playback.as_mut().unwrap();
                 playback.prepared = true;

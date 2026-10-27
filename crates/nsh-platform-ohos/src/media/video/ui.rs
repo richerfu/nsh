@@ -183,10 +183,6 @@ impl Ui {
                     log::error!("Video seek queue: {error}");
                 }
             });
-        for node in [&button, &slider] {
-            node_registry::register(&node.borrow(), (*node).clone())?;
-            node.borrow().add_event_receiver()?;
-        }
         let ui = Rc::new(Self {
             token,
             native,
@@ -222,8 +218,6 @@ impl Ui {
                 });
             }
         });
-        node_registry::register(&ui.surface.borrow(), ui.surface.clone())?;
-        ui.surface.borrow().add_event_receiver()?;
         LIVE.with_borrow_mut(|live| {
             live.insert(token, Rc::downgrade(&ui));
         });
@@ -322,6 +316,12 @@ impl Ui {
             .borrow()
             .set_position(vec![0.0, (size.height - 48.0).max(0.0)])?;
         self.slider.borrow().width((size.width - 104.0).max(0.0))?;
+        if let Some(owner) = self.owner.upgrade() {
+            let _ = owner
+                .native
+                .borrow()
+                .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedMeasure);
+        }
         Ok(())
     }
     pub(super) fn begin_retirement(self: &Rc<Self>) {

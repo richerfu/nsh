@@ -40,17 +40,16 @@ use crate::{
 };
 
 pub(crate) type Queue = ThreadsafeFunction<Message, (), (), Status, false>;
-thread_local! {
-    // Weak lifecycle routes only: instances, content and engines belong to their host objects.
-    static SURFACES: RefCell<Vec<LifecycleRoute>> = RefCell::default();
-}
-struct LifecycleRoute {
+pub(crate) struct LifecycleRoute {
     state: Weak<RefCell<State>>,
     queue: std::sync::Weak<Queue>,
     disposed: Weak<Cell<bool>>,
 }
 impl LifecycleRoute {
-    fn dispose(&self) -> Result<()> {
+    pub(crate) fn is_alive(&self) -> bool {
+        self.state.strong_count() > 0 && !self.disposed.upgrade().is_some_and(|d| d.get())
+    }
+    pub(crate) fn dispose(&self) -> Result<()> {
         if let Some(disposed) = self.disposed.upgrade() {
             disposed.set(true);
         }
@@ -128,22 +127,49 @@ impl NshHostReply {
     }
 }
 
+enum SurfacePhase {
+    Empty,
+    Loading { token: u64 },
+    Staged(Box<App>),
+    Running(Runtime),
+    Closing(Option<Runtime>),
+    Closed,
+}
+impl SurfacePhase {
+    fn runtime(&self) -> Option<&Runtime> {
+        match self {
+            Self::Running(runtime) | Self::Closing(Some(runtime)) => Some(runtime),
+            _ => None,
+        }
+    }
+    fn take_runtime(&mut self) -> Option<Runtime> {
+        match self {
+            Self::Running(_) => {
+                let Self::Running(runtime) = std::mem::replace(self, Self::Empty) else {
+                    unreachable!()
+                };
+                Some(runtime)
+            }
+            Self::Closing(runtime) => runtime.take(),
+            _ => None,
+        }
+    }
+}
+
 struct State {
     viewport: Option<NativeNode>,
     viewport_mounted: bool,
-    config: Config,
+    config: Option<Config>,
+    host: Rc<RefCell<Option<Arc<crate::app::session::Services>>>>,
     components: Components,
     host_handlers: FxHashMap<String, Rc<HostHandler>>,
     open_url_handler: Option<Rc<OpenUrlHandler>>,
     errors: Errors,
-    runtime: Option<Runtime>,
-    bundle: Option<App>,
+    phase: SurfacePhase,
     size: (i32, i32),
     attached: bool,
     visible: bool,
-    loading: bool,
     disposed: Rc<Cell<bool>>,
-    closed: bool,
     generation: Arc<AtomicU64>,
     queue: std::sync::Weak<Queue>,
     #[cfg(feature = "dev")]
@@ -156,6 +182,16 @@ struct State {
     content: Option<ContentRoot>,
 }
 impl State {
+    fn config(&self) -> Result<&Config> {
+        self.config
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("surface is disposed"))
+    }
+    fn config_mut(&mut self) -> Result<&mut Config> {
+        self.config
+            .as_mut()
+            .ok_or_else(|| Error::from_reason("surface is disposed"))
+    }
     #[cfg(feature = "dev")]
     fn disconnect_dev(&mut self) {
         self.dev = None;
@@ -175,15 +211,17 @@ impl State {
             .ok_or_else(|| Error::from_reason("development session generation exhausted"))?;
         let session = crate::app::dev::Session::connect(address, self.queue.clone(), token)?;
         if self.overlay.is_none() {
+            let host = self.config()?.host.clone();
             self.overlay = Some(crate::app::dev::Overlay::new(
                 self.viewport.as_ref().expect("live surface viewport"),
-                self.config.host.clone(),
+                host,
                 self.queue.clone(),
             )?);
         }
+        let size = self.logical_size()?;
         let overlay = self.overlay.as_ref().unwrap();
         overlay.hide();
-        overlay.resize(self.logical_size()?)?;
+        overlay.resize(size)?;
         self.errors.overlay(Some(overlay));
         self.next_load()?;
         self.dev = Some(session);
@@ -219,9 +257,11 @@ impl State {
                 code,
                 source_map,
             } => {
-                let dev = self.dev.as_mut().unwrap();
-                if dev.running == Some((session, base))
-                    && self.runtime.as_ref().is_some_and(|runtime| {
+                let can_patch = self
+                    .dev
+                    .as_ref()
+                    .is_some_and(|dev| dev.running == Some((session, base)))
+                    && self.phase.runtime().is_some_and(|runtime| {
                         runtime.hot_update(
                             nsh_engine::HotUpdate {
                                 name: format!("hot-{version}.js"),
@@ -230,10 +270,12 @@ impl State {
                             },
                             (session, version),
                         )
-                    })
-                {
+                    });
+                if can_patch {
                     self.errors.clear();
-                    dev.running = Some((session, version));
+                    if let Some(dev) = &mut self.dev {
+                        dev.running = Some((session, version));
+                    }
                 }
             }
             DevEvent::Bundle {
@@ -267,10 +309,12 @@ impl State {
         Ok(())
     }
     fn check(&self) -> Result<()> {
-        if self.disposed.get() {
+        if self.disposed.get()
+            || matches!(self.phase, SurfacePhase::Closing(_) | SurfacePhase::Closed)
+        {
             return Err(Error::from_reason("surface is disposed"));
         }
-        self.config.host.check()
+        self.config()?.host.check()
     }
     fn next_load(&mut self) -> Result<u64> {
         self.check()?;
@@ -280,7 +324,9 @@ impl State {
             .checked_add(1)
             .ok_or_else(|| Error::from_reason("surface load generation exhausted"))?;
         self.generation.store(next, Ordering::Release);
-        self.loading = false;
+        if matches!(self.phase, SurfacePhase::Loading { .. }) {
+            self.phase = SurfacePhase::Empty;
+        }
         Ok(next)
     }
     fn accept(
@@ -290,52 +336,60 @@ impl State {
         source_map: Option<String>,
         chunks: Option<Arc<crate::app::chunks::ResourceChunks>>,
     ) -> Result<()> {
+        let config = self.config()?;
         let mut bundle = Bundle::source(source);
-        bundle.policy = self.config.policy.clone();
+        bundle.policy = config.policy.clone();
         bundle.source_map = source_map.map(Into::into);
-        let mut app = App::new(bundle, self.config.assets.clone());
+        let mut app = App::new(bundle, config.assets.clone());
         app.chunks = chunks;
         self.accept_app(env, app)
     }
     fn accept_app(&mut self, env: Env, mut app: App) -> Result<()> {
         self.check()?;
-        if let Some(runtime) = &self.runtime {
+        if let Some(runtime) = self.phase.runtime() {
             runtime.close()?;
         }
-        self.runtime = None;
+        let granted = self.config()?.policy.granted.clone();
         app.owner = self.queue.clone();
-        app.bundle.policy.granted = self.config.policy.granted.clone();
-        self.bundle = Some(app);
+        app.bundle.policy.granted = granted;
+        self.phase = SurfacePhase::Staged(Box::new(app));
         self.errors.clear();
         self.start(env)
     }
     fn start(&mut self, env: Env) -> Result<()> {
-        if !self.attached || self.size.0 <= 0 || self.size.1 <= 0 || self.bundle.is_none() {
+        if !self.attached
+            || self.size.0 <= 0
+            || self.size.1 <= 0
+            || !matches!(self.phase, SurfacePhase::Staged(_))
+        {
             return Ok(());
         }
         self.check()?;
-        let _ = crate::app::entry::ensure_host_ready(&env);
         let size = self.logical_size()?;
-        self.runtime = Some(Runtime::start(
+        let SurfacePhase::Staged(app) = std::mem::replace(&mut self.phase, SurfacePhase::Empty)
+        else {
+            unreachable!()
+        };
+        let config = self.config()?;
+        let runtime = Runtime::start(
             env,
             self.viewport
                 .as_ref()
                 .expect("live surface viewport")
                 .clone(),
-            self.bundle.take().unwrap(),
+            *app,
             size,
-            &self.config,
+            config,
             self.components.clone(),
             self.errors.clone(),
-        )?);
-        self.runtime
-            .as_ref()
-            .unwrap()
-            .set_attached(self.attached && self.visible)?;
+        )?;
+        runtime.set_attached(self.attached)?;
+        runtime.set_visible(self.visible)?;
+        self.phase = SurfacePhase::Running(runtime);
         Ok(())
     }
     fn logical_size(&self) -> Result<Size> {
-        let scale = self.config.host.scale()?;
+        let scale = self.config()?.host.scale()?;
         let width = self.size.0 as f32 / scale;
         let height = self.size.1 as f32 / scale;
         if width > 16384.0 || height > 16384.0 {
@@ -347,7 +401,9 @@ impl State {
         if matches!(message, Message::Dispose) {
             return self.close();
         }
-        if self.disposed.get() {
+        if self.disposed.get()
+            || matches!(self.phase, SurfacePhase::Closing(_) | SurfacePhase::Closed)
+        {
             return Ok(());
         }
         match message {
@@ -386,32 +442,30 @@ impl State {
             }
             Message::Size(width, height) => {
                 self.size = (width, height);
+                let size = self.logical_size()?;
                 #[cfg(feature = "dev")]
                 if let Some(overlay) = &self.overlay {
-                    overlay.resize(self.logical_size()?)?;
+                    overlay.resize(size)?;
                 }
                 if width > 0
                     && height > 0
-                    && let Some(runtime) = &self.runtime
+                    && let Some(runtime) = self.phase.runtime()
                 {
-                    runtime.resize(self.logical_size()?)?;
+                    runtime.resize(size)?;
                 }
                 self.start(env)
             }
             Message::Visible(visible) => {
                 self.visible = visible;
-                if let Some(runtime) = &self.runtime {
-                    runtime.set_attached(self.attached && visible)?;
+                if let Some(runtime) = self.phase.runtime() {
+                    runtime.set_visible(visible)?;
                 }
                 Ok(())
             }
             Message::Window(attached) => {
-                if attached {
-                    let _ = crate::app::entry::ensure_host_ready(&env);
-                }
                 self.attached = attached;
-                if let Some(runtime) = &self.runtime {
-                    runtime.set_attached(attached && self.visible)?;
+                if let Some(runtime) = self.phase.runtime() {
+                    runtime.set_attached(attached)?;
                 }
                 // A retained instance keeps its VM while removed from a layout,
                 // like an iOS UIView. Only stop/dispose/Ability destruction ends it.
@@ -460,24 +514,23 @@ impl State {
         #[cfg(feature = "dev")]
         self.disconnect_dev();
         self.next_load()?;
-        self.bundle = None;
-        if let Some(runtime) = &self.runtime {
+        if let Some(runtime) = self.phase.runtime() {
             runtime.close()?;
         }
-        self.runtime = None;
+        self.phase = SurfacePhase::Empty;
         Ok(())
     }
     fn close(&mut self) -> Result<()> {
-        if self.closed {
+        if matches!(self.phase, SurfacePhase::Closed) {
             return Ok(());
         }
         self.disposed.set(true);
         #[cfg(feature = "dev")]
         self.disconnect_dev();
         self.generation.store(0, Ordering::Release);
-        self.loading = false;
-        self.bundle = None;
-        if self.runtime.as_ref().is_some_and(Runtime::is_busy) {
+        let runtime = self.phase.take_runtime();
+        self.phase = SurfacePhase::Closing(runtime);
+        if self.phase.runtime().is_some_and(Runtime::is_busy) {
             // A host widget may dispose its surface from a mount callback.
             // Keep the tree alive until that callback's native stack returns.
             if let Some(queue) = self.queue.upgrade() {
@@ -486,9 +539,11 @@ impl State {
             return Ok(());
         }
         let mut failure = None;
-        if let Some(runtime) = &self.runtime {
+        if let SurfacePhase::Closing(runtime_slot) = &mut self.phase
+            && let Some(runtime) = runtime_slot
+        {
             match runtime.close() {
-                Ok(()) => self.runtime = None,
+                Ok(()) => *runtime_slot = None,
                 Err(error) => failure = Some(error),
             }
         }
@@ -529,7 +584,9 @@ impl State {
             return Err(native_error(error));
         }
         self.viewport_mounted = false;
-        self.closed = true;
+        self.phase = SurfacePhase::Closed;
+        self.config = None;
+        self.host.borrow_mut().take();
         Ok(())
     }
 }
@@ -538,7 +595,7 @@ impl Drop for State {
         if let Err(error) = self.close() {
             log::error!("OHOS surface teardown: {error}; retaining failed native owners");
             std::mem::forget((
-                self.runtime.take(),
+                self.phase.take_runtime(),
                 self.content.take(),
                 self.viewport.take(),
                 self.components.clone(),
@@ -557,18 +614,21 @@ pub struct NshSurface {
     components: Components,
     errors: Errors,
     disposed: Rc<Cell<bool>>,
-    host: Arc<crate::app::session::Services>,
+    host: Rc<RefCell<Option<Arc<crate::app::session::Services>>>>,
     queue: Arc<Queue>,
 }
 
 #[napi]
 impl NshSurface {
-    /// Creates an empty view with validated per-instance limits and capability grants.
-    /// The host session and UI context attachment initialize automatically if needed.
+    /// Creates an empty view bound to `uiContext` with validated per-instance limits and capability grants.
     #[napi(constructor)]
-    pub fn new(env: Env, options: Option<NshOptions>) -> Result<Self> {
-        crate::app::entry::ensure_host_ready(&env)?;
-        let host = crate::app::session::current()?;
+    pub fn new(
+        env: Env,
+        #[napi(ts_arg_type = "import('@ohos.arkui.UIContext').UIContext")] ui_context: Object<'_>,
+        options: Option<NshOptions>,
+    ) -> Result<Self> {
+        crate::init_logging();
+        let host = crate::app::entry::bind_session(&env, &ui_context)?;
         let config = Config::new(host.clone(), options.unwrap_or_default())?;
         host.scale()?;
         let content = ContentRoot::new(env)?;
@@ -576,23 +636,22 @@ impl NshSurface {
         let components = Components::default();
         let errors = Errors::default();
         let disposed = Rc::new(Cell::new(false));
+        let host_slot = Rc::new(RefCell::new(Some(host.clone())));
         let state = Rc::new(RefCell::new(State {
             content: Some(content),
             viewport: Some(viewport),
             viewport_mounted: false,
-            config,
+            config: Some(config),
+            host: host_slot.clone(),
             components: components.clone(),
             host_handlers: FxHashMap::default(),
             open_url_handler: None,
             errors: errors.clone(),
-            runtime: None,
-            bundle: None,
+            phase: SurfacePhase::Empty,
             size: (0, 0),
             attached: false,
             visible: true,
-            loading: false,
             disposed: disposed.clone(),
-            closed: false,
             generation: Arc::new(AtomicU64::new(1)),
             queue: std::sync::Weak::new(),
             #[cfg(feature = "dev")]
@@ -704,7 +763,6 @@ impl NshSurface {
                     Ok(())
                 })
             });
-            crate::render::node::node_receivers_only();
             state
                 .borrow_mut()
                 .content
@@ -715,21 +773,17 @@ impl NshSurface {
             state.borrow_mut().viewport_mounted = true;
             Ok(queue)
         })()?;
-        SURFACES.with(|surfaces| {
-            let mut surfaces = surfaces.borrow_mut();
-            surfaces.retain(|surface| surface.state.strong_count() > 0);
-            surfaces.push(LifecycleRoute {
-                state: Rc::downgrade(&state),
-                queue: Arc::downgrade(&queue),
-                disposed: Rc::downgrade(&disposed),
-            });
+        host.register_surface(LifecycleRoute {
+            state: Rc::downgrade(&state),
+            queue: Arc::downgrade(&queue),
+            disposed: Rc::downgrade(&disposed),
         });
         Ok(Self {
             state,
             components,
             errors,
             disposed,
-            host,
+            host: host_slot,
             queue,
         })
     }
@@ -739,7 +793,6 @@ impl NshSurface {
     #[napi(getter, ts_return_type = "import('@ohos.arkui.node').NodeContent")]
     pub fn content<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
         self.check()?;
-        let _ = crate::app::entry::ensure_host_ready(env);
         self.state
             .try_borrow()
             .map_err(reentry)?
@@ -769,9 +822,9 @@ impl NshSurface {
     /// Assets and declared capabilities come from the signed package.
     #[napi]
     pub fn run_package(&self, env: Env, package: &crate::app::trust::NshPackage) -> Result<()> {
-        self.check()?;
+        let host = self.host()?;
         let mut state = self.state.try_borrow_mut().map_err(reentry)?;
-        if state.runtime.as_ref().is_some_and(Runtime::is_busy) {
+        if state.phase.runtime().is_some_and(Runtime::is_busy) {
             return Err(reentry("engine callback"));
         }
         let prepared = package.take()?;
@@ -783,7 +836,7 @@ impl NshSurface {
             App::new(
                 prepared.bundle,
                 Arc::new(crate::services::assets::HostAssets::new(
-                    self.host.clone(),
+                    host,
                     Some(prepared.assets),
                 )),
             ),
@@ -804,19 +857,21 @@ impl NshSurface {
         name: String,
         source_map: Option<String>,
     ) -> Result<PromiseRaw<'env, ()>> {
-        self.check()?;
+        let host = self.host()?;
         crate::app::session::resource_name(&name)?;
-        let permit = self.host.reserve_load()?;
-        let (token, generation) = {
+        let permit = host.reserve_load()?;
+        let (token, generation, has_override) = {
             let mut state = self.state.try_borrow_mut().map_err(reentry)?;
             #[cfg(feature = "dev")]
             state.disconnect_dev();
+            if let Some(runtime) = state.phase.runtime() {
+                runtime.close()?;
+            }
             let token = state.next_load()?;
-            state.loading = true;
-            (token, state.generation.clone())
+            let has_override = state.config()?.policy.granted.is_some();
+            state.phase = SurfacePhase::Loading { token };
+            (token, state.generation.clone(), has_override)
         };
-        let host = self.host.clone();
-        let has_override = self.state.borrow().config.policy.granted.is_some();
         let chunks = crate::app::chunks::ResourceChunks::new(host.clone(), &name);
         let weak = Rc::downgrade(&self.state);
         let future = async move {
@@ -873,14 +928,17 @@ impl NshSurface {
         let promise = env.spawn_future_with_callback(future, move |env, result| {
             let state = weak.upgrade().ok_or_else(cancelled)?;
             let mut state = state.try_borrow_mut().map_err(reentry)?;
-            if state.generation.load(Ordering::Acquire) != token {
+            if state.generation.load(Ordering::Acquire) != token
+                || !matches!(state.phase, SurfacePhase::Loading { token: active } if active == token)
+            {
                 return Err(cancelled());
             }
-            state.loading = false;
+            state.phase = SurfacePhase::Empty;
             let result = state.check().and(result).and_then(|mut bundle| {
-                bundle.policy.granted = state.config.policy.granted.clone();
+                let config = state.config()?;
+                bundle.policy.granted = config.policy.granted.clone();
                 bundle.source_map = source_map.map(Into::into);
-                let mut app = App::new(bundle, state.config.assets.clone());
+                let mut app = App::new(bundle, config.assets.clone());
                 app.chunks = Some(chunks);
                 state.accept_app(*env, app)
             });
@@ -890,7 +948,10 @@ impl NshSurface {
             result
         });
         if promise.is_err() {
-            self.state.borrow_mut().loading = false;
+            let mut state = self.state.borrow_mut();
+            if matches!(state.phase, SurfacePhase::Loading { token: active } if active == token) {
+                state.phase = SurfacePhase::Empty;
+            }
         }
         promise
     }
@@ -907,9 +968,21 @@ impl NshSurface {
     /// input selects it automatically; hosts may select it when switching tabs.
     #[napi]
     pub fn activate(&self) -> Result<()> {
-        self.check()?;
-        self.host.select_surface(Arc::downgrade(&self.queue));
+        let host = self.host()?;
+        host.select_surface(Arc::downgrade(&self.queue));
         Ok(())
+    }
+
+    /// Routes a system back press to the window session owning this surface.
+    /// Returns `true` if a running Native Shell app consumed the back action.
+    #[napi]
+    pub fn on_back_press(&self) -> bool {
+        !self.disposed.get()
+            && self
+                .host
+                .borrow()
+                .as_ref()
+                .is_some_and(|host| host.handle_back())
     }
 
     /// Connects this development view to a server, preserving state through hot updates.
@@ -965,7 +1038,7 @@ impl NshSurface {
             }
         };
         let state = self.state.try_borrow().map_err(reentry)?;
-        state.config.channel.set_params(map);
+        state.config()?.channel.set_params(map);
         Ok(())
     }
 
@@ -982,7 +1055,7 @@ impl NshSurface {
         self.check()?;
         let state = self.state.try_borrow().map_err(reentry)?;
         state
-            .config
+            .config()?
             .channel
             .send(name, data.unwrap_or(serde_json::Value::Null))
             .map_err(Error::from_reason)
@@ -1003,7 +1076,7 @@ impl NshSurface {
         let mut state = self.state.try_borrow_mut().map_err(reentry)?;
         if let Some(handler) = handler {
             let weak = state.queue.clone();
-            state.config.channel.handle(name.clone(), move |call| {
+            state.config()?.channel.handle(name.clone(), move |call| {
                 if let Some(queue) = weak.upgrade() {
                     let status = queue.call(
                         Message::HostCall(call),
@@ -1016,7 +1089,7 @@ impl NshSurface {
             });
             state.host_handlers.insert(name, Rc::new(handler));
         } else {
-            state.config.channel.remove_handler(&name);
+            state.config()?.channel.remove_handler(&name);
             state.host_handlers.remove(&name);
         }
         Ok(())
@@ -1027,7 +1100,7 @@ impl NshSurface {
     pub fn remove_handler(&self, name: String) -> Result<()> {
         self.check()?;
         let mut state = self.state.try_borrow_mut().map_err(reentry)?;
-        state.config.channel.remove_handler(&name);
+        state.config()?.channel.remove_handler(&name);
         state.host_handlers.remove(&name);
         Ok(())
     }
@@ -1046,7 +1119,7 @@ impl NshSurface {
         let mut state = self.state.try_borrow_mut().map_err(reentry)?;
         if let Some(handler) = handler {
             let weak = state.queue.clone();
-            state.config.channel.handle_open_url(move |request| {
+            state.config()?.channel.handle_open_url(move |request| {
                 if let Some(queue) = weak.upgrade() {
                     let status = queue.call(
                         Message::OpenUrl(request),
@@ -1059,7 +1132,7 @@ impl NshSurface {
             });
             state.open_url_handler = Some(Rc::new(handler));
         } else {
-            state.config.channel.remove_open_url_handler();
+            state.config()?.channel.remove_open_url_handler();
             state.open_url_handler = None;
         }
         Ok(())
@@ -1079,10 +1152,10 @@ impl NshSurface {
             ),
         };
         let mut state = self.state.try_borrow_mut().map_err(reentry)?;
-        state.config.host_tokens = tokens.clone();
-        if let Some(runtime) = &state.runtime {
-            runtime.set_tokens(tokens)?;
+        if let Some(runtime) = state.phase.runtime() {
+            runtime.set_tokens(tokens.clone())?;
         }
+        state.config_mut()?.host_tokens = tokens;
         Ok(())
     }
 
@@ -1092,10 +1165,10 @@ impl NshSurface {
         self.check()?;
         let mut state = self.state.try_borrow_mut().map_err(reentry)?;
         changes.clone().apply(nsh_engine::Environment::default())?;
-        if let Some(runtime) = &state.runtime {
+        if let Some(runtime) = state.phase.runtime() {
             runtime.set_environment(changes.clone())?;
         }
-        state.config.environment.merge(changes);
+        state.config_mut()?.environment.merge(changes);
         Ok(())
     }
 
@@ -1189,8 +1262,8 @@ impl NshSurface {
                 .state
                 .try_borrow()
                 .map_err(reentry)?
-                .runtime
-                .as_ref()
+                .phase
+                .runtime()
                 .is_some_and(Runtime::is_running))
     }
     /// Whether this instance has been permanently released.
@@ -1206,7 +1279,10 @@ impl NshSurface {
             return Ok(false);
         }
         let state = self.state.try_borrow().map_err(reentry)?;
-        Ok(state.loading || state.bundle.is_some())
+        Ok(matches!(
+            state.phase,
+            SurfacePhase::Loading { .. } | SurfacePhase::Staged(_)
+        ))
     }
     /// Latest load, engine or native mount error; cleared by a new accepted source.
     #[napi(getter)]
@@ -1215,25 +1291,27 @@ impl NshSurface {
     }
 }
 impl NshSurface {
-    fn check(&self) -> Result<()> {
+    fn host(&self) -> Result<Arc<crate::app::session::Services>> {
         if self.disposed.get() {
             return Err(Error::from_reason("surface is disposed"));
         }
-        self.host.check()
+        let host = self
+            .host
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| Error::from_reason("surface is disposed"))?;
+        host.check()?;
+        Ok(host)
+    }
+    fn check(&self) -> Result<()> {
+        self.host().map(|_| ())
     }
 }
 impl Drop for NshSurface {
     fn drop(&mut self) {
         if let Err(error) = self.dispose() {
             log::error!("OHOS surface finalization: {error}");
-        }
-    }
-}
-pub(crate) fn dispose_all() {
-    let surfaces = SURFACES.with(|surfaces| std::mem::take(&mut *surfaces.borrow_mut()));
-    for surface in surfaces {
-        if let Err(error) = surface.dispose() {
-            log::error!("OHOS session teardown: {error}");
         }
     }
 }

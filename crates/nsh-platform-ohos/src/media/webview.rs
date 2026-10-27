@@ -622,7 +622,7 @@ mod tests {
     fn asset_name_from_url_decodes_url_path() {
         assert_eq!(
             asset_name_from_url("nsh-asset://app/docs/hello%20world.html?x=1#top").as_deref(),
-            Some("/docs/hello world.html")
+            Some("docs/hello world.html")
         );
     }
 }

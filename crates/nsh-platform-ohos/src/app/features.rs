@@ -65,16 +65,7 @@ impl NshCapabilities {
 pub fn get_capabilities() -> NshCapabilities {
     let mut version = RUNTIME_API_VERSION.load(Ordering::Relaxed);
     if version <= 0 {
-        type GetSdkApiVersion = unsafe extern "C" fn() -> std::ffi::c_int;
-        version = unsafe {
-            let sym = libc::dlsym(libc::RTLD_DEFAULT, c"OH_GetSdkApiVersion".as_ptr());
-            if sym.is_null() {
-                0
-            } else {
-                let f: GetSdkApiVersion = std::mem::transmute(sym);
-                f().max(0)
-            }
-        };
+        version = ohos_device_binding::sdk_api_version() as i32;
         if version > 0 {
             RUNTIME_API_VERSION.store(version, Ordering::Relaxed);
         }

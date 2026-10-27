@@ -65,7 +65,7 @@ import { NshSurface } from '@nsh/ohos';
 @Entry
 @Component
 struct Index {
-  private surface: NshSurface = new NshSurface();
+  private surface: NshSurface = new NshSurface(this.getUIContext());
 
   aboutToAppear(): void {
     this.surface.setErrorHandler((message: string) => {
@@ -76,6 +76,10 @@ struct Index {
 
   aboutToDisappear(): void {
     this.surface.dispose();
+  }
+
+  onBackPress(): boolean {
+    return this.surface.onBackPress();
   }
 
   build() {
@@ -109,7 +113,7 @@ The slot's size is the app's window: NSH lays the app out at the slot's size and
 
 | Member | Description |
 |---|---|
-| `new NshSurface(options?: NshOptions)` | Create an empty surface with optional VM limits, granted capabilities, asset directory and initial environment. |
+| `new NshSurface(uiContext: UIContext, options?: NshOptions)` | Create an empty surface bound to `uiContext` with optional VM limits, granted capabilities, asset directory and initial environment. |
 | `readonly content: NodeContent` | The platform `NodeContent` to mount inside a standard `ContentSlot`. |
 | `setErrorHandler(handler: (message: string) => void)` | Receive fatal app errors on the UI thread (failed loads, uncaught JS exceptions, VM stopped by a limit). Errors are always logged. |
 | `setThemeOverrides(json?: string \| null)` | Put the host's brand over the app's [theme](./tailwind.md#theme-tokens): a theme file in the format of `nsh.json`'s `"theme"`. Applies at once and to apps loaded later; `null` restores the app's own theme. Throws if the JSON does not parse. |
@@ -127,6 +131,7 @@ The slot's size is the app's window: NSH lays the app out at the slot's size and
 | `connectDevServer(url: string)` | Development: load from a `nsh dev` server and reload on every change (requires the `--dev` SDK). |
 | `disconnectDevServer()` | Disconnect from the dev server while keeping the current app running. |
 | `activate()` | Mark this surface as the active target for the system back gesture when switching between multiple surfaces. |
+| `onBackPress(): boolean` | Route a page `onBackPress()` event to this surface's window session; returns `true` when consumed by the app. |
 | `stop()` | Stop the running app and cancel pending loads while keeping the surface, its options and registered components for later loads. |
 | `dispose()` | Permanently stop the app and release the surface's native resources. |
 
@@ -194,7 +199,7 @@ surface.setOpenUrlHandler((url: string): boolean => {
 Pass VM and node limits in `NshOptions` when creating the surface:
 
 ```ts
-const surface = new NshSurface({
+const surface = new NshSurface(this.getUIContext(), {
   memoryBytes: 128 * 1024 * 1024, // 128 MiB heap
   stackBytes: 4 * 1024 * 1024,    // 4 MiB stack
   loadBudgetMs: 10_000,           // 10 s to load
@@ -210,7 +215,7 @@ The defaults are: 256 MiB heap, 4 MiB stack, 10 s to load, 2 s per call, 200,000
 Pass the host's capability grant in `NshOptions.capabilities` (a JSON string in the same format as `capabilities` in `nsh.json`):
 
 ```ts
-const surface = new NshSurface({
+const surface = new NshSurface(this.getUIContext(), {
   capabilities: JSON.stringify({
     network: { hosts: ['api.example.com'] },
     webview: { hosts: ['help.example.com'] },

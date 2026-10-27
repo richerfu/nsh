@@ -17,7 +17,7 @@ cp "$OHOS_NDK_HOME/native/llvm/lib/aarch64-linux-ohos/libc++_shared.so" "$APP/en
 
 BUILD_FLAGS=()
 if [[ "${NSH_SPLIT:-0}" == 1 ]]; then BUILD_FLAGS+=(--split); fi
-"${NSH_CLI:-$ROOT/target/debug/nsh}" build "$ROOT/${NSH_EXAMPLE:-examples/embedded}" \
+"${NSH_CLI:-$ROOT/target/debug/nsh}" build "$ROOT/${NSH_EXAMPLE:-examples/gallery}" \
   -o "$APP/entry/src/main/resources/rawfile" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"}
 
 cd "$APP"
