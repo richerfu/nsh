@@ -32,6 +32,10 @@ mod video_source;
 #[path = "../../src/app/dev/presentation.rs"]
 mod dev_presentation;
 
+#[path = "../../src/input/editor_state.rs"]
+#[allow(dead_code)]
+mod editor_state;
+
 #[path = "../../src/services/executor.rs"]
 mod executor;
 

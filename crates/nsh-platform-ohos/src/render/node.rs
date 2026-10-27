@@ -79,7 +79,7 @@ impl Default for AppliedStyle {
             background_color: 0,
             border_radius: [0.0; 4],
             border_width: [0.0; 4],
-            border_color: [0; 4],
+            border_color: [0xff000000; 4],
             border_style: 0,
             shadow: None,
             ink_outset: 0.0,
@@ -104,6 +104,7 @@ pub(crate) struct Node {
     pub(crate) scene_prepared: Cell<bool>,
     pub(crate) modal: RefCell<Option<Rc<crate::navigation::modal::Modal>>>,
     pub(crate) screen: RefCell<Option<Rc<crate::navigation::stack::Screen>>>,
+    pub(crate) raw_frame: Cell<Rect>,
     pub(crate) frame: Cell<Rect>,
     pub(crate) parent: Cell<Option<NodeId>>,
     pub(crate) parent_node: RefCell<Weak<Node>>,
@@ -115,8 +116,7 @@ pub(crate) struct Node {
     pub(crate) image: RefCell<Option<Rc<crate::media::image::ImageView>>>,
     pub(crate) component: RefCell<Option<crate::interop::component::Instance>>,
     pub(crate) component_slots: RefCell<Vec<std::sync::Arc<str>>>,
-    pub(crate) component_animated:
-        RefCell<Vec<Option<nsh_core::animation::AnimatedPropValue>>>,
+    pub(crate) component_animated: RefCell<Vec<Option<nsh_core::animation::AnimatedPropValue>>>,
     pub(crate) video: RefCell<Option<crate::media::video::Video>>,
     pub(crate) web: RefCell<Option<crate::media::webview::WebView>>,
     active: Cell<bool>,
@@ -174,6 +174,7 @@ impl Node {
             scene_prepared: Cell::new(false),
             modal: RefCell::new(None),
             screen: RefCell::new(None),
+            raw_frame: Cell::new(Rect::default()),
             frame: Cell::new(Rect::default()),
             parent: Cell::new(None),
             parent_node: RefCell::default(),
@@ -283,7 +284,6 @@ impl Node {
                 Ok(())
             })
         });
-        node_receivers_only();
         if kind == ViewKind::Modal {
             node.ensure_wrapper()?;
         }
@@ -343,7 +343,7 @@ impl Node {
         } else {
             // Native containers can add layout offsets (for example a screen header).
             let origin = parent.native.borrow().layout_position_in_window()?;
-            let child = self.native.borrow().layout_position_in_window()?;
+            let child = self.mounted().borrow().layout_position_in_window()?;
             ((child.x - origin.x) as f64, (child.y - origin.y) as f64)
         };
         Ok(self
@@ -384,7 +384,11 @@ impl Node {
         (self.platform.get().safe_area.top.0 - y).max(0.0)
     }
     pub(crate) fn clips_children(&self) -> bool {
-        self.style.borrow().overflow_hidden || self.kind == ViewKind::Scroll
+        self.style.borrow().overflow_hidden
+            || self.kind == ViewKind::Scroll
+            || self.modal.borrow().as_ref().is_some_and(|modal| {
+                modal.presentation() != nsh_core::ModalPresentation::FullScreen
+            })
     }
     pub(crate) fn scene_active(&self) -> bool {
         self.scene
@@ -540,6 +544,9 @@ impl Node {
             if keyboard.focused == Some(self.id) {
                 keyboard.focused = None;
             }
+            if keyboard.input == Some(self.id) {
+                keyboard.input = None;
+            }
         }
         if let Some(component) = self.component.borrow().as_ref() {
             component.deactivate();
@@ -563,8 +570,16 @@ impl Node {
                     let mut keyboard = route.keyboard.lock().unwrap();
                     if event == EventKind::Focus {
                         keyboard.focused = Some(self.id);
-                    } else if keyboard.focused == Some(self.id) {
-                        keyboard.focused = None;
+                        if self.kind == ViewKind::Input {
+                            keyboard.input = Some(self.id);
+                        }
+                    } else {
+                        if keyboard.focused == Some(self.id) {
+                            keyboard.focused = None;
+                        }
+                        if keyboard.input == Some(self.id) {
+                            keyboard.input = None;
+                        }
                     }
                 }
                 callback(|| {
@@ -619,19 +634,41 @@ impl Node {
     pub(crate) fn set_events(self: &Rc<Self>, events: EventMask) -> Result<()> {
         self.interaction.events(self, events)
     }
-    pub(crate) fn set_frame(&self, frame: Rect) -> Result<()> {
+    fn adjusted_frame(&self, mut frame: Rect) -> Rect {
+        if let Some(modal) = self.modal.borrow().as_ref()
+            && let Some(size) = modal.sync_metrics()
+        {
+            frame.width = size.width;
+            frame.height = size.height;
+        }
+        if self.kind != ViewKind::HeaderItem
+            && let Some(parent) = self.parent_node.borrow().upgrade()
+            && let Some(screen) = parent.screen.borrow().as_ref()
+        {
+            let offset = screen.large_title_offset();
+            if offset > 0.0 && frame.y < offset {
+                let shift = offset - frame.y;
+                frame.y += shift;
+                frame.height = (frame.height - shift).max(0.0);
+            }
+        }
+        frame
+    }
+    pub(crate) fn set_frame(&self, raw: Rect) -> Result<()> {
+        self.raw_frame.set(raw);
+        let frame = self.adjusted_frame(raw);
         let old = self.frame.replace(frame);
         if old == frame {
             return Ok(());
         }
         self.invalidate_ink(self.applied.get().ink_outset)?;
         let size_changed = old.width != frame.width || old.height != frame.height;
-        if size_changed && let Some(canvas) = self.canvas.borrow().as_ref() {
-            canvas.invalidate()?;
-        }
-        self.update_wrapper()?;
-        self.interaction.hit_region(self)?;
         if size_changed {
+            if let Some(canvas) = self.canvas.borrow().as_ref() {
+                canvas.invalidate()?;
+            }
+            self.update_wrapper()?;
+            self.interaction.hit_region(self)?;
             if let Some(component) = self.component.borrow().as_ref() {
                 component.native.borrow().width(frame.width)?;
                 component.native.borrow().height(frame.height)?;
@@ -651,6 +688,8 @@ impl Node {
             {
                 self.transform(&style, |_| None)?;
             }
+            drop(style);
+            self.animator.apply_node(self)?;
             if let Some(scroll) = self.scroll.borrow().as_ref() {
                 scroll.viewport(Size::new(frame.width, frame.height))?;
             }
@@ -664,10 +703,26 @@ impl Node {
             {
                 self.native.borrow().mark_dirty(NodeDirtyFlag::NeedRender)?;
             }
+            self.native
+                .borrow()
+                .mark_dirty(NodeDirtyFlag::NeedMeasure)?;
         }
-        self.native
-            .borrow()
-            .mark_dirty(NodeDirtyFlag::NeedMeasure)?;
+        self.native.borrow().mark_dirty(NodeDirtyFlag::NeedLayout)?;
+        if self.wrapper.borrow().is_some() {
+            let mounted = self.mounted();
+            if size_changed {
+                mounted.borrow().mark_dirty(NodeDirtyFlag::NeedMeasure)?;
+            }
+            mounted.borrow().mark_dirty(NodeDirtyFlag::NeedLayout)?;
+        }
+        if let Some(parent) = self.parent_node.borrow().upgrade() {
+            let container = parent.child_container();
+            let container = container.borrow();
+            if size_changed {
+                container.mark_dirty(NodeDirtyFlag::NeedMeasure)?;
+            }
+            container.mark_dirty(NodeDirtyFlag::NeedLayout)?;
+        }
         Ok(())
     }
     fn navigated(&self) -> bool {
@@ -688,9 +743,11 @@ impl Node {
     }
     pub(crate) fn animated_frame(
         self: &Rc<Self>,
-        frame: Rect,
+        raw: Rect,
         animation: Option<&nsh_core::LayoutAnimation>,
     ) -> Result<()> {
+        self.raw_frame.set(raw);
+        let frame = self.adjusted_frame(raw);
         let target = self.live.borrow().as_ref().and_then(|l| l.frame_target());
         if target.unwrap_or(self.frame.get()) == frame {
             return Ok(());
@@ -707,7 +764,7 @@ impl Node {
                 return Ok(());
             }
         }
-        self.set_frame(frame)
+        self.set_frame(raw)
     }
     pub(crate) fn inserted(
         self: &Rc<Self>,
@@ -854,14 +911,16 @@ impl Node {
                             node.decoration.outline(
                                 &canvas,
                                 &node.style.borrow(),
-                                Size::new(frame.width, frame.height),
+                                Size::new(
+                                    (frame.width * node.scale).round() / node.scale,
+                                    (frame.height * node.scale).round() / node.scale,
+                                ),
                                 node.scale,
                             );
                         }
                         Ok(())
                     })
                 });
-            node_receivers_only();
         }
         if self.style.borrow().effects != style.effects
             || self.style.borrow().outline != style.outline
@@ -920,7 +979,24 @@ impl Node {
         )
     }
     fn apply_background_color(&self, color: nsh_core::Color) -> Result<()> {
-        let bg = argb(color);
+        let default_surface_bg = self.kind == ViewKind::Screen
+            || self.modal.borrow().as_ref().is_some_and(|modal| {
+                modal.presentation() != nsh_core::ModalPresentation::FullScreen
+            });
+        let bg = if default_surface_bg && color.is_transparent() {
+            if self
+                .appearance
+                .get()
+                .resolve(self.platform.get().color_scheme)
+                == nsh_engine::ColorScheme::Dark
+            {
+                0xff121212
+            } else {
+                0xffffffff
+            }
+        } else {
+            argb(color)
+        };
         let mut applied = self.applied.get();
         if applied.background_color != bg {
             self.native.borrow().background_color(bg)?;
@@ -933,12 +1009,21 @@ impl Node {
         let corners = style
             .corner_radius
             .map(|r| r.unwrap_or(style.border_radius).0);
-        let radius = [
+        let mut radius = [
             corners.top_left,
             corners.top_right,
             corners.bottom_left,
             corners.bottom_right,
         ];
+        if let Some(modal) = self.modal.borrow().as_ref()
+            && radius == [0.0; 4]
+        {
+            radius = match modal.presentation() {
+                nsh_core::ModalPresentation::FullScreen => [0.0; 4],
+                nsh_core::ModalPresentation::PageSheet => [16.0, 16.0, 0.0, 0.0],
+                nsh_core::ModalPresentation::FormSheet => [16.0; 4],
+            };
+        }
         let widths = style.borders.widths.to_array().map(|v| v.0);
         let colors = style.borders.colors.map(argb);
         let border_style = match style.borders.style {
@@ -1061,6 +1146,12 @@ impl Node {
                 .set_bool_attribute(Attribute::Clip, clip)?;
             applied.clip = clip;
             self.applied.set(applied);
+            let frame = self.frame.get();
+            if frame.width <= 0.0 || frame.height <= 0.0 {
+                self.native
+                    .borrow()
+                    .mark_dirty(NodeDirtyFlag::NeedMeasure)?;
+            }
         }
         Ok(())
     }
@@ -1083,6 +1174,7 @@ impl Node {
         self.apply_shadow(style.shadow)?;
         self.apply_ink_outset(style)?;
         self.apply_clip()?;
+        self.animator.apply_node(self)?;
         Ok(())
     }
     pub(crate) fn pin(&self, x: f32, y: f32) -> Result<()> {
@@ -1096,6 +1188,7 @@ impl Node {
                 },
             )?;
             self.transform(&self.style.borrow(), |_| None)?;
+            self.animator.apply_node(self)?;
         }
         Ok(())
     }
@@ -1109,6 +1202,8 @@ impl Node {
             if old.1 != y {
                 self.transform(&style, |_| None)?;
             }
+            drop(style);
+            self.animator.apply_node(self)?;
         }
         Ok(())
     }
@@ -1293,6 +1388,13 @@ impl Node {
             self.backface_away.set(false);
             let visibility = if !self.header_item_visible() {
                 2
+            } else if self
+                .screen
+                .borrow()
+                .as_ref()
+                .is_some_and(|screen| !screen.paint_visible())
+            {
+                1
             } else {
                 i32::from(style.hidden)
             };
@@ -1346,6 +1448,13 @@ impl Node {
             .set(style.backface_hidden && m.0[10] < 0.0);
         let visibility = if !self.header_item_visible() {
             2
+        } else if self
+            .screen
+            .borrow()
+            .as_ref()
+            .is_some_and(|screen| !screen.paint_visible())
+        {
+            1
         } else {
             i32::from(style.hidden || self.backface_away.get())
         };
@@ -1401,6 +1510,8 @@ impl Node {
             if old.1 != x {
                 self.transform(&style, |_| None)?;
             }
+            drop(style);
+            self.animator.apply_node(self)?;
         }
         Ok(())
     }
@@ -1501,18 +1612,22 @@ impl Node {
             self.emit(event, payload);
         }
     }
-    pub(crate) fn press_payload(&self, x: f32, y: f32) -> EventPayload {
+    pub(crate) fn pointer_positions(
+        &self,
+        x: f32,
+        y: f32,
+    ) -> (nsh_core::Point<Points>, nsh_core::Point<Points>) {
         let position = nsh_core::Point::new(Points(x), Points(y));
         let mut page_position = position;
         if self.id != nsh_core::ROOT_ID
             && self.kind != ViewKind::Modal
-            && let Ok(node_pos) = self.native.borrow().layout_position_in_window()
+            && let Ok(node_pos) = self.mounted().borrow().layout_position_in_window()
         {
             let mut top = self.parent_node.borrow().upgrade();
             let mut root_origin = None;
             while let Some(parent) = top {
                 if parent.id == nsh_core::ROOT_ID || parent.kind == ViewKind::Modal {
-                    root_origin = parent.native.borrow().layout_position_in_window().ok();
+                    root_origin = parent.mounted().borrow().layout_position_in_window().ok();
                     break;
                 }
                 top = parent.parent_node.borrow().upgrade();
@@ -1524,11 +1639,31 @@ impl Node {
                 );
             }
         }
+        (position, page_position)
+    }
+    pub(crate) fn press_payload(&self, x: f32, y: f32) -> EventPayload {
+        let (position, page_position) = self.pointer_positions(x, y);
         EventPayload::Press(nsh_core::PressEvent {
             position,
             page_position,
             modifiers: Default::default(),
             clicks: 1,
+        })
+    }
+    pub(crate) fn hover_payload(&self, x: f32, y: f32) -> EventPayload {
+        let (position, page_position) = self.pointer_positions(x, y);
+        EventPayload::Hover(nsh_core::HoverEvent {
+            position,
+            page_position,
+            modifiers: Default::default(),
+        })
+    }
+    pub(crate) fn context_menu_payload(&self, x: f32, y: f32) -> EventPayload {
+        let (position, page_position) = self.pointer_positions(x, y);
+        EventPayload::ContextMenu(nsh_core::ContextMenuEvent {
+            position,
+            page_position,
+            modifiers: Default::default(),
         })
     }
     pub(crate) fn press_feedback_allowed(&self) -> bool {
@@ -1560,11 +1695,13 @@ impl Node {
             || self
                 .dispatcher
                 .upgrade()
-                .is_none_or(|route| route.keyboard.lock().unwrap().focused.is_none())
+                .is_none_or(|route| route.keyboard.lock().unwrap().input.is_none())
     }
     fn measure(&self, event: &NodeCustomEvent) -> Result<()> {
         let mut frame = self.frame.get();
-        if let Some(modal) = self.modal.borrow().as_ref() {
+        if self.wrapper.borrow().is_none()
+            && let Some(modal) = self.modal.borrow().as_ref()
+        {
             let size = modal.measure(event)?;
             frame.width = size.width;
             frame.height = size.height;
@@ -1574,11 +1711,20 @@ impl Node {
                 canvas.invalidate()?;
             }
             self.frame.set(frame);
+            self.raw_frame.set(frame);
         }
-        event.set_measured_size(
-            (frame.width * self.scale).round() as i32,
-            (frame.height * self.scale).round() as i32,
-        )?;
+        // Rosen's `RSObjAbsGeometry::UpdateMatrix` returns early when both
+        // width and height are `<= 0`, discarding the node's `(x, y)` layout
+        // offset and transforms for all descendants, and `A::ResponseRegion`
+        // percentages multiply by the measured size. Keep unclipped containers
+        // at least 1px in each axis so their geometry and hit regions propagate.
+        let mut width = (frame.width * self.scale).round() as i32;
+        let mut height = (frame.height * self.scale).round() as i32;
+        if !self.clips_children() && !self.children.borrow().is_empty() {
+            width = width.max(1);
+            height = height.max(1);
+        }
+        event.set_measured_size(width, height)?;
         if let Some(input) = self.input.borrow().as_ref() {
             input.measure(event)?;
         } else if let Some(image) = self.image.borrow().as_ref() {
@@ -1700,7 +1846,10 @@ impl Node {
                 self.decoration.background(
                     &canvas,
                     &self.style.borrow(),
-                    Size::new(frame.width, frame.height),
+                    Size::new(
+                        (frame.width * self.scale).round() / self.scale,
+                        (frame.height * self.scale).round() / self.scale,
+                    ),
                     self.scale,
                 );
             }
@@ -1839,34 +1988,6 @@ impl Drop for Node {
         {
             log::error!("OHOS dispose: {error}");
         }
-    }
-}
-/// Keeps custom events (measure, layout, draw) on the per-node receivers.
-///
-/// `ohos-arkui-binding` adds a receiver to the node *and* installs the same
-/// trampoline as ArkUI's global receiver on every registration; ArkUI calls a
-/// node's receivers and then the global one, so each event would reach its
-/// callback twice: every layout pass ran twice and translucent paint (box
-/// shadows, gradients) was drawn twice, at double opacity. Call after
-/// registering custom events.
-pub(crate) fn node_receivers_only() {
-    use std::sync::OnceLock;
-    static API: OnceLock<usize> = OnceLock::new();
-    let api = *API.get_or_init(|| {
-        // SAFETY: ArkUI's documented module query; the name is NUL-terminated.
-        unsafe {
-            ohos_arkui_sys::OH_ArkUI_QueryModuleInterfaceByName(
-                ohos_arkui_sys::ArkUI_NativeAPIVariantKind_ARKUI_NATIVE_NODE,
-                c"ArkUI_NativeNodeAPI_1".as_ptr().cast(),
-            ) as usize
-        }
-    }) as *mut ohos_arkui_sys::ArkUI_NativeNodeAPI_1;
-    // SAFETY: the interface table lives for the process; clearing the global
-    // receiver is its documented use, on the UI thread that registered it.
-    if let Some(register) =
-        unsafe { api.as_ref() }.and_then(|api| api.registerNodeCustomEventReceiver)
-    {
-        unsafe { register(None) };
     }
 }
 pub(crate) fn callback(f: impl FnOnce() -> Result<()>) {

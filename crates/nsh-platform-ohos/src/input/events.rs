@@ -12,7 +12,7 @@ use nsh_core::{
     tailwind::state,
 };
 use ohos_arkui_binding::{
-    arkui_input_binding::UIInputAction,
+    arkui_input_binding::{UIInputAction, UIMouseEventAction, UIMouseEventButton},
     component::attribute::{ArkUICommonAttribute, ArkUIEvent, ArkUIGesture},
     gesture::{gesture_data::GestureData, inner_gesture::Gesture},
     types::{
@@ -37,6 +37,7 @@ pub(crate) struct Interaction {
     touch_registered: Cell<bool>,
     expanded_hit_region: Cell<bool>,
     hover_registered: Cell<bool>,
+    mouse_registered: Cell<bool>,
     opacity: Cell<Option<f32>>,
     label: RefCell<String>,
     long_press: RefCell<Option<(u32, Gesture)>>,
@@ -52,11 +53,21 @@ impl Interaction {
     }
     pub(crate) fn hit_region(&self, owner: &Node) -> Result<()> {
         let frame = owner.frame.get();
-        let has_area = frame.width > 0.0 || frame.height > 0.0 || owner.overflow.get().is_some();
+        let has_area = frame.width > 0.0 && frame.height > 0.0;
         let mut slop = if has_area {
             self.props.borrow().hit_slop
         } else {
             nsh_core::EdgeInsets::default()
+        };
+        let eff_w = if frame.width > 0.0 {
+            frame.width
+        } else {
+            1.0 / owner.scale
+        };
+        let eff_h = if frame.height > 0.0 {
+            frame.height
+        } else {
+            1.0 / owner.scale
         };
         if !owner.clips_children()
             && let Some(extent) = owner.overflow.get()
@@ -65,10 +76,10 @@ impl Interaction {
             slop.top = slop.top.max(nsh_core::Points(-extent.y));
             slop.right = slop
                 .right
-                .max(nsh_core::Points(extent.x + extent.width - frame.width));
+                .max(nsh_core::Points(extent.x + extent.width - eff_w));
             slop.bottom = slop
                 .bottom
-                .max(nsh_core::Points(extent.y + extent.height - frame.height));
+                .max(nsh_core::Points(extent.y + extent.height - eff_h));
         }
         if slop == nsh_core::EdgeInsets::default() {
             if self.expanded_hit_region.replace(false) {
@@ -76,22 +87,13 @@ impl Interaction {
             }
         } else {
             self.expanded_hit_region.set(true);
-            let f = owner.frame.get();
             owner.native.borrow().set_attribute(
                 A::ResponseRegion,
                 vec![
                     -slop.left.0,
                     -slop.top.0,
-                    if f.width > 0.0 {
-                        (f.width + slop.left.0 + slop.right.0) / f.width * 100.0
-                    } else {
-                        100.0
-                    },
-                    if f.height > 0.0 {
-                        (f.height + slop.top.0 + slop.bottom.0) / f.height * 100.0
-                    } else {
-                        100.0
-                    },
+                    (eff_w + slop.left.0 + slop.right.0) / eff_w * 100.0,
+                    (eff_h + slop.top.0 + slop.bottom.0) / eff_h * 100.0,
                 ]
                 .into(),
             )?;
@@ -137,8 +139,8 @@ impl Interaction {
                         {
                             owner.press(
                                 EventKind::Press,
-                                event.component_f32(0).unwrap_or_default(),
-                                event.component_f32(1).unwrap_or_default(),
+                                event.component_f32(0).unwrap_or_default() / owner.scale,
+                                event.component_f32(1).unwrap_or_default() / owner.scale,
                             );
                         }
                     });
@@ -200,24 +202,79 @@ impl Interaction {
         if self.hover_registered.replace(hover) != hover {
             if hover {
                 let weak = Rc::downgrade(owner);
-                owner.native.borrow_mut().on_hover(move |hovered| {
+                owner
+                    .native
+                    .borrow_mut()
+                    .on_event(E::OnHover, move |event| {
+                        callback(|| {
+                            if let Some(owner) = weak.upgrade() {
+                                let hovered = event.is_hovered().unwrap_or_default();
+                                owner.interaction.state(&owner, state::HOVERED, hovered)?;
+                                owner.emit(
+                                    if hovered {
+                                        EventKind::HoverIn
+                                    } else {
+                                        EventKind::HoverOut
+                                    },
+                                    EventPayload::None,
+                                );
+                            }
+                            Ok(())
+                        })
+                    });
+            } else {
+                owner.native.borrow_mut().off_event(E::OnHover)?;
+            }
+        }
+        let mouse = !blocked
+            && (events.contains(EventKind::HoverMove)
+                || events.contains(EventKind::MouseMove)
+                || events.contains(EventKind::ContextMenu));
+        if self.mouse_registered.replace(mouse) != mouse {
+            if mouse {
+                let weak = Rc::downgrade(owner);
+                owner.native.borrow_mut().on_mouse(move |event| {
                     callback(|| {
-                        if let Some(owner) = weak.upgrade() {
-                            owner.interaction.state(&owner, state::HOVERED, hovered)?;
-                            owner.emit(
-                                if hovered {
-                                    EventKind::HoverIn
-                                } else {
-                                    EventKind::HoverOut
-                                },
-                                EventPayload::None,
-                            );
+                        if let Some(owner) = weak.upgrade()
+                            && let Some(input) = event.input_event()
+                        {
+                            let x = input.pointer_x();
+                            let y = input.pointer_y();
+                            let mask = owner.interaction.mask();
+                            match input.mouse_action() {
+                                UIMouseEventAction::Move => {
+                                    if mask.contains(EventKind::MouseMove) {
+                                        owner.emit(
+                                            EventKind::MouseMove,
+                                            EventPayload::Map(vec![
+                                                ("x", PayloadValue::Number(f64::from(x))),
+                                                ("y", PayloadValue::Number(f64::from(y))),
+                                            ]),
+                                        );
+                                    }
+                                    if mask.contains(EventKind::HoverMove)
+                                        && input.mouse_button() == UIMouseEventButton::None
+                                    {
+                                        owner.emit(EventKind::HoverMove, owner.hover_payload(x, y));
+                                    }
+                                }
+                                UIMouseEventAction::Press
+                                    if input.mouse_button() == UIMouseEventButton::Right
+                                        && mask.contains(EventKind::ContextMenu) =>
+                                {
+                                    owner.emit(
+                                        EventKind::ContextMenu,
+                                        owner.context_menu_payload(x, y),
+                                    );
+                                }
+                                _ => {}
+                            }
                         }
                         Ok(())
                     })
                 });
             } else {
-                owner.native.borrow_mut().off_event(E::OnHover)?;
+                owner.native.borrow_mut().off_event(E::OnMouse)?;
             }
         }
         let delay = self

@@ -65,6 +65,7 @@ pub(crate) struct Progress {
 }
 pub(crate) struct Data {
     bytes: Arc<[u8]>,
+    svg: Option<nsh_core::svg::Raster>,
     width: u32,
     height: u32,
 }
@@ -85,9 +86,31 @@ pub(crate) struct Loader {
 }
 impl Data {
     pub(crate) fn decoded_bytes(&self) -> usize {
-        self.width as usize * self.height as usize * 4
+        if let Some(svg) = &self.svg {
+            svg.pixels.len()
+        } else {
+            self.width as usize * self.height as usize * 4
+        }
+    }
+    fn resident_bytes(&self) -> usize {
+        self.bytes
+            .len()
+            .saturating_add(self.svg.as_ref().map_or(0, |svg| svg.pixels.len()))
     }
     pub(crate) fn bitmap(&self) -> std::result::Result<ohos_drawing_binding::Bitmap, String> {
+        if let Some(svg) = &self.svg {
+            let mut bitmap = ohos_drawing_binding::Bitmap::new(
+                svg.width,
+                svg.height,
+                ohos_drawing_binding::BitmapFormat::default(),
+            );
+            let output = bitmap.pixels_mut();
+            if output.len() != svg.pixels.len() {
+                return Err("image bitmap allocation failed".into());
+            }
+            output.copy_from_slice(&svg.pixels);
+            return Ok(bitmap);
+        }
         use ohos_image_native_binding::{DecodingOptions, ImageSource, types::PixelFormat};
         let source = ImageSource::create_from_data(&self.bytes).map_err(|e| e.to_string())?;
         let mut options = DecodingOptions::new().map_err(|e| e.to_string())?;
@@ -263,28 +286,47 @@ impl Loader {
         if bytes.len() > MAX_DATA {
             return Err("image exceeds 16 MiB".into());
         }
-        let source = ohos_image_native_binding::ImageSource::create_from_data(&bytes)
-            .map_err(|e| e.to_string())?;
-        let info = source.image_info(0).map_err(|e| e.to_string())?;
-        let (width, height) = (
-            info.width().map_err(|e| e.to_string())?,
-            info.height().map_err(|e| e.to_string())?,
-        );
-        if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 16_777_216 {
-            return Err("image dimensions exceed 16 megapixels".into());
-        }
+        let (svg, width, height) = if nsh_core::svg::sniff(&bytes) {
+            let raster = nsh_core::svg::rasterize_oversampled(&bytes).map_err(|e| e.to_string())?;
+            let reported = nsh_core::svg::reported_size(raster.size);
+            (
+                Some(raster),
+                reported.width.0 as u32,
+                reported.height.0 as u32,
+            )
+        } else {
+            let source = ohos_image_native_binding::ImageSource::create_from_data(&bytes)
+                .map_err(|e| e.to_string())?;
+            let info = source.image_info(0).map_err(|e| e.to_string())?;
+            let (width, height) = (
+                info.width().map_err(|e| e.to_string())?,
+                info.height().map_err(|e| e.to_string())?,
+            );
+            let frames = u64::from(source.frame_count().unwrap_or(1).max(1));
+            let frame_pixels = u64::from(width) * u64::from(height);
+            if width == 0
+                || height == 0
+                || frame_pixels > 16_777_216
+                || frame_pixels.saturating_mul(frames) > 67_108_864
+            {
+                return Err("image dimensions exceed 16 megapixels".into());
+            }
+            (None, width, height)
+        };
         let data = Arc::new(Data {
             bytes: bytes.into(),
+            svg,
             width,
             height,
         });
-        if data.bytes.len() <= CACHE / 2 {
+        let resident = data.resident_bytes();
+        if resident <= CACHE / 2 {
             let mut cache = self.cache.lock().expect("image cache");
             cache.clock += 1;
             let clock = cache.clock;
-            cache.bytes += data.bytes.len();
+            cache.bytes += resident;
             if let Some((old, _)) = cache.entries.insert(uri.to_owned(), (data.clone(), clock)) {
-                cache.bytes -= old.bytes.len();
+                cache.bytes -= old.resident_bytes();
             }
             while cache.bytes > CACHE {
                 let key = cache
@@ -294,7 +336,7 @@ impl Loader {
                     .map(|(key, _)| key.clone())
                     .expect("nonempty cache");
                 let (old, _) = cache.entries.remove(&key).expect("cached image");
-                cache.bytes -= old.bytes.len();
+                cache.bytes -= old.resident_bytes();
             }
         }
         Ok(data)
@@ -400,14 +442,84 @@ impl Loader {
 }
 struct NativeImage {
     descriptor: ohos_arkui_binding::api::attribute_option::DrawableDescriptor,
-    _pixels: ohos_image_native_binding::PixelMap,
+    _pixels: Vec<ohos_image_native_binding::PixelMap>,
     _bytes: Arc<[u8]>,
 }
 impl NativeImage {
     fn new(data: &Data) -> std::result::Result<Self, String> {
-        use ohos_image_native_binding::{DecodingOptions, ImageSource};
+        use ohos_image_native_binding::{
+            DecodingOptions, ImageSource, PixelMap, PixelMapInitializationOptions,
+            types::{PixelFormat, PixelMapAlphaType},
+        };
+        if let Some(svg) = &data.svg {
+            let mut options = PixelMapInitializationOptions::new().map_err(|e| e.to_string())?;
+            options.set_width(svg.width).map_err(|e| e.to_string())?;
+            options.set_height(svg.height).map_err(|e| e.to_string())?;
+            options
+                .set_src_pixel_format(PixelFormat::Rgba8888)
+                .map_err(|e| e.to_string())?;
+            options
+                .set_pixel_format(PixelFormat::Rgba8888)
+                .map_err(|e| e.to_string())?;
+            options
+                .set_alpha_type(PixelMapAlphaType::Premultiplied)
+                .map_err(|e| e.to_string())?;
+            let mut raw_pixels = svg.pixels.clone();
+            let pixels =
+                PixelMap::create(&mut raw_pixels, &mut options).map_err(|e| e.to_string())?;
+            let descriptor =
+                ohos_arkui_binding::api::attribute_option::DrawableDescriptor::from_pixel_map(
+                    pixels.handle(),
+                )
+                .map_err(|e| e.to_string())?;
+            return Ok(Self {
+                descriptor,
+                _pixels: vec![pixels],
+                _bytes: data.bytes.clone(),
+            });
+        }
         let source = ImageSource::create_from_data(&data.bytes).map_err(|e| e.to_string())?;
         let mut options = DecodingOptions::new().map_err(|e| e.to_string())?;
+        let frame_count = source.frame_count().unwrap_or(1);
+        if frame_count > 1 {
+            let frames = source
+                .create_pixelmap_list(&mut options)
+                .map_err(|e| e.to_string())?;
+            if !frames.is_empty() {
+                let handles: Vec<_> = frames.iter().map(PixelMap::handle).collect();
+                let mut descriptor =
+                    ohos_arkui_binding::api::attribute_option::DrawableDescriptor::from_animated_pixel_map(
+                        &handles,
+                    )
+                    .map_err(|e| e.to_string())?;
+                let delays = source.delay_time_list().unwrap_or_default();
+                let mut frame_durations: Vec<u32> = (0..frames.len())
+                    .map(|idx| {
+                        let d = delays.get(idx).copied().unwrap_or(100);
+                        if d <= 10 { 100 } else { d as u32 }
+                    })
+                    .collect();
+                let total_ms: i32 = frame_durations
+                    .iter()
+                    .map(|&d| d as i32)
+                    .sum::<i32>()
+                    .max(100);
+                descriptor.set_animation_duration(total_ms);
+                descriptor.set_animation_iteration(-1);
+                #[cfg(feature = "api-23")]
+                if crate::get_capabilities().api23 {
+                    let _ = descriptor.set_animation_frame_durations(&mut frame_durations);
+                    let _ = descriptor.set_animation_auto_play(1);
+                }
+                #[cfg(not(feature = "api-23"))]
+                let _ = &mut frame_durations;
+                return Ok(Self {
+                    descriptor,
+                    _pixels: frames,
+                    _bytes: data.bytes.clone(),
+                });
+            }
+        }
         let pixels = source
             .create_pixelmap(&mut options)
             .map_err(|e| e.to_string())?;
@@ -418,7 +530,7 @@ impl NativeImage {
             .map_err(|e| e.to_string())?;
         Ok(Self {
             descriptor,
-            _pixels: pixels,
+            _pixels: vec![pixels],
             _bytes: data.bytes.clone(),
         })
     }
@@ -599,11 +711,11 @@ impl ImageView {
         self.native.borrow().set_i32_attribute(
             A::ImageObjectFit,
             match mode {
-                ResizeMode::Contain => 0,
-                ResizeMode::Cover => 2,
-                ResizeMode::Stretch => 1,
-                ResizeMode::ScaleDown => 4,
-                ResizeMode::Center => 5,
+                ResizeMode::Contain => 0,   // ARKUI_OBJECT_FIT_CONTAIN
+                ResizeMode::Cover => 1,     // ARKUI_OBJECT_FIT_COVER
+                ResizeMode::Stretch => 3,   // ARKUI_OBJECT_FIT_FILL
+                ResizeMode::ScaleDown => 4, // ARKUI_OBJECT_FIT_SCALE_DOWN
+                ResizeMode::Center => 10,   // ARKUI_OBJECT_FIT_NONE_AND_ALIGN_CENTER
             },
         )?;
         let Some(owner) = self.owner.upgrade() else {

@@ -51,6 +51,14 @@ impl Screen {
             node.borrow().set_length_metric_unit(LengthMetricUnit::Vp)?;
         }
         header.borrow().z_index(1)?;
+        header.borrow().set_i32_attribute(
+            A::HitTestBehavior,
+            ohos_arkui_binding::types::view::HitTestMode::Transparent.into(),
+        )?;
+        title.borrow().set_i32_attribute(
+            A::HitTestBehavior,
+            ohos_arkui_binding::types::view::HitTestMode::None.into(),
+        )?;
         header.borrow_mut().add_child(back.clone())?;
         header.borrow_mut().add_child(title.clone())?;
         back.borrow().set_string_attribute(A::TextContent, "‹")?;
@@ -96,11 +104,25 @@ impl Screen {
     pub(crate) fn paint_visible(&self) -> bool {
         self.is_top() || self.revealed.get() || self.motion.borrow().is_some()
     }
+    pub(crate) fn large_title_offset(&self) -> f32 {
+        let c = self.config.borrow();
+        if c.header_visible && !c.header_transparent && c.large_title {
+            52.0 + self
+                .owner
+                .upgrade()
+                .map_or(0.0, |owner| owner.top_overlap())
+        } else {
+            0.0
+        }
+    }
     pub(crate) fn configure(&self, config: ScreenConfig) -> Result<()> {
         *self.config.borrow_mut() = config;
         self.update(self.has_back.get())
     }
     pub(crate) fn update_environment(&self) -> Result<()> {
+        if let Some(owner) = self.owner.upgrade() {
+            owner.restore_style()?;
+        }
         self.update(self.has_back.get())
     }
     pub(crate) fn update(&self, has_back: bool) -> Result<()> {
@@ -180,32 +202,35 @@ impl Screen {
             .borrow()
             .set_i32_attribute(A::Visibility, i32::from(!has_back || !c.back_visible))?;
         drop(c);
-        for child in owner
-            .children
-            .borrow()
-            .iter()
-            .filter_map(Weak::upgrade)
-            .filter(|n| n.kind == ViewKind::HeaderItem)
-        {
-            child.mounted().borrow().z_index(2)?;
-            child.restore_style()?;
+        for child in owner.children.borrow().iter().filter_map(Weak::upgrade) {
+            if child.kind == ViewKind::HeaderItem {
+                child.mounted().borrow().z_index(2)?;
+                child.restore_style()?;
+            } else {
+                child.set_frame(child.raw_frame.get())?;
+            }
         }
         owner
             .native
             .borrow()
             .mark_dirty(NodeDirtyFlag::NeedMeasure)?;
+        owner
+            .native
+            .borrow()
+            .mark_dirty(NodeDirtyFlag::NeedLayout)?;
         Ok(())
     }
     pub(crate) fn request_back(&self) -> Result<()> {
         let Some(owner) = self.owner.upgrade() else {
             return Ok(());
         };
-        if !self.has_back.get() || self.popped.get() {
+        if self.popped.get() {
             return Ok(());
         }
-        if self.config.borrow().prevent_back {
+        if owner.interaction.mask().contains(EventKind::BackRequest) {
             owner.emit(EventKind::BackRequest, EventPayload::None);
-        } else {
+        }
+        if self.has_back.get() && !self.config.borrow().prevent_back {
             self.popped.set(true);
             self.pop()?;
             if let Some(dispatcher) = owner.dispatcher.upgrade() {
@@ -241,12 +266,7 @@ impl Screen {
     }
     fn show(&self) -> Result<()> {
         if let Some(owner) = self.owner.upgrade() {
-            owner.mounted().borrow().set_i32_attribute(
-                A::Visibility,
-                i32::from(
-                    !(self.is_top() || self.revealed.get() || self.motion.borrow().is_some()),
-                ),
-            )?;
+            owner.restore_style()?;
         }
         Ok(())
     }
@@ -419,7 +439,6 @@ impl Screen {
         self.is_top()
             && self.has_back.get()
             && c.gesture_enabled
-            && !c.prevent_back
             && self.motion.borrow().is_none()
             && !owner.platform.get().screen_reader
             && if owner.platform.get().rtl {
@@ -435,16 +454,20 @@ impl Screen {
         if self.peer.borrow().upgrade().is_none() {
             self.reveal()?;
         }
-        self.progress
-            .set((dx / owner.frame.get().width.max(1.0)).clamp(0.0, 1.0));
+        let raw = (dx / owner.frame.get().width.max(1.0)).clamp(0.0, 1.0);
+        let progress = if self.config.borrow().prevent_back {
+            raw * 0.25
+        } else {
+            raw
+        };
+        self.progress.set(progress);
         self.paint()
     }
     pub(crate) fn finish_swipe(&self, complete: bool) -> Result<()> {
-        if complete
-            && self.is_top()
-            && self.config.borrow().gesture_enabled
-            && !self.config.borrow().prevent_back
-        {
+        if complete && self.is_top() && self.config.borrow().gesture_enabled {
+            if self.config.borrow().prevent_back {
+                self.animate(0.0)?;
+            }
             self.request_back()
         } else {
             self.animate(0.0)

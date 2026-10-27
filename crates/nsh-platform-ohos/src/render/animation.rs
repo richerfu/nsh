@@ -73,9 +73,27 @@ impl Animator {
             bindings.resize_with(owner.id as usize + 1, || None);
         }
         bindings[owner.id as usize] = (!values.is_empty()).then(|| (Rc::downgrade(owner), values));
+        drop(bindings);
         owner.component_animated.borrow_mut().clear();
         owner.reset_text_tint()?;
         owner.restore_style()
+    }
+    pub(crate) fn apply_node(&self, owner: &Node) -> Result<()> {
+        let values = {
+            let bindings = self.bindings.borrow();
+            let Some((_, props)) = bindings
+                .get(owner.id as usize)
+                .and_then(|slot| slot.as_ref())
+            else {
+                return Ok(());
+            };
+            let state = self.state.borrow();
+            props
+                .iter()
+                .map(|(prop, node)| (*prop, state.graph.eval(*node)))
+                .collect::<Vec<_>>()
+        };
+        owner.animate(&values)
     }
     pub(crate) fn remove(&self, id: u32) {
         if let Some(slot) = self.bindings.borrow_mut().get_mut(id as usize) {

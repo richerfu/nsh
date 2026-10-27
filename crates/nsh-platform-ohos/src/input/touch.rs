@@ -677,8 +677,11 @@ impl Touches {
         let focused = root
             .dispatcher
             .upgrade()
-            .and_then(|route| route.keyboard.lock().unwrap().focused);
-        let Some(input) = focused.and_then(|id| find(root, id)) else {
+            .and_then(|route| route.keyboard.lock().unwrap().input);
+        let Some(input) = focused
+            .and_then(|id| find(root, id))
+            .filter(|node| node.input.borrow().is_some())
+        else {
             return false;
         };
         self.keyboard_tap = Some(KeyboardTap {
@@ -741,6 +744,7 @@ fn hit(root: &Rc<Node>, point: (f32, f32), world: &nsh_core::Matrix) -> Result<O
                 .iter()
                 .rev()
                 .filter_map(Weak::upgrade)
+                .filter(|child| child.kind != nsh_core::ViewKind::Modal)
             {
                 if child.input_priority() == priority {
                     let matrix = child.input_to_parent(root)?.mul(world);

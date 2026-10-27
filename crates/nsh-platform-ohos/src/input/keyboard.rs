@@ -16,7 +16,7 @@ impl crate::render::node::Node {
         let Some(id) = self
             .dispatcher
             .upgrade()
-            .and_then(|route| route.keyboard.lock().unwrap().focused)
+            .and_then(|route| route.keyboard.lock().unwrap().input)
         else {
             return Ok(());
         };
@@ -48,6 +48,7 @@ impl crate::render::node::Node {
 pub(crate) struct Snapshot {
     pub(crate) map: Arc<Keymap>,
     pub(crate) focused: Option<NodeId>,
+    pub(crate) input: Option<NodeId>,
     pub(crate) selection: Option<NodeId>,
 }
 #[derive(Default)]

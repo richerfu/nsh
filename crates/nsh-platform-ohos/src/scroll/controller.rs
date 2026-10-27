@@ -38,9 +38,12 @@ pub(crate) struct Scroller {
     pub(crate) content: NativeNode,
     owner: Weak<Node>,
     size: Cell<Size>,
+    measured_size: Cell<Size>,
+    layout_pending: Cell<bool>,
     viewport_size: Cell<Size>,
     native_width: Cell<f32>,
     offset: Cell<(f32, f32)>,
+    owed: Cell<(f32, f32)>,
     corrections: Cell<u32>,
     phase: Cell<i32>,
     scroll_value: Cell<Option<u32>>,
@@ -153,9 +156,12 @@ impl Scroller {
             content,
             owner,
             size: Cell::new(Size::default()),
+            measured_size: Cell::new(Size::default()),
+            layout_pending: Cell::new(false),
             viewport_size: Cell::new(Size::default()),
             native_width: Cell::new(f32::NAN),
             offset: Cell::new((0.0, 0.0)),
+            owed: Cell::new((0.0, 0.0)),
             corrections: Cell::new(0),
             phase: Cell::new(0),
             scroll_value: Cell::new(None),
@@ -191,6 +197,7 @@ impl Scroller {
                         (size.width * owner.scale * scroll.zoom.get()).round() as i32,
                         (size.height * owner.scale * scroll.zoom.get()).round() as i32,
                     )?;
+                    scroll.measured_size.set(size);
                     owner.measure_children(event)?;
                 }
                 Ok(())
@@ -205,21 +212,22 @@ impl Scroller {
                     let position = event.position_in_layout();
                     event.set_layout_position(position.x, position.y)?;
                     owner.layout_children(event)?;
-                    if let Some((x, y, animated)) = scroll.zoom_offset.take()
+                    if (scroll.layout_pending.get()
+                        || scroll.zoom_offset.get().is_some()
+                        || scroll.owed.get() != (0.0, 0.0))
                         && let Some(route) = owner.dispatcher.upgrade()
                     {
                         route.send(crate::app::runtime::Message::ScrollPosition {
                             id: owner.id,
-                            x,
-                            y,
-                            animated,
+                            x: 0.0,
+                            y: 0.0,
+                            animated: false,
                         });
                     }
                 }
                 Ok(())
             })
         });
-        crate::render::node::node_receivers_only();
         let weak = Rc::downgrade(&scroll);
         scroll
             .native
@@ -231,6 +239,7 @@ impl Scroller {
                         if phase == 1 {
                             scroll.snap_limit.set(None);
                             scroll.zoom_motion.set(None);
+                            scroll.owed.set((0.0, 0.0));
                         }
                         let behavior = scroll.behavior.borrow();
                         let source = event.component_i32(3).unwrap_or(-1);
@@ -380,6 +389,7 @@ impl Scroller {
         let previous = self.size.replace(size);
         if previous.width != size.width || previous.height != size.height {
             *self.selection_progress.borrow_mut() = Default::default();
+            self.layout_pending.set(true);
         }
         if let Some(owner) = self.owner.upgrade() {
             let frame = owner.frame.get();
@@ -388,6 +398,9 @@ impl Scroller {
         self.content
             .borrow()
             .mark_dirty(NodeDirtyFlag::NeedMeasure)?;
+        self.content
+            .borrow()
+            .mark_dirty(NodeDirtyFlag::NeedLayout)?;
         Ok(())
     }
     pub(crate) fn mirrored(&self) -> bool {
@@ -497,6 +510,60 @@ impl Scroller {
         self.configure_pinch()?;
         Ok(())
     }
+    pub(crate) fn command_to(&self, x: f32, y: f32, animated: bool) -> Result<()> {
+        self.corrections.set(self.corrections.get().wrapping_add(1));
+        self.owed.set((0.0, 0.0));
+        let animated = animated
+            && self
+                .owner
+                .upgrade()
+                .is_some_and(|owner| !owner.platform.get().reduce_motion);
+        let current = self.offset.get();
+        if animated && ((x - current.0).abs() >= 0.5 || (y - current.1).abs() >= 0.5) {
+            self.zoom_offset.set(None);
+            if let Some(owner) = self.owner.upgrade() {
+                let scale = self.zoom.get();
+                self.zoom_motion.set(Some(ZoomMotion {
+                    from: ZoomFrame {
+                        scale,
+                        offset: current,
+                    },
+                    to: ZoomFrame {
+                        scale,
+                        offset: (x, y),
+                    },
+                    start: owner.animator.now(),
+                }));
+                owner.animator.track_scroll(&owner);
+            }
+            self.report()?;
+            return Ok(());
+        }
+        self.zoom_motion.set(None);
+        let size = self.size.get();
+        let measured = self.measured_size.get();
+        if self.layout_pending.get() || size.width > measured.width || size.height > measured.height
+        {
+            self.zoom_offset.set(Some((x, y, false)));
+        } else {
+            self.zoom_offset.set(None);
+        }
+        self.to(x, y, false)?;
+        self.report()?;
+        Ok(())
+    }
+    pub(crate) fn flush_layout(&self) -> Result<()> {
+        self.layout_pending.set(false);
+        if let Some((x, y, animated)) = self.zoom_offset.take() {
+            self.to(x, y, animated)?;
+            self.report()?;
+        }
+        let (dx, dy) = self.owed.take();
+        if dx != 0.0 || dy != 0.0 {
+            self.pay_owed(dx, dy)?;
+        }
+        Ok(())
+    }
     pub(crate) fn to(&self, x: f32, y: f32, animated: bool) -> Result<()> {
         let animated = animated
             && self
@@ -531,17 +598,57 @@ impl Scroller {
     }
     pub(crate) fn by(&self, dx: f32, dy: f32) -> Result<()> {
         self.corrections.set(self.corrections.get().wrapping_add(1));
+        if let Some(mut motion) = self.zoom_motion.get() {
+            motion.from.offset.0 += dx;
+            motion.from.offset.1 += dy;
+            motion.to.offset.0 += dx;
+            motion.to.offset.1 += dy;
+            self.zoom_motion.set(Some(motion));
+            let current = self
+                .zoom_offset
+                .get()
+                .map_or_else(|| self.offset.get(), |(x, y, _)| (x, y));
+            return self.apply_zoom(ZoomFrame {
+                scale: self.zoom.get(),
+                offset: (current.0 + dx, current.1 + dy),
+            });
+        }
+        if let Some((zx, zy, animated)) = self.zoom_offset.get() {
+            self.zoom_offset.set(Some((zx + dx, zy + dy, animated)));
+            self.to(zx + dx, zy + dy, false)?;
+            return self.report();
+        }
+        let (ox, oy) = self.owed.take();
+        self.pay_owed(dx + ox, dy + oy)
+    }
+    fn pay_owed(&self, dx: f32, dy: f32) -> Result<()> {
+        let before = self.offset.get();
         self.native
             .borrow()
             .set_attribute(A::ScrollBy, vec![dx, dy].into())?;
-        self.report()
+        let size = self.size.get();
+        let measured = self.measured_size.get();
+        if (self.layout_pending.get()
+            || size.width > measured.width
+            || size.height > measured.height)
+            && let Some(after) = self.read_native_offset()?
+        {
+            let rem_x = before.0 + dx - after.0;
+            let rem_y = before.1 + dy - after.1;
+            self.owed.set((
+                if rem_x.abs() > 0.5 { rem_x } else { 0.0 },
+                if rem_y.abs() > 0.5 { rem_y } else { 0.0 },
+            ));
+        }
+        self.report()?;
+        Ok(())
     }
-    fn report(&self) -> Result<()> {
+    fn read_native_offset(&self) -> Result<Option<(f32, f32)>> {
         let value = self.native.borrow().get_attribute(A::ScrollOffset)?;
         let values = match value {
             ArkUINodeAttributeItem::NumberValue(values) => values,
             ArkUINodeAttributeItem::Composite(value) => value.number_values,
-            _ => return Ok(()),
+            _ => return Ok(None),
         };
         let value = |index| match values.get(index) {
             Some(N::Float(value)) => *value,
@@ -561,27 +668,39 @@ impl Scroller {
                 offset.0 = *x;
             }
         }
+        Ok(Some(offset))
+    }
+    fn report(&self) -> Result<()> {
+        let Some(offset) = self.read_native_offset()? else {
+            return Ok(());
+        };
         self.offset.set(offset);
+        let reported = if let Some((x, y, false)) = self.zoom_offset.get() {
+            (x, y)
+        } else {
+            let (ox, oy) = self.owed.get();
+            (offset.0 + ox, offset.1 + oy)
+        };
         self.pin_sticky()?;
         if let Some(owner) = self.owner.upgrade() {
             owner.invalidate_scene();
             owner.control.scroll(
                 owner.id,
-                Point::new(Points(offset.0), Points(offset.1)),
+                Point::new(Points(reported.0), Points(reported.1)),
                 self.corrections.get(),
             );
             if let Some(value) = self.scroll_value.get() {
                 owner.animator.set(
                     value,
                     if self.horizontal.get() {
-                        offset.0
+                        reported.0
                     } else {
-                        offset.1
+                        reported.1
                     },
                 )?;
             }
             if !self.horizontal.get() && !self.refresh.borrow().is_mounted() {
-                self.pulled((-offset.1).max(0.0))?;
+                self.pulled((-reported.1).max(0.0))?;
             }
         }
         Ok(())
@@ -919,14 +1038,21 @@ impl Scroller {
         };
         let old = self.zoom.replace(frame.scale);
         if old == frame.scale {
-            let offset = self.offset.get();
-            return if (frame.offset.0 - offset.0).abs() < 0.001
-                && (frame.offset.1 - offset.1).abs() < 0.001
+            self.owed.set((0.0, 0.0));
+            let size = self.size.get();
+            let measured = self.measured_size.get();
+            if self.layout_pending.get()
+                || size.width > measured.width
+                || size.height > measured.height
             {
-                Ok(())
+                self.zoom_offset
+                    .set(Some((frame.offset.0, frame.offset.1, false)));
             } else {
-                self.to(frame.offset.0, frame.offset.1, false)
-            };
+                self.zoom_offset.set(None);
+            }
+            self.to(frame.offset.0, frame.offset.1, false)?;
+            self.report()?;
+            return Ok(());
         }
         let content = self.content.borrow();
         content.set_attribute(A::Scale, vec![frame.scale, frame.scale].into())?;

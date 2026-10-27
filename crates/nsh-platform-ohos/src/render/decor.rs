@@ -10,8 +10,8 @@ use ohos_arkui_binding::{
     types::{attribute::ArkUINodeAttributeType as A, view::BlendMode as B},
 };
 use ohos_drawing_binding::{
-    Brush, Canvas, ClipOperation, Filter, MaskFilter, Matrix, Path, PathEffect, PathFillType, Pen,
-    ShaderEffect, TileMode,
+    Brush, Canvas, ClipOperation, Filter, MaskFilter, Matrix, Path, PathDirection, PathEffect,
+    PathFillType, Pen, ShaderEffect, TileMode,
 };
 
 use crate::{
@@ -235,26 +235,50 @@ impl Decoration {
                     let mut brush = Brush::new();
                     brush.set_anti_alias(true);
                     brush.set_color(argb(layer.color));
-                    let mask = MaskFilter::blur(layer.blur.0.max(0.0) * 0.5, true);
-                    let mut filter = Filter::new();
-                    filter.set_mask_filter(mask.as_ref());
-                    brush.set_filter(Some(&filter));
-                    let mut path = if layer.inset {
-                        padding_outline(style, size, layer.spread.0)
-                    } else {
-                        outline(style, size, layer.spread.0)
-                    };
-                    path.transform(&Matrix::from_affine(
-                        1.0,
-                        0.0,
-                        0.0,
-                        1.0,
-                        layer.offset_x.0,
-                        layer.offset_y.0,
-                    ));
-                    if layer.inset {
-                        path.set_fill_type(PathFillType::InverseWinding);
+                    if layer.blur.0 > 0.0 {
+                        let mask = MaskFilter::blur(layer.blur.0 * 0.5, true);
+                        let mut filter = Filter::new();
+                        filter.set_mask_filter(mask.as_ref());
+                        brush.set_filter(Some(&filter));
                     }
+                    let path = if layer.inset {
+                        let reach = layer.offset_x.0.abs()
+                            + layer.offset_y.0.abs()
+                            + layer.spread.0.abs()
+                            + layer.blur.0.max(0.0) * 2.0
+                            + 4.0;
+                        let mut outer = Path::new();
+                        outer.set_fill_type(PathFillType::EvenOdd);
+                        outer.add_rect(
+                            -reach,
+                            -reach,
+                            size.width + reach,
+                            size.height + reach,
+                            PathDirection::Cw,
+                        );
+                        let mut hole = padding_outline(style, size, layer.spread.0);
+                        hole.transform(&Matrix::from_affine(
+                            1.0,
+                            0.0,
+                            0.0,
+                            1.0,
+                            layer.offset_x.0,
+                            layer.offset_y.0,
+                        ));
+                        outer.add_path(&hole, None);
+                        outer
+                    } else {
+                        let mut path = outline(style, size, layer.spread.0);
+                        path.transform(&Matrix::from_affine(
+                            1.0,
+                            0.0,
+                            0.0,
+                            1.0,
+                            layer.offset_x.0,
+                            layer.offset_y.0,
+                        ));
+                        path
+                    };
                     ShadowPaint {
                         inset: layer.inset,
                         path,
@@ -349,7 +373,10 @@ fn padding_outline(style: &ViewStyle, size: Size, spread: f32) -> Path {
                 Points((radii[i] - corners[i].1).max(0.0)),
             )
         })),
-        style.continuous_corners,
+        // ArkUI's native `BorderRadius` / `BorderWidth` / `BackgroundColor`
+        // uses circular corners, so custom decoration paths match circular
+        // geometry too (as the Linux backend does).
+        false,
         false,
         &mut |segment| match segment {
             nsh_core::shape::Segment::Move(p) => path.move_to(p.x.0, p.y.0),
@@ -378,7 +405,7 @@ pub(crate) fn outline(style: &ViewStyle, size: Size, spread: f32) -> Path {
             CoreSize::new(Points(w), Points(h)),
         ),
         radii.map(|&r| CoreSize::new(r, r)),
-        style.continuous_corners,
+        false,
         false,
         &mut |s| match s {
             nsh_core::shape::Segment::Move(p) => path.move_to(p.x.0, p.y.0),

@@ -212,11 +212,11 @@ impl Mounter {
         }
         Ok(())
     }
-    pub(crate) fn scroll_to(&self, id: NodeId, x: f32, y: f32, animated: bool) -> Result<()> {
+    pub(crate) fn scroll_to(&self, id: NodeId, _x: f32, _y: f32, _animated: bool) -> Result<()> {
         if let Ok(node) = self.node(id)
             && let Some(scroll) = node.scroll.borrow().as_ref()
         {
-            scroll.to(x, y, animated)?;
+            scroll.flush_layout()?;
         }
         Ok(())
     }
@@ -287,11 +287,16 @@ impl Mounter {
                     .filter_map(|n| n.screen.borrow().clone())
                     .filter(|s| !s.popped.get())
                     .collect();
-                (screens.len() > 1).then(|| screens.last().unwrap().clone())
+                let top = screens.last()?;
+                (screens.len() > 1 || top.config.borrow().prevent_back).then(|| top.clone())
             })
     }
     pub(crate) fn reconcile_navigation(&mut self) -> Result<()> {
-        crate::navigation::stack::reconcile(&self.slots)
+        crate::navigation::stack::reconcile(&self.slots)?;
+        for modal in self.modals.iter().filter_map(std::rc::Weak::upgrade) {
+            modal.present_if_pending()?;
+        }
+        Ok(())
     }
     pub(crate) fn dialog_result(&mut self, id: u32, index: i32) -> Result<()> {
         self.dialogs.finish(id, index)
@@ -396,10 +401,16 @@ impl Mounter {
             if let Some(modal) = self.node(id)?.modal.borrow().as_ref() {
                 modal.close(true)?;
             } else {
-                parent
-                    .child_container()
+                let container = parent.child_container();
+                container
                     .borrow_mut()
                     .remove_child(parent.child_index(index))?;
+                container
+                    .borrow()
+                    .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedMeasure)?;
+                container
+                    .borrow()
+                    .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedLayout)?;
             }
             parent.children.borrow_mut().remove(index);
             parent.accessibility_state.changed(parent);
@@ -591,7 +602,10 @@ impl Mounter {
                         }
                     }
                     MountItem::ScreenConfig { id, config } => {
-                        if let Some(screen) = self.node(id)?.screen.borrow().as_ref() {
+                        if !self.leaving(id)
+                            && !self.closing_modal(id)
+                            && let Some(screen) = self.node(id)?.screen.borrow().as_ref()
+                        {
                             screen.configure(*config)?;
                         }
                     }
@@ -643,14 +657,19 @@ impl Mounter {
                             parent.children.borrow().len()
                         };
                         if let Some(modal) = node.modal.borrow().as_ref() {
-                            modal.present()?;
+                            modal.schedule_present();
                         } else {
-                            parent
-                                .child_container()
+                            let container = parent.child_container();
+                            container
                                 .borrow_mut()
                                 .insert_child(node.mounted(), parent.child_index(index))?;
-                            *node.mount_parent.borrow_mut() =
-                                Rc::downgrade(&parent.child_container());
+                            container.borrow().mark_dirty(
+                                ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedMeasure,
+                            )?;
+                            container.borrow().mark_dirty(
+                                ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedLayout,
+                            )?;
+                            *node.mount_parent.borrow_mut() = Rc::downgrade(&container);
                         }
                         parent
                             .children
@@ -671,21 +690,31 @@ impl Mounter {
                         node.inserted(layout.as_ref())?;
                     }
                     MountItem::Remove { id } => {
-                        if !self.leaving(id) && !self.node(id)?.removing(layout.as_ref())? {
+                        if !self.leaving(id)
+                            && !self.closing_modal(id)
+                            && !self.node(id)?.removing(layout.as_ref())?
+                        {
                             self.detach(id)?;
                         }
                     }
                     MountItem::Delete { id } => {
-                        if !self.leaving(id) {
+                        if !self.leaving(id) && !self.closing_modal(id) {
                             self.node(id)?.removing(layout.as_ref())?;
                         }
                         self.delete(id)?;
                     }
-                    MountItem::Frame { id, frame } => self
-                        .node(id)?
-                        .animated_frame(frame.into(), layout.as_ref())?,
+                    MountItem::Frame { id, frame } => {
+                        if !self.leaving(id) && !self.closing_modal(id) {
+                            self.node(id)?
+                                .animated_frame(frame.into(), layout.as_ref())?;
+                        }
+                    }
                     MountItem::LayoutAnimation(_) => {}
-                    MountItem::ViewStyle { id, style } => self.node(id)?.style(&style)?,
+                    MountItem::ViewStyle { id, style } => {
+                        if !self.leaving(id) && !self.closing_modal(id) {
+                            self.node(id)?.style(&style)?;
+                        }
+                    }
                     MountItem::Text {
                         id,
                         layout,
@@ -693,20 +722,22 @@ impl Mounter {
                         text,
                         ..
                     } => {
-                        self.node(id)?
-                            .accessibility_state
-                            .text(self.node(id)?, &text.text);
-                        let raster = layout
-                            .0
-                            .downcast_ref::<RasterText>()
-                            .ok_or(Error::Unsupported("foreign text layout"))?;
-                        self.node(id)?
-                            .text(raster, content.into(), layout.clone())?;
-                        self.node(id)?
-                            .set_events(self.node(id)?.interaction.mask())?;
-                        self.node(id)?
-                            .interaction
-                            .text(self.node(id)?, &text.text)?;
+                        if !self.leaving(id) && !self.closing_modal(id) {
+                            self.node(id)?
+                                .accessibility_state
+                                .text(self.node(id)?, &text.text);
+                            let raster = layout
+                                .0
+                                .downcast_ref::<RasterText>()
+                                .ok_or(Error::Unsupported("foreign text layout"))?;
+                            self.node(id)?
+                                .text(raster, content.into(), layout.clone())?;
+                            self.node(id)?
+                                .set_events(self.node(id)?.interaction.mask())?;
+                            self.node(id)?
+                                .interaction
+                                .text(self.node(id)?, &text.text)?;
+                        }
                     }
                     MountItem::Gestures { id, values } => self
                         .node(id)?
@@ -732,7 +763,10 @@ impl Mounter {
                         self.node(id)?.interaction.track(self.node(id)?, states)?
                     }
                     MountItem::ModalConfig { id, config } => {
-                        if let Some(modal) = self.node(id)?.modal.borrow().as_ref() {
+                        if !self.leaving(id)
+                            && !self.closing_modal(id)
+                            && let Some(modal) = self.node(id)?.modal.borrow().as_ref()
+                        {
                             modal.configure(config)?;
                         }
                     }
@@ -957,7 +991,7 @@ impl Mounter {
                         }
                         Command::ScrollTo { x, y, animated } => {
                             if let Some(scroll) = self.node(id)?.scroll.borrow().as_ref() {
-                                scroll.to(x.0, y.0, animated)?;
+                                scroll.command_to(x.0, y.0, animated)?;
                             }
                         }
                         command @ Command::Seek(_) => {

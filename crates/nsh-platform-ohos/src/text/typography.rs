@@ -52,7 +52,7 @@ pub(crate) struct RasterText {
 
 // Reserve the retained raster and one transient transfer copy together.
 // A layout retained by core also retains its reservation.
-const RASTER_BUDGET: usize = 96 << 20;
+const RASTER_BUDGET: usize = 256 << 20;
 pub(crate) struct Reservation {
     used: Arc<AtomicUsize>,
     bytes: usize,
@@ -70,6 +70,7 @@ pub(crate) struct Prepared {
     text: Arc<str>,
     no_wrap: bool,
     links: Vec<nsh_core::TextLink>,
+    backgrounds: Vec<(u32, u32, nsh_core::TextBackground)>,
     decorations: Vec<crate::text::decoration::Decoration>,
     selectable: Option<Arc<str>>,
     selection_color: Option<Color>,
@@ -237,12 +238,19 @@ impl TextEngine for OhosTextEngine {
                 builder.add_text(&String::from_utf16_lossy(&utf16[s..e]));
             }
         };
+        let mut backgrounds = Vec::new();
         let mut decorations = Vec::new();
         for span in &text.spans {
+            if let Some(bg) = span.style.background
+                && span.start < span.end
+            {
+                backgrounds.push((span.start, span.end, bg));
+            }
             let mut style = TextStyle::new();
-            let custom_decoration = (span.style.decoration_thickness.is_some()
+            let custom_decoration = ((span.style.decoration_thickness.is_some()
                 || span.style.underline_offset.is_some())
-                && (span.style.decoration.underline || span.style.decoration.line_through);
+                && (span.style.decoration.underline || span.style.decoration.line_through))
+                || (span.style.decoration.underline && span.style.decoration.line_through);
             style.set_color(argb(span.style.color));
             let mut decoration = ohos_drawing_binding::TextDecoration::NONE;
             if span.style.decoration.underline && !custom_decoration {
@@ -349,6 +357,7 @@ impl TextEngine for OhosTextEngine {
             text: shared_text,
             no_wrap: text.no_wrap,
             links: text.links.clone(),
+            backgrounds,
             decorations,
             selection_color: text.selection_color,
         }
@@ -521,6 +530,100 @@ impl TextEngine for OhosTextEngine {
             canvas.clear(0);
             canvas.scale(scale, scale);
             canvas.translate(0.0, padding_top);
+            if !prepared.backgrounds.is_empty() {
+                for line in &raster.lines {
+                    let baseline = (line.y + line.ascender).0;
+                    let mut raw_pieces = Vec::new();
+                    for &(span_start, span_end, bg) in &prepared.backgrounds {
+                        let start = span_start.max(line.start) as usize;
+                        let end = span_end.min(line.end) as usize;
+                        if start >= end {
+                            continue;
+                        }
+                        for rect in paragraph.range_rectangles(start, end) {
+                            let width = rect[2] - rect[0];
+                            if width <= 0.0 {
+                                continue;
+                            }
+                            let ascent = (baseline - rect[1]).max(0.0);
+                            let descent = (rect[3] - baseline).max(0.0);
+                            raw_pieces.push((rect[0], rect[2], bg, ascent, descent));
+                        }
+                    }
+                    if raw_pieces.is_empty() {
+                        continue;
+                    }
+                    raw_pieces.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    let mut pieces = Vec::with_capacity(raw_pieces.len() * 2);
+                    let mut prev_right: Option<f32> = None;
+                    for (left, right, bg, ascent, descent) in raw_pieces {
+                        if let Some(prev) = prev_right
+                            && left > prev + 0.5
+                        {
+                            pieces.push(nsh_core::LinePiece {
+                                x: Points(prev),
+                                width: Points(left - prev),
+                                background: None,
+                                ascent: Points::ZERO,
+                                descent: Points::ZERO,
+                            });
+                        }
+                        prev_right = Some(prev_right.map_or(right, |p| p.max(right)));
+                        pieces.push(nsh_core::LinePiece {
+                            x: Points(left),
+                            width: Points(right - left),
+                            background: Some(bg),
+                            ascent: Points(ascent),
+                            descent: Points(descent),
+                        });
+                    }
+                    let line_right = size.width.max((line.x + line.width).0);
+                    nsh_core::BackgroundBox::join(pieces, (Points(0.0), Points(line_right)), |b| {
+                        let mut brush = ohos_drawing_binding::Brush::new();
+                        brush.set_anti_alias(true);
+                        brush.set_color(argb(b.background.color));
+                        canvas.attach_brush(&brush);
+                        let r = b.radius();
+                        let top = baseline - b.ascent.0;
+                        let h = (b.ascent + b.descent).0;
+                        if r.0 > 0.0 {
+                            let mut path = ohos_drawing_binding::Path::new();
+                            nsh_core::shape::rounded_rect(
+                                nsh_core::Bounds::new(
+                                    Point::new(b.x, Points(top)),
+                                    Size::new(b.width, Points(h)),
+                                ),
+                                nsh_core::Corners::all(Size::new(r, r)),
+                                false,
+                                false,
+                                &mut |s| match s {
+                                    nsh_core::shape::Segment::Move(p) => {
+                                        path.move_to(p.x.0, p.y.0);
+                                    }
+                                    nsh_core::shape::Segment::Line(p) => {
+                                        path.line_to(p.x.0, p.y.0);
+                                    }
+                                    nsh_core::shape::Segment::Cubic([a, b, c]) => {
+                                        path.bezier_curve_to(
+                                            a.x.0, a.y.0, b.x.0, b.y.0, c.x.0, c.y.0,
+                                        );
+                                    }
+                                    nsh_core::shape::Segment::Close => path.close(),
+                                },
+                            );
+                            canvas.draw_path(&path);
+                        } else {
+                            canvas.draw_rect(&ohos_drawing_binding::Rect::new(
+                                b.x.0,
+                                top,
+                                b.x.0 + b.width.0,
+                                top + h,
+                            ));
+                        }
+                        canvas.detach_brush();
+                    });
+                }
+            }
             paragraph.paint(&canvas, 0.0, 0.0);
             for decoration in &prepared.decorations {
                 decoration.draw(&canvas, &paragraph, self.scale, size.width);

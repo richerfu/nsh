@@ -101,7 +101,6 @@ impl Plane {
                 Ok(())
             })
         });
-        crate::render::node::node_receivers_only();
         Ok(plane)
     }
     pub(crate) fn key(&self) -> Option<Key> {
