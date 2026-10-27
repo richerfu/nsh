@@ -215,6 +215,7 @@ impl Scroller {
                 Ok(())
             })
         });
+        crate::render::node::node_receivers_only();
         let weak = Rc::downgrade(&scroll);
         scroll
             .native

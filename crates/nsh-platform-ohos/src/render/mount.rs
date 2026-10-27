@@ -478,6 +478,8 @@ impl Mounter {
         if let Some(node) = self.slots[id as usize].take() {
             self.animator.remove(id);
             node.deactivate();
+            *node.bitmap.borrow_mut() = None;
+            *node.raster.borrow_mut() = None;
             self.removed.push(node);
         }
         Ok(())
@@ -645,6 +647,11 @@ impl Mounter {
                         node.accessibility_state.changed(node);
                         node.interaction
                             .pointer(node, parent.interaction.blocks_children())?;
+                        if node.kind == ViewKind::HeaderItem
+                            && let Some(screen) = parent.screen.borrow().as_ref()
+                        {
+                            screen.update(screen.has_back())?;
+                        }
                         node.inserted(layout.as_ref())?;
                     }
                     MountItem::Remove { id } => {
@@ -1053,6 +1060,7 @@ impl Mounter {
                 self.delete_now(id)?;
             }
         }
+        self.flush_arkui()?;
         Ok(animating)
     }
 

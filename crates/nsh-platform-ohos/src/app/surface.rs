@@ -704,6 +704,7 @@ impl NshSurface {
                     Ok(())
                 })
             });
+            crate::render::node::node_receivers_only();
             state
                 .borrow_mut()
                 .content
@@ -838,6 +839,16 @@ impl NshSurface {
                             .map_err(|_| Error::from_reason("source resource must be UTF-8"))?,
                     )
                 };
+                let app_json = name.rsplit_once('/').map_or_else(
+                    || "app.json".to_owned(),
+                    |(parent, _)| format!("{parent}/app.json"),
+                );
+                if let Ok(bytes) = host.resource(&app_json)
+                    && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                    && let Some(id) = value.get("id").and_then(serde_json::Value::as_str)
+                {
+                    bundle.app_id = Some(id.to_owned());
+                }
                 if !has_override {
                     let companion = name.rsplit_once('/').map_or_else(
                         || "capabilities.json".to_owned(),

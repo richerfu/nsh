@@ -309,8 +309,26 @@ impl Target {
             Error::from_reason(format!("Native attachment target {} {error}", self.id))
         })?;
         self.detach_inner()?;
-        self.inner.borrow_mut().take();
-        self.parent.borrow_mut().take();
+        if let Some(inner) = self.inner.borrow_mut().take()
+            && inner.borrow().is_owned()
+            && Rc::strong_count(&inner) == 1
+        {
+            inner
+                .borrow()
+                .remove_from_parent()
+                .and_then(|()| inner.borrow_mut().dispose())
+                .map_err(|error| Error::from_reason(error.to_string()))?;
+        }
+        if let Some(parent) = self.parent.borrow_mut().take()
+            && parent.borrow().is_owned()
+            && Rc::strong_count(&parent) == 1
+        {
+            parent
+                .borrow()
+                .remove_from_parent()
+                .and_then(|()| parent.borrow_mut().dispose())
+                .map_err(|error| Error::from_reason(error.to_string()))?;
+        }
         Ok(())
     }
 }
@@ -487,6 +505,15 @@ impl NativeAttachment {
                 return Err(Error::from_reason(error.to_string()));
             }
             target.inner_receiver_active.set(true);
+            let _ = inner
+                .borrow()
+                .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedMeasure);
+            let _ = inner
+                .borrow()
+                .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedLayout);
+            let _ = inner
+                .borrow()
+                .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedRender);
         }
         Ok(())
     }

@@ -188,6 +188,7 @@ impl Wrapper {
                 Ok(())
             })
         });
+        crate::render::node::node_receivers_only();
         Ok(Self {
             closed: std::cell::Cell::new(false),
             outer,

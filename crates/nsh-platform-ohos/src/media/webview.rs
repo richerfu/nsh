@@ -273,10 +273,6 @@ impl WebView {
         } else if let Some(target) = self.target.borrow_mut().take() {
             target.invalidate()?;
         }
-        if self.native.borrow().is_owned() {
-            self.native.borrow().remove_from_parent()?;
-            self.native.borrow_mut().dispose()?;
-        }
         Ok(())
     }
 

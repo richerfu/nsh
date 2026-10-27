@@ -34,8 +34,11 @@ pub(crate) type NativeNode = Rc<RefCell<ArkUINode>>;
 pub(crate) enum Error {
     #[error("invalid OHOS mount node {0}")]
     InvalidNode(NodeId),
-    #[error(transparent)]
-    ArkUi(#[from] ohos_arkui_binding::common::error::ArkUIError),
+    #[error("{0} at {1}")]
+    ArkUi(
+        ohos_arkui_binding::common::error::ArkUIError,
+        &'static std::panic::Location<'static>,
+    ),
     #[cfg(feature = "api-23")]
     #[error(transparent)]
     Accessibility(#[from] ohos_accessibility_binding::AccessibilityError),
@@ -45,6 +48,12 @@ pub(crate) enum Error {
     Vsync(i32),
     #[error("OHOS backend does not support {0}")]
     Unsupported(&'static str),
+}
+impl From<ohos_arkui_binding::common::error::ArkUIError> for Error {
+    #[track_caller]
+    fn from(err: ohos_arkui_binding::common::error::ArkUIError) -> Self {
+        Self::ArkUi(err, std::panic::Location::caller())
+    }
 }
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
@@ -57,6 +66,7 @@ struct AppliedStyle {
     border_color: [u32; 4],
     border_style: i32,
     shadow: Option<(f32, f32, f32, u32)>,
+    ink_outset: f32,
     clip: bool,
     visibility: i32,
     transform: Option<[f32; 16]>,
@@ -72,6 +82,7 @@ impl Default for AppliedStyle {
             border_color: [0; 4],
             border_style: 0,
             shadow: None,
+            ink_outset: 0.0,
             clip: false,
             visibility: 0,
             transform: None,
@@ -117,7 +128,7 @@ pub(crate) struct Node {
     navigation_presentation: Cell<(f32, f32)>,
     decoration: crate::render::decor::Decoration,
     outlined: Cell<bool>,
-    bitmap: RefCell<Option<Bitmap>>,
+    pub(crate) bitmap: RefCell<Option<Bitmap>>,
     pub(crate) raster: RefCell<Option<nsh_core::TextLayout>>,
     pub(crate) selection: crate::text::selection::state::State,
     tint: Cell<Option<nsh_core::Color>>,
@@ -267,6 +278,7 @@ impl Node {
                 Ok(())
             })
         });
+        node_receivers_only();
         if kind == ViewKind::Modal {
             node.ensure_wrapper()?;
         }
@@ -444,11 +456,28 @@ impl Node {
         }
         Ok(bounds)
     }
+    pub(crate) fn header_item_visible(&self) -> bool {
+        if self.kind != ViewKind::HeaderItem {
+            return true;
+        }
+        let Some(parent) = self.parent_node.borrow().upgrade() else {
+            return false;
+        };
+        let Some(screen) = parent.screen.borrow().as_ref().cloned() else {
+            return false;
+        };
+        let c = screen.config.borrow();
+        c.header_visible
+            && (c.left == Some(self.id)
+                || c.right == Some(self.id)
+                || c.title_view == Some(self.id))
+    }
     pub(crate) fn visible_in_tree(&self) -> bool {
         if !self.active.get()
             || self.leaving.get()
             || self.backface_away.get()
             || self.style.borrow().hidden
+            || !self.header_item_visible()
         {
             return false;
         }
@@ -464,6 +493,7 @@ impl Node {
         self.active.get()
             && !self.backface_away.get()
             && !self.style.borrow().hidden
+            && self.header_item_visible()
             && self
                 .screen
                 .borrow()
@@ -615,6 +645,9 @@ impl Node {
             }
             if let Some(scroll) = self.scroll.borrow().as_ref() {
                 scroll.viewport(Size::new(frame.width, frame.height))?;
+            }
+            if let Some(screen) = self.screen.borrow().as_ref() {
+                screen.update(screen.has_back())?;
             }
         }
         self.native
@@ -813,6 +846,7 @@ impl Node {
                         Ok(())
                     })
                 });
+            node_receivers_only();
         }
         if self.style.borrow().effects != style.effects
             || self.style.borrow().outline != style.outline
@@ -927,6 +961,44 @@ impl Node {
         self.applied.set(applied);
         Ok(())
     }
+    /// Box shadows and outlines are drawn by the node's own draw callbacks,
+    /// outside its bounds; ArkUI repaints a moved or restyled node only
+    /// within its draw region, so its old shadow would stay on screen. A
+    /// transparent native outline as wide as that paint extends the region
+    /// (ArkUI counts outlines in it) without drawing anything.
+    fn apply_ink_outset(&self, style: &ViewStyle) -> Result<()> {
+        let mut outset = 0.0f32;
+        if style.outline.is_visible() {
+            outset = outset.max(style.outline.width.0 + style.outline.offset.0);
+        }
+        for shadow in style
+            .effects
+            .iter()
+            .flat_map(|effects| &effects.box_shadows)
+            .filter(|shadow| !shadow.inset && shadow.is_visible())
+        {
+            outset = outset.max(
+                shadow.spread.0
+                    + shadow.blur.0.max(0.0) * 1.5
+                    + shadow.offset_x.0.abs().max(shadow.offset_y.0.abs()),
+            );
+        }
+        let outset = outset.max(0.0).ceil();
+        let mut applied = self.applied.get();
+        if applied.ink_outset != outset {
+            let node = self.native.borrow();
+            if outset > 0.0 {
+                node.set_u32_attribute(Attribute::OutlineColor, 0)?;
+                node.set_number_attribute(Attribute::OutlineWidth, vec![Number::Float(outset); 4])?;
+            } else {
+                node.reset_attribute(Attribute::OutlineWidth)?;
+                node.reset_attribute(Attribute::OutlineColor)?;
+            }
+            applied.ink_outset = outset;
+            self.applied.set(applied);
+        }
+        Ok(())
+    }
     fn apply_shadow(&self, shadow: nsh_core::Shadow) -> Result<()> {
         let next = shadow.is_visible().then(|| {
             (
@@ -989,6 +1061,7 @@ impl Node {
         self.apply_background_color(style.background_color)?;
         self.apply_borders(style)?;
         self.apply_shadow(style.shadow)?;
+        self.apply_ink_outset(style)?;
         self.apply_clip()?;
         Ok(())
     }
@@ -1160,7 +1233,11 @@ impl Node {
                 applied.transform = None;
             }
             self.backface_away.set(false);
-            let visibility = i32::from(style.hidden);
+            let visibility = if !self.header_item_visible() {
+                2
+            } else {
+                i32::from(style.hidden)
+            };
             if applied.visibility != visibility {
                 native.set_i32_attribute(Attribute::Visibility, visibility)?;
                 applied.visibility = visibility;
@@ -1208,7 +1285,11 @@ impl Node {
         }
         self.backface_away
             .set(style.backface_hidden && m.0[10] < 0.0);
-        let visibility = i32::from(style.hidden || self.backface_away.get());
+        let visibility = if !self.header_item_visible() {
+            2
+        } else {
+            i32::from(style.hidden || self.backface_away.get())
+        };
         if applied.visibility != visibility {
             native.set_i32_attribute(Attribute::Visibility, visibility)?;
             applied.visibility = visibility;
@@ -1283,7 +1364,7 @@ impl Node {
             // belong exclusively to this UI bitmap after upload.
             let pixels = raster.pixels.lock().expect("text pixels").take();
             let mut slot = self.bitmap.borrow_mut();
-            if let Some(pixels) = pixels {
+            if let Some((pixels, _transfer_budget)) = pixels {
                 let reuse = slot
                     .as_ref()
                     .is_some_and(|b| b.width() == raster.width && b.height() == raster.height);
@@ -1474,6 +1555,9 @@ impl Node {
             event.measure_child(&component.native.borrow())?;
         }
         for child in self.children.borrow().iter().filter_map(Weak::upgrade) {
+            if !child.header_item_visible() {
+                continue;
+            }
             event.measure_child(&child.mounted().borrow())?;
         }
         Ok(())
@@ -1515,6 +1599,9 @@ impl Node {
             event.layout_child(&component.native.borrow(), 0, 0)?;
         }
         for child in self.children.borrow().iter().filter_map(Weak::upgrade) {
+            if child.kind == ViewKind::HeaderItem && self.screen.borrow().is_some() {
+                continue;
+            }
             let frame = child.frame.get();
             event.layout_child(
                 &child.mounted().borrow(),
@@ -1613,6 +1700,31 @@ impl Drop for Node {
         }
         if let Some(web) = self.web.borrow_mut().take() {
             callback(|| web.close());
+            let native = web.native().clone();
+            drop(web);
+            if native.borrow().is_owned() {
+                callback(|| {
+                    let index = self
+                        .native
+                        .borrow()
+                        .children()
+                        .iter()
+                        .position(|child| Rc::ptr_eq(child, &native));
+                    if let Some(index) = index {
+                        if native.borrow().parent()?.is_some() {
+                            self.native.borrow_mut().remove_child(index)?;
+                        } else {
+                            self.native.borrow_mut().children_mut().remove(index);
+                        }
+                    } else {
+                        native.borrow().remove_from_parent()?;
+                    }
+                    if Rc::strong_count(&native) == 1 {
+                        native.borrow_mut().dispose()?;
+                    }
+                    Ok(())
+                });
+            }
         }
         if let Some(video) = self.video.borrow_mut().take() {
             callback(|| video.close());
@@ -1665,6 +1777,34 @@ impl Drop for Node {
         {
             log::error!("OHOS dispose: {error}");
         }
+    }
+}
+/// Keeps custom events (measure, layout, draw) on the per-node receivers.
+///
+/// `ohos-arkui-binding` adds a receiver to the node *and* installs the same
+/// trampoline as ArkUI's global receiver on every registration; ArkUI calls a
+/// node's receivers and then the global one, so each event would reach its
+/// callback twice: every layout pass ran twice and translucent paint (box
+/// shadows, gradients) was drawn twice, at double opacity. Call after
+/// registering custom events.
+pub(crate) fn node_receivers_only() {
+    use std::sync::OnceLock;
+    static API: OnceLock<usize> = OnceLock::new();
+    let api = *API.get_or_init(|| {
+        // SAFETY: ArkUI's documented module query; the name is NUL-terminated.
+        unsafe {
+            ohos_arkui_sys::OH_ArkUI_QueryModuleInterfaceByName(
+                ohos_arkui_sys::ArkUI_NativeAPIVariantKind_ARKUI_NATIVE_NODE,
+                c"ArkUI_NativeNodeAPI_1".as_ptr().cast(),
+            ) as usize
+        }
+    }) as *mut ohos_arkui_sys::ArkUI_NativeNodeAPI_1;
+    // SAFETY: the interface table lives for the process; clearing the global
+    // receiver is its documented use, on the UI thread that registered it.
+    if let Some(register) =
+        unsafe { api.as_ref() }.and_then(|api| api.registerNodeCustomEventReceiver)
+    {
+        unsafe { register(None) };
     }
 }
 pub(crate) fn callback(f: impl FnOnce() -> Result<()>) {

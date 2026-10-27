@@ -5,13 +5,18 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use nsh_core::{EventKind, EventPayload, ScreenAnimation, ScreenConfig, ViewKind};
+use nsh_core::{
+    EdgeInsets, EventKind, EventPayload, Points, ScreenAnimation, ScreenConfig, ViewKind,
+};
 use ohos_arkui_binding::{
     component::{
         attribute::{ArkUICommonAttribute, ArkUIEvent},
         built_in_component::{Stack, Text},
     },
-    types::{advanced::LengthMetricUnit, attribute::ArkUINodeAttributeType as A},
+    types::{
+        advanced::{LengthMetricUnit, NodeDirtyFlag},
+        attribute::ArkUINodeAttributeType as A,
+    },
 };
 
 use crate::{
@@ -35,6 +40,7 @@ pub(crate) struct Screen {
     peer: RefCell<Weak<Node>>,
     motion: RefCell<Option<Motion>>,
     immediate_removal: Cell<bool>,
+    insets: Cell<Option<EdgeInsets>>,
 }
 impl Screen {
     pub(crate) fn new(owner: Weak<Node>) -> Result<Rc<Self>> {
@@ -44,10 +50,12 @@ impl Screen {
         for node in [&header, &title, &back] {
             node.borrow().set_length_metric_unit(LengthMetricUnit::Vp)?;
         }
+        header.borrow().z_index(1)?;
         header.borrow_mut().add_child(back.clone())?;
         header.borrow_mut().add_child(title.clone())?;
         back.borrow().set_string_attribute(A::TextContent, "‹")?;
         back.borrow().set_f32_attribute(A::FontSize, 28.0)?;
+        back.borrow().set_i32_attribute(A::TextAlign, 1)?;
         back.borrow().id("nsh-header-back")?;
         back.borrow().width(44.0)?;
         back.borrow().height(44.0)?;
@@ -69,6 +77,7 @@ impl Screen {
             peer: RefCell::default(),
             motion: RefCell::default(),
             immediate_removal: Cell::new(false),
+            insets: Cell::new(None),
         });
         let weak = Rc::downgrade(&screen);
         screen.back.borrow_mut().on_click(move || {
@@ -80,6 +89,9 @@ impl Screen {
     }
     pub(crate) fn is_top(&self) -> bool {
         self.top.get() && !self.popped.get()
+    }
+    pub(crate) fn has_back(&self) -> bool {
+        self.has_back.get()
     }
     pub(crate) fn paint_visible(&self) -> bool {
         self.is_top() || self.revealed.get() || self.motion.borrow().is_some()
@@ -109,10 +121,30 @@ impl Screen {
         } else {
             0.0
         };
-        if !c.large_title && !c.header_transparent && (c.header_height.0 - height).abs() > 0.01 {
-            owner
-                .control
-                .set_screen_header(owner.id, Some(nsh_core::Points(height)));
+        if owner.parent.get().is_some() {
+            if !c.large_title && !c.header_transparent && (c.header_height.0 - height).abs() > 0.01
+            {
+                owner
+                    .control
+                    .set_screen_header(owner.id, Some(Points(height)));
+            }
+            let safe = owner.platform.get().safe_area;
+            let insets = EdgeInsets {
+                top: if c.header_visible && !c.header_transparent {
+                    Points::ZERO
+                } else {
+                    Points(overlap)
+                },
+                right: safe.right,
+                bottom: safe.bottom,
+                left: safe.left,
+            };
+            if self.insets.replace(Some(insets)) != Some(insets) {
+                owner.emit(
+                    EventKind::Insets,
+                    nsh_core::navigation::insets_payload(insets),
+                );
+            }
         }
         let h = self.header.borrow();
         h.width(owner.frame.get().width)?;
@@ -147,6 +179,21 @@ impl Screen {
         self.back
             .borrow()
             .set_i32_attribute(A::Visibility, i32::from(!has_back || !c.back_visible))?;
+        drop(c);
+        for child in owner
+            .children
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|n| n.kind == ViewKind::HeaderItem)
+        {
+            child.mounted().borrow().z_index(2)?;
+            child.restore_style()?;
+        }
+        owner
+            .native
+            .borrow()
+            .mark_dirty(NodeDirtyFlag::NeedMeasure)?;
         Ok(())
     }
     pub(crate) fn request_back(&self) -> Result<()> {
@@ -313,10 +360,35 @@ impl Screen {
             owner.navigation_presentation(1.0, 0.0)?;
         }
         if let Some(peer) = self.peer.replace(Weak::new()).upgrade() {
-            peer.navigation_presentation(1.0, 0.0)?;
-            if let Some(screen) = peer.screen.borrow().as_ref() {
-                screen.revealed.set(false);
-                screen.show()?;
+            let shared = self
+                .owner
+                .upgrade()
+                .and_then(|owner| owner.parent_node.borrow().upgrade())
+                .is_some_and(|stack| {
+                    stack
+                        .children
+                        .borrow()
+                        .iter()
+                        .filter_map(Weak::upgrade)
+                        .filter(|child| {
+                            !self.owner.upgrade().is_some_and(|o| Rc::ptr_eq(&o, child))
+                        })
+                        .filter_map(|child| child.screen.borrow().clone())
+                        .any(|screen| {
+                            screen
+                                .peer
+                                .borrow()
+                                .upgrade()
+                                .is_some_and(|p| Rc::ptr_eq(&p, &peer))
+                        })
+                });
+            if !shared {
+                peer.navigation_presentation(1.0, 0.0)?;
+                if let Some(screen) = peer.screen.borrow().as_ref() {
+                    screen.revealed.set(false);
+                    screen.show()?;
+                }
+                peer.invalidate_scene();
             }
         }
         self.show()
@@ -393,6 +465,9 @@ impl Screen {
         if let Some(owner) = self.owner.upgrade() {
             let c = self.config.borrow();
             let width = owner.frame.get().width;
+            if !c.header_visible {
+                return Ok(());
+            }
             for child in owner
                 .children
                 .borrow()
@@ -402,7 +477,11 @@ impl Screen {
             {
                 let frame = child.frame.get();
                 let x = if c.left == Some(child.id) {
-                    if self.has_back.get() { 56.0 } else { 12.0 }
+                    if self.has_back.get() && c.back_visible {
+                        56.0
+                    } else {
+                        12.0
+                    }
                 } else if c.right == Some(child.id) {
                     width - frame.width - 12.0
                 } else if c.title_view == Some(child.id) {

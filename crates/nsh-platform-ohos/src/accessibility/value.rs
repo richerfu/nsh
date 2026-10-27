@@ -1,6 +1,21 @@
-//! Spoken accessibility values for states without a native flag.
+//! Spoken and ranged accessibility values for ArkUI nodes and virtual providers.
 
 use nsh_core::{Accessibility, Checked};
+
+/// Complete numeric range (`(min, max, current)`) accepted by ArkUI's
+/// `NODE_ACCESSIBILITY_VALUE` setter, which rejects partial ranges or
+/// out-of-bounds `current` with `ARKUI_ERROR_CODE_PARAM_INVALID`.
+pub(crate) fn range_value(accessibility: &Accessibility) -> Option<(i32, i32, i32)> {
+    let value = accessibility.value.as_ref()?;
+    let (min, max, now) = (value.min?, value.max?, value.now?);
+    if !min.is_finite() || !max.is_finite() || !now.is_finite() || max < min {
+        return None;
+    }
+    let min = min.floor() as i32;
+    let max = (max.ceil() as i32).max(min);
+    let current = (now.round() as i32).clamp(min, max);
+    Some((min, max, current))
+}
 
 pub(crate) fn spoken_value(accessibility: &Accessibility) -> Option<String> {
     let mut parts = Vec::new();
@@ -96,5 +111,52 @@ mod tests {
             Some("not checked, collapsed")
         );
         assert_eq!(spoken_value(&Accessibility::default()), None);
+    }
+
+    #[test]
+    fn range_value_requires_complete_finite_bounds_and_clamps_current() {
+        let indeterminate = Accessibility {
+            value: Some(AccessibilityValue {
+                min: Some(0.0),
+                max: Some(100.0),
+                now: None,
+                text: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(range_value(&indeterminate), None);
+
+        let without_bounds = Accessibility {
+            value: Some(AccessibilityValue {
+                min: None,
+                max: None,
+                now: Some(50.0),
+                text: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(range_value(&without_bounds), None);
+
+        let complete = Accessibility {
+            value: Some(AccessibilityValue {
+                min: Some(0.0),
+                max: Some(100.0),
+                now: Some(42.4),
+                text: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(range_value(&complete), Some((0, 100, 42)));
+
+        let out_of_bounds = Accessibility {
+            value: Some(AccessibilityValue {
+                min: Some(10.0),
+                max: Some(20.0),
+                now: Some(25.0),
+                text: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(range_value(&out_of_bounds), Some((10, 20, 20)));
     }
 }

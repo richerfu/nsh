@@ -3359,6 +3359,7 @@ dependencies = [
  "nsh-package",
  "ohos-accessibility-binding",
  "ohos-arkui-binding",
+ "ohos-arkui-sys",
  "ohos-avplayer-binding",
  "ohos-display-binding",
  "ohos-drawing-binding",

@@ -114,6 +114,10 @@ impl Scene {
                 }
                 node.ensure_wrapper()?;
                 node.restore_style()?;
+                node.native
+                    .borrow()
+                    .mark_dirty(NodeDirtyFlag::NeedMeasure)?;
+                node.native.borrow().mark_dirty(NodeDirtyFlag::NeedRender)?;
                 node.mounted()
                     .borrow()
                     .mark_dirty(NodeDirtyFlag::NeedRender)?;

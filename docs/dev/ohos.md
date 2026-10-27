@@ -41,3 +41,10 @@ Features:
 - **Controls and media** (`src/input/`, `src/scroll/`, `src/media/`, `src/interop/`): `Input` uses the system
   `TextInput` / `TextArea` BuilderNode; `Scroll` and `List` use native ArkUI `Scroll` (with on-demand `Refresh`);
   `WebView` uses `ArkWeb`; `Video` uses a C `XComponent` surface and an `AVPlayer` worker.
+- **Navigation** (`src/navigation/`): OHOS is a native-header platform, as iOS and Android: each `Screen` draws its own
+  bar (back button, title) and places only the `headerLeft` / `headerTitle` / `headerRight` items in it; a screen's
+  `header` slot (the bar on platforms without a native header) is never shown, as UIKit's and the Android toolbar's
+  bars never place it. Screens and modals report `onInsets` as the other backends do: a screen's top inset is 0 below
+  a visible, opaque header, else the safe area's top.
+- **Hit areas**: `hitSlop` and overflowing children widen `NODE_RESPONSE_REGION`, whose width and height are
+  percentages of the node's size (`100` is the node itself), not ratios.

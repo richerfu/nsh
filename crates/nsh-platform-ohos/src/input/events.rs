@@ -78,14 +78,14 @@ impl Interaction {
                     -slop.left.0,
                     -slop.top.0,
                     if f.width > 0.0 {
-                        (f.width + slop.left.0 + slop.right.0) / f.width
+                        (f.width + slop.left.0 + slop.right.0) / f.width * 100.0
                     } else {
-                        1.0
+                        100.0
                     },
                     if f.height > 0.0 {
-                        (f.height + slop.top.0 + slop.bottom.0) / f.height
+                        (f.height + slop.top.0 + slop.bottom.0) / f.height * 100.0
                     } else {
-                        1.0
+                        100.0
                     },
                 ]
                 .into(),

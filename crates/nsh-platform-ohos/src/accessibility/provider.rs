@@ -64,12 +64,11 @@ impl State {
                 ViewKind::Scroll | ViewKind::WebView | ViewKind::Video | ViewKind::Native
             )
             && owner.kind != ViewKind::Input
-            && (spec.value.as_ref().is_some_and(|value| {
-                value.min.is_some() && value.max.is_some() && value.now.is_some()
-            }) || spec
-                .actions
-                .iter()
-                .any(|action| matches!(action.name.as_ref(), "increment" | "decrement")));
+            && (crate::accessibility::value::range_value(&spec).is_some()
+                || spec
+                    .actions
+                    .iter()
+                    .any(|action| matches!(action.name.as_ref(), "increment" | "decrement")));
         if !eligible {
             self.clear();
             if self.suppressed.get() && !owner.wrapper_owns_semantics() {
@@ -312,11 +311,15 @@ impl Snapshot {
             .set_operation_actions(&self.actions)?;
         if let Some(value) = &self.spec.value
             && let (Some(min), Some(max), Some(now)) = (value.min, value.max, value.now)
+            && min.is_finite()
+            && max.is_finite()
+            && now.is_finite()
+            && max >= min
         {
             element.set_range_info(RangeInfo {
                 min: min as f64,
                 max: max as f64,
-                current: now as f64,
+                current: now.clamp(min, max) as f64,
             })?;
         }
         Ok(())

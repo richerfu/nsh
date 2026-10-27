@@ -318,6 +318,10 @@ class WebEntry {
 
   private release(): void {
     try {
+      try {
+        this.controller.stop();
+        this.controller.loadUrl("about:blank");
+      } catch (_error) {}
       this.node.dispose();
       this.disposed = true;
       quarantinedWebs.delete(this);

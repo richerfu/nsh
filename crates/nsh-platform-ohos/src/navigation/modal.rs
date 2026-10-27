@@ -32,8 +32,8 @@ pub(crate) struct Modal {
     progress: Cell<f32>,
     transition: RefCell<Option<Transition>>,
     closing: Cell<bool>,
-    size: Cell<Size>,
     insets: Cell<EdgeInsets>,
+    reported: Cell<nsh_core::navigation::Reported>,
     overlay: RefCell<Option<crate::app::session::Overlay>>,
 }
 impl Modal {
@@ -52,8 +52,8 @@ impl Modal {
             progress: Cell::new(0.0),
             transition: RefCell::default(),
             closing: Cell::new(false),
-            size: Cell::new(Size::default()),
             insets: Cell::new(EdgeInsets::default()),
+            reported: Cell::new(nsh_core::navigation::Reported::default()),
             overlay: RefCell::default(),
         });
         let weak = Rc::downgrade(&modal);
@@ -301,10 +301,22 @@ impl Modal {
                 Points::ZERO
             },
         };
-        let resized = size != self.size.replace(size);
-        let reinset = insets != self.insets.replace(insets);
-        if (resized || reinset) && size.width > 0.0 && size.height > 0.0 {
-            owner.control.set_root_size(owner.id, size.into(), insets);
+        self.insets.set(insets);
+        if size.height > 0.0 {
+            // Reported only on change, as every backend: the core's root size, and
+            // `onInsets` (`safeAreaInsets()` inside the modal) when the insets changed.
+            let mut reported = self.reported.get();
+            let changed = reported.update(size.into(), insets);
+            self.reported.set(reported);
+            if let Some(insets_changed) = changed {
+                owner.control.set_root_size(owner.id, size.into(), insets);
+                if insets_changed {
+                    owner.emit(
+                        EventKind::Insets,
+                        nsh_core::navigation::insets_payload(insets),
+                    );
+                }
+            }
         }
         Ok(size)
     }

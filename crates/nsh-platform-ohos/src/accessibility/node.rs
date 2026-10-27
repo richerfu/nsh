@@ -45,17 +45,14 @@ pub(crate) fn configure(owner: &Rc<Node>, old: &Accessibility, new: &Accessibili
         result?;
     }
     if old.value != new.value || old.state != new.state {
+        let range = crate::accessibility::value::range_value(new);
         let spoken = crate::accessibility::value::spoken_value(new);
-        if new.value.is_some() || spoken.is_some() {
+        if range.is_some() || spoken.is_some() {
             let mut value = AccessibilityValue::new()?;
-            if let Some(min) = new.value.as_ref().and_then(|v| v.min) {
-                value.set_min(min.floor() as i32);
-            }
-            if let Some(max) = new.value.as_ref().and_then(|v| v.max) {
-                value.set_max(max.ceil() as i32);
-            }
-            if let Some(now) = new.value.as_ref().and_then(|v| v.now) {
-                value.set_current(now.round() as i32);
+            if let Some((min, max, current)) = range {
+                value.set_min(min);
+                value.set_max(max);
+                value.set_current(current);
             }
             let result = (|| {
                 if let Some(text) = spoken {

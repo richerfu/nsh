@@ -38,7 +38,7 @@ pub(crate) struct RasterText {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) origin_y: f32,
-    pub(crate) pixels: Mutex<Option<Vec<u8>>>,
+    pub(crate) pixels: Mutex<Option<(Vec<u8>, Reservation)>>,
     pub(crate) scale: f32,
     pub(crate) text: Arc<str>,
     pub(crate) lines: Vec<RawLine>,
@@ -53,7 +53,7 @@ pub(crate) struct RasterText {
 // Reserve the retained raster and one transient transfer copy together.
 // A layout retained by core also retains its reservation.
 const RASTER_BUDGET: usize = 96 << 20;
-struct Reservation {
+pub(crate) struct Reservation {
     used: Arc<AtomicUsize>,
     bytes: usize,
 }
@@ -461,7 +461,8 @@ impl TextEngine for OhosTextEngine {
                         .count()
                         <= crate::text::selection::layout::MAX_CLUSTERS
             });
-            let bytes = width as usize * height as usize * 8;
+            let pixel_bytes = width as usize * height as usize * 4;
+            let bytes = pixel_bytes * 2;
             if self
                 .budget
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
@@ -473,9 +474,13 @@ impl TextEngine for OhosTextEngine {
                 raster.exhausted = true;
                 return TextLayout(Arc::new(raster));
             }
+            let transfer_budget = Reservation {
+                used: self.budget.clone(),
+                bytes: pixel_bytes,
+            };
             raster._budget = Some(Reservation {
                 used: self.budget.clone(),
-                bytes,
+                bytes: pixel_bytes,
             });
             if let Some(text) = selectable {
                 raster.selection = crate::text::selection::layout::Layout::new(
@@ -521,8 +526,9 @@ impl TextEngine for OhosTextEngine {
                 decoration.draw(&canvas, &paragraph, self.scale, size.width);
             }
             let pixels = canvas.bitmap().expect("bitmap canvas").pixels();
-            if pixels.len() == width as usize * height as usize * 4 {
-                *raster.pixels.get_mut().expect("new text pixels") = Some(pixels.to_vec());
+            if pixels.len() == pixel_bytes {
+                *raster.pixels.get_mut().expect("new text pixels") =
+                    Some((pixels.to_vec(), transfer_budget));
             } else {
                 log::warn!("OHOS text bitmap allocation failed");
             }
