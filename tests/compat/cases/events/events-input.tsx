@@ -9,7 +9,8 @@
 // that inserts nothing itself (`pasteBehavior`). Each handler shows what it gets as
 // text. Its
 // script checks each.
-import { Input, Text, View, signal } from "nsh";
+import { Text, View, signal } from "nsh";
+import { Input } from "nsh/base";
 
 function App() {
   const focus = signal("none");
@@ -51,7 +52,7 @@ function App() {
         testID="paste"
         pasteBehavior="report"
         style={{ width: 300, height: 40 }}
-        onPaste={(e) => pasted.set(`${e.text} files ${e.files.length} uris ${e.uris.length}`)}
+        onPaste={(e) => pasted.set(`${e.text} html ${e.html.length} files ${e.files.length} uris ${e.uris.length}`)}
       />
       <Text>Pasted: {pasted()}</Text>
       <Text>Submitted: {submitted()}</Text>

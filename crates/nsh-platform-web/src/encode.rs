@@ -16,8 +16,8 @@ use nsh_core::{
     ImageSource, InputConfig, Keyframes, LayoutCurve, LayoutTransition, MountItem, NativeProps,
     ObjectPosition, Points, ResizeMode, ScreenAnimation, ScrollBehavior, Transform, TransformKind,
     TransitionProps, ViewKind, ViewProps, ViewStyle, WebSource,
+    element::PropEnum,
     geometry::{DefiniteLength, REM_SIZE, Radians, Size, relative},
-    ui::PropEnum,
 };
 use rustc_hash::FxHashMap;
 
@@ -795,11 +795,12 @@ fn props_json(p: &ViewProps) -> String {
     if let Some(t) = &p.test_id {
         let _ = write!(s, ",\"testID\":{}", json_str(t));
     }
-    if p.focusable == Some(false) {
-        s.push_str(",\"focusable\":false");
+    // Unset leaves it to the presses (`ViewProps::focus_stop`).
+    if let Some(focusable) = p.focusable {
+        let _ = write!(s, ",\"focusable\":{focusable}");
     }
-    if p.selection_area {
-        s.push_str(",\"selectionArea\":true");
+    if p.selectable_view {
+        s.push_str(",\"selectableView\":true");
     }
     s.push('}');
     s
@@ -856,7 +857,7 @@ fn field_css(c: &InputConfig) -> String {
 fn behavior_json(b: &ScrollBehavior) -> String {
     let offsets: Vec<String> = b.snap_offsets.iter().map(|o| o.0.to_string()).collect();
     format!(
-        "{{\"paging\":{},\"snapInterval\":{},\"snapOffsets\":[{}],\"snapAlignment\":{},\"enabled\":{},\"bounces\":{},\"inset\":[{},{},{},{}],\"minZoom\":{},\"maxZoom\":{},\"bouncesZoom\":{},\"pinch\":{},\"centerContent\":{}}}",
+        "{{\"paging\":{},\"snapInterval\":{},\"snapOffsets\":[{}],\"snapAlignment\":{},\"enabled\":{},\"bounces\":{},\"inset\":[{},{},{},{}],\"minZoom\":{},\"maxZoom\":{},\"bouncesZoom\":{},\"pinch\":{},\"centerContent\":{},\"refreshIndicator\":{}}}",
         b.paging,
         b.snap_interval.0,
         offsets.join(","),
@@ -871,7 +872,9 @@ fn behavior_json(b: &ScrollBehavior) -> String {
         b.max_zoom,
         b.bounces_zoom,
         b.pinch,
-        b.center_content
+        b.center_content,
+        b.refresh_indicator
+            .map_or("null".to_owned(), |h| format!("{{\"height\":{}}}", h.0))
     )
 }
 
@@ -1263,7 +1266,9 @@ pub(crate) fn encode(out: &mut Out, item: &MountItem) {
         MountItem::Component { id, name } => out.item("comp").num(*id).str(name).end(),
         // Browsers hit-test what overflows a box themselves; the keymap
         // stays in Rust (`nsh_key`).
+        // No registered native components on the web.
         MountItem::ComponentProps { .. }
+        | MountItem::ComponentPropSlots { .. }
         | MountItem::Keymap(_)
         | MountItem::Overflow { .. }
         | MountItem::AnimationBindings { .. }
@@ -1351,14 +1356,6 @@ fn encode_command(out: &mut Out, id: u32, command: &Command) {
                 None => out.raw("null").raw("null"),
             };
             out.bool(*animated).end();
-        }
-        Command::Toast { text, long } => {
-            out.item("cmd")
-                .num(id)
-                .str("toast")
-                .str(text)
-                .bool(*long)
-                .end();
         }
         Command::SetClipboard(text) => out.item("cmd").num(id).str("setClipboard").str(text).end(),
         Command::OpenUrl { id: request, url } => out

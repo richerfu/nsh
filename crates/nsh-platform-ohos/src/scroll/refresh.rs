@@ -3,9 +3,10 @@
 use std::rc::Rc;
 
 use ohos_arkui_binding::{
+    common::attribute::ArkUINodeAttributeItem,
     component::{
         attribute::{ArkUICommonAttribute, ArkUIEvent},
-        built_in_component::Refresh as NativeRefresh,
+        built_in_component::{Refresh as NativeRefresh, Stack},
     },
     event::inner_event::Event,
     types::{
@@ -22,22 +23,31 @@ use crate::render::{
 #[derive(Default)]
 pub(super) struct Refresh {
     node: Option<NativeNode>,
+    indicator: Option<NativeNode>,
     listening: bool,
+    offset_listening: bool,
 }
 
 pub(super) struct Config {
     pub(super) enabled: bool,
     pub(super) refreshing: bool,
     pub(super) viewport: Size,
+    pub(super) own_indicator: Option<f32>,
+    pub(super) threshold: f32,
 }
 
 impl Refresh {
+    pub(super) fn is_mounted(&self) -> bool {
+        self.node.is_some()
+    }
+
     pub(super) fn update(
         &mut self,
         wrapper: &NativeNode,
         body: &NativeNode,
         config: Config,
         callback: impl Fn(&Event) + 'static,
+        on_offset: impl Fn(&Event) + 'static,
     ) -> Result<()> {
         let wanted = config.enabled || config.refreshing;
         if !wanted {
@@ -55,6 +65,28 @@ impl Refresh {
         node.borrow().set_length_metric_unit(LengthMetricUnit::Vp)?;
         node.borrow().width(config.viewport.width)?;
         node.borrow().height(config.viewport.height)?;
+        if let Some(height) = config.own_indicator {
+            if self.indicator.is_none() {
+                let indicator = Stack::new()?.into_node();
+                indicator
+                    .borrow()
+                    .set_length_metric_unit(LengthMetricUnit::Vp)?;
+                self.indicator = Some(indicator);
+            }
+            if let Some(indicator) = self.indicator.as_ref() {
+                indicator.borrow().width(config.viewport.width)?;
+                indicator.borrow().height(height)?;
+                node.borrow().set_attribute(
+                    A::RefreshContent,
+                    ArkUINodeAttributeItem::Object(indicator.borrow().raw_handle().cast()),
+                )?;
+            }
+        } else if let Some(indicator) = self.indicator.take() {
+            node.borrow().reset_attribute(A::RefreshContent)?;
+            indicator.borrow_mut().dispose()?;
+        }
+        node.borrow()
+            .set_f32_attribute(A::RefreshOffset, config.threshold)?;
         // Keep the existing trigger resistance in small embedded views.
         node.borrow()
             .set_f32_attribute(A::RefreshPullDownRatio, 0.5)?;
@@ -68,6 +100,11 @@ impl Refresh {
         } else if !config.enabled && self.listening {
             node.borrow_mut().off_event(E::RefreshOnRefresh)?;
             self.listening = false;
+        }
+        if !self.offset_listening {
+            node.borrow_mut()
+                .on_event(E::RefreshOnOffsetChange, on_offset);
+            self.offset_listening = true;
         }
         self.wrap(wrapper, body, &node)?;
         Ok(())
@@ -86,6 +123,14 @@ impl Refresh {
                 node.borrow_mut().off_event(E::RefreshOnRefresh)?;
                 self.listening = false;
             }
+            if self.offset_listening {
+                node.borrow_mut().off_event(E::RefreshOnOffsetChange)?;
+                self.offset_listening = false;
+            }
+            if let Some(indicator) = self.indicator.take() {
+                node.borrow().reset_attribute(A::RefreshContent)?;
+                indicator.borrow_mut().dispose()?;
+            }
             Self::move_body(&node, wrapper, body)?;
             Self::detach(wrapper, &node)?;
             node.borrow_mut().dispose()?;
@@ -102,6 +147,9 @@ impl Refresh {
         if let Some(node) = self.node.as_ref() {
             node.borrow().width(size.width)?;
             node.borrow().height(size.height)?;
+        }
+        if let Some(indicator) = self.indicator.as_ref() {
+            indicator.borrow().width(size.width)?;
         }
         Ok(())
     }

@@ -24,6 +24,11 @@ const SHADOW_RADIUS: f32 = 14.0;
 const STICKY_OFFSET: f32 = 15.0;
 /// Canvas animated value slot `n` is `CANVAS_ARG + n` (a color as ARGB bits).
 const CANVAS_ARG: f32 = 1000.0;
+/// A native component's animated prop slot `n` holding a number is
+/// `COMPONENT_NUMBER + n` (past the canvas slots' codes; exact in an f32).
+const COMPONENT_NUMBER: f32 = 70000.0;
+/// The same holding a color (ARGB bits) is `COMPONENT_COLOR + n`.
+const COMPONENT_COLOR: f32 = 140000.0;
 /// A color value as Java's ARGB bits.
 fn argb(value: AnimationValue) -> f32 {
     match value {
@@ -76,6 +81,8 @@ pub(crate) struct UiAnimation {
     gestures: FxHashMap<u32, Gestures>,
     /// Scroll view id -> (value node, horizontal).
     scrolls: FxHashMap<u32, (NodeId, bool)>,
+    /// Vertical scroll view id -> pull value node.
+    pulls: FxHashMap<u32, NodeId>,
     /// Scroll view id -> its sticky cells that stick an animated value
     /// further in, with that value's node.
     sticky: FxHashMap<u32, Vec<(u32, NodeId)>>,
@@ -106,15 +113,26 @@ impl UiAnimation {
                 id,
                 horizontal,
                 scroll_value,
+                pull_value,
                 ..
-            } => match scroll_value {
-                Some(node) => {
-                    self.scrolls.insert(id, (node, horizontal));
+            } => {
+                match scroll_value {
+                    Some(node) => {
+                        self.scrolls.insert(id, (node, horizontal));
+                    }
+                    None => {
+                        self.scrolls.remove(&id);
+                    }
                 }
-                None => {
-                    self.scrolls.remove(&id);
+                match pull_value.filter(|_| !horizontal) {
+                    Some(node) => {
+                        self.pulls.insert(id, node);
+                    }
+                    None => {
+                        self.pulls.remove(&id);
+                    }
                 }
-            },
+            }
             MountItem::StickyCells { id, cells } => {
                 let animated: Vec<(u32, NodeId)> = cells
                     .iter()
@@ -131,6 +149,7 @@ impl UiAnimation {
                 self.statics.remove(&id);
                 self.gestures.remove(&id);
                 self.scrolls.remove(&id);
+                self.pulls.remove(&id);
                 self.sticky.remove(&id);
             }
             _ => {}
@@ -161,6 +180,16 @@ impl UiAnimation {
         };
         self.graph
             .set(node, if horizontal { x } else { y }, &mut self.finished);
+        true
+    }
+
+    /// A vertical scroll view is pulled `distance` points past its top:
+    /// feeds its pull value.
+    pub(crate) fn pulled(&mut self, id: u32, distance: f32) -> bool {
+        let Some(&node) = self.pulls.get(&id) else {
+            return false;
+        };
+        self.graph.set(node, distance.max(0.0), &mut self.finished);
         true
     }
 
@@ -293,6 +322,17 @@ impl UiAnimation {
                     }
                     // The scroll view's (`sticky` below), never bound.
                     AnimationProp::StickyTop | AnimationProp::StickyLeft => {}
+                    // Java hands it to the component when it changed.
+                    AnimationProp::ComponentSlot(k) => match self.graph.eval(node) {
+                        AnimationValue::Color(c) => out.extend_from_slice(&[
+                            v,
+                            COMPONENT_COLOR + k as f32,
+                            f32::from_bits(c.rotate_right(8)),
+                        ]),
+                        other => {
+                            out.extend_from_slice(&[v, COMPONENT_NUMBER + k as f32, other.number()])
+                        }
+                    },
                 }
             }
             if let Some(s) = shadow {

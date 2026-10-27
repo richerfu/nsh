@@ -13,7 +13,7 @@ Android) that lays out its children with flexbox or grid, draws a background, bo
 presses. Buttons, cards, rows and screens are all views. Rust makes one with `view()`, TSX with `<View>` from `nsh`.
 
 ```rust tabs
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 
 fn app() -> impl IntoElement {
     let liked = signal(false);
@@ -87,13 +87,26 @@ column. In Rust, `.flex_row()` and `.flex_col()` say the direction.
 
 ## Props
 
-`View` has no props of its own beyond the [common props](./index.md#common-props): its styles (`style`, `class`,
+`View` has one prop of its own, `selectable` (`.selectable(true)` in Rust): the texts inside the view select together, as one selection ([Text selection](./text-selection.md)). The rest are the [common props](./index.md#common-props): its styles (`style`, `class`,
 `classList`; the `Styled` methods in Rust), `disabled`, the press props (`onPress`, `onLongPress`, `onPressDown`,
 `onPressUp`, `delayLongPress`, `hitSlop`, `pointerEvents`), the state styles (`activeStyle`, `hoverStyle`,
 `focusStyle`, `disabledStyle`, `checkedStyle`), `onHoverIn` / `onHoverMove` / `onHoverOut`, `onContextMenu`,
 `onFileDragEnter` / `onFileDragLeave` / `onFileDrop`, `focusable`, `onLayout`, `ref`, `nativeID`, `testID`, the
 gesture props (`pan`, `pinch`, `rotation` and their events), the touch and responder props, the accessibility props
 and `ios` / `android` / `desktop`.
+
+## Selectable views
+
+With `selectable`, a selection runs across the [`Text`](./text.md) elements and [`TextView`](./text-view.md)s inside
+the view, in reading order; texts with `selectable={false}` stay out, and a selectable view inside another is part of
+the outer one. See [Text selection](./text-selection.md) for the gestures on each platform.
+
+```tsx
+<View selectable class="gap-3 p-4">
+  <Text>One selection runs from here…</Text>
+  <Text>…to here.</Text>
+</View>
+```
 
 ## Press feedback
 
@@ -154,7 +167,7 @@ view()
 | `onLongPress` | `.on_long_press` | none | The finger stayed down for `delayLongPress` (500 ms). |
 | `onPressDown` / `onPressUp` | `.on_press_down` / `.on_press_up` | none | A finger went down / lifted or left. |
 | `onHoverIn` / `onHoverOut` | `.on_hover_in` / `.on_hover_out` | none | The mouse came over the view (or a view inside it) / left it or the window ([hover](./index.md#hover)). |
-| `onHoverMove` | `.on_hover_move` | `HoverEvent` | The mouse moved over the view with no button down: `position`, `pagePosition` (`Point`s) and `modifiers`; at most once a frame. |
+| `onHoverMove` | `.on_hover_move` | `HoverEvent` | The mouse moved over the view with no button down, or a modifier key was pressed or released while it rests there: `position`, `pagePosition` (`Point`s) and `modifiers`; at most once a frame. |
 | `onMouseMove` | `.on_mouse_move` | TSX `Point`; Rust `Point<Points>` | Mouse movement, including with a button down, on macOS, Linux, Windows, GPUI and web. Local coordinates in points; nested listeners hear it inside out, at most once a frame. |
 | `onContextMenu` | `.on_context_menu` | `ContextMenuEvent` | The secondary button was pressed over the view ([context menus](./index.md#context-menus)). |
 | `onFileDragEnter` / `onFileDragLeave` | `.on_file_drag_enter` / `.on_file_drag_leave` | none | A local-file drag entered / left the active desktop destination. |
@@ -217,7 +230,7 @@ received files.
 ## Ref methods
 
 A plain view has no commands of its own. `ref` (`.element_ref(&handle)` in Rust) gives you its node, e.g. to pass to
-`setAccessibilityFocus` ([`nsh/accessibility`](../modules/nsh-accessibility.md)), or to measure it
+`setAccessibilityFocus` ([`nsh`'s accessibility API](../modules/nsh.md#accessibility)), or to measure it
 (`handle.measure()` in Rust).
 
 ## Views inside text

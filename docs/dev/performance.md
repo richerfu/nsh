@@ -25,6 +25,28 @@ Without mouse listeners, each backend skips the new mouse hit test. Mouse moves 
 coalescing interval, with the latest coordinates kept independently per view and event kind.
 
 
+`Editor` and `DiffView` at 200 000 lines (15 MB of Rust, Linux x86_64, release CLI, headless, `--trace`; the apps
+are `mount`ed TSX building the text in JS). Editor: first frame 98 ms, of which 69 ms is the app's JS building the
+string and the first commit 29 ms (22 ops / 1218 mount items / 508 nodes; before: 184 ms, fold candidates and every
+row's width computed up front); a typed character, Enter or undo 1.4–2.4 ms (17 items, 77 for Enter / undo; before:
+3.4 ms more, the `onChange` text built twice); scrolling 3000 points commits 13 times, 0.7 ms each (median; at most
+3.3 ms, when the row window moves: before, 151 commits of 0.15 ms, one per frame, the window moving by a row). Highlighting runs off the
+engine thread (before: 4 ms per frame on it, 22 s of frames to reach the end); a jump to line 199 000 shows guessed
+colors in under 300 ms (12 ms of parsing per 100 lines). DiffView (a change every 500 lines): first frame 166 ms, of
+which 95 ms is JS and the commit with the line diff 72 ms (3083 items); scrolling 3000 points commits 8 times, 1.9 ms
+each, 16 ms in all (before: 150 commits, 51 ms). A round of the gallery's language server on 50 000 lines (macOS desktop
+size, release CLI, headless): the commit taking 50 006 diagnostics and 50 002 decorations 23 ms, 7.5 and 6 ms of it
+resolving them (before: 145 ms, 53 and 52 ms, four rope lookups per position; the gutter's severities and the
+diagnostics at a point scanned every mark).
+
+The gallery's Editor demo at 200 000 lines (its TypeScript sample pasted 3449 times, a macOS window of 1440×900,
+release CLI, `--target macos --trace`): the paste's commit 21 → 13.5 ms; a sample pasted into that file 8.4 → 5.7 ms
+(1832 items: the gutter measured its digit once per row, an element made again per row for each number); the commit
+taking the 6900 problems 12.4 → 7.4 ms (fields read by atom, not through a C string allocated each). The engine's idle
+collection walks the whole VM, 30–90 ms with the demo's language server holding the file's model: it ran every second
+between the turns of pastes and of the server's slices (21 collections in the run), now only after 0.3 s without a
+message or a due timer (7, none between pastes).
+
 - counter, headless (debug): first frame ~0.5–0.65ms (58 ops / 49 mount items), one tap ~0.15ms (12 ops / 8 items).
 - counter, Catalyst (release): first frame ~1.05–1.15ms (of which ~0.7ms is cold CoreText layout of 10 texts), one tap ~0.12ms.
 - Hot reload: ~120ms from saving a file to the device running the new version (file event latency and ~60ms of development
@@ -84,7 +106,7 @@ coalescing interval, with the latest coordinates kept independently per view and
 
   JS does half the work or less. Running once costs the first frame ~40% more core time than rendering did: each
   bound part of an element is a computation of the graph that runs as the view is made (its first value is applied
-  with the element's static parts, `core/views.rs`), and each prop a signal (`ui/prop.rs`); the rest of the core's
+  with the element's static parts, `core/views.rs`), and each prop a signal (`element/prop.rs`); the rest of the core's
   time (node creation, styles, Taffy) is the same in both. Updates cost what they change: an update of one title runs
   its text's and label's bindings, and a large view with one changing value costs what that value costs
   (`bench_view_tick`, below). The components' JS face must stay one effect per instance reading the props directly:

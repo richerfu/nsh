@@ -57,6 +57,9 @@ impl Animator {
             dispatcher.request_frame();
         }
     }
+    pub(crate) fn mark_dirty(&self) {
+        self.dirty.set(true);
+    }
     pub(crate) fn apply(&self, op: AnimationOp) {
         self.dirty.set(true);
         let mut state = self.state.borrow_mut();
@@ -70,6 +73,7 @@ impl Animator {
             bindings.resize_with(owner.id as usize + 1, || None);
         }
         bindings[owner.id as usize] = (!values.is_empty()).then(|| (Rc::downgrade(owner), values));
+        owner.component_animated.borrow_mut().clear();
         owner.reset_text_tint()?;
         owner.restore_style()
     }

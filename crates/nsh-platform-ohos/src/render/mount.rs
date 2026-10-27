@@ -573,8 +573,17 @@ impl Mounter {
                             self.components
                                 .make(self.env, &name, id, self.control.clone())?
                         {
-                            self.node(id)?.attach_component(component)?;
+                            let node = self.node(id)?;
+                            node.component_animated.borrow_mut().clear();
+                            node.attach_component(component)?;
+                            self.animator.mark_dirty();
                         }
+                    }
+                    MountItem::ComponentPropSlots { id, names } => {
+                        let node = self.node(id)?;
+                        *node.component_slots.borrow_mut() = names;
+                        node.component_animated.borrow_mut().clear();
+                        self.animator.mark_dirty();
                     }
                     MountItem::Canvas { id, drawing } => {
                         if let Some(canvas) = self.node(id)?.canvas.borrow().as_ref() {
@@ -757,6 +766,7 @@ impl Mounter {
                         horizontal,
                         scrollbar_visible,
                         scroll_value,
+                        pull_value,
                         keyboard_dismiss,
                         mirrored,
                     } => {
@@ -765,6 +775,7 @@ impl Mounter {
                                 horizontal,
                                 scrollbar_visible,
                                 scroll_value,
+                                pull_value,
                                 keyboard_dismiss,
                                 mirrored,
                             )?;
@@ -837,7 +848,6 @@ impl Mounter {
                             }
                         }
                         Command::Back => self.back_fallback()?,
-                        Command::Toast { text, .. } => log::info!("OHOS toast: {text}"),
                         Command::ExitApp => {
                             log::warn!("OHOS ExitApp: the embedding host owns Ability lifetime")
                         }

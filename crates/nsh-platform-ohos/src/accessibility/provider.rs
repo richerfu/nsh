@@ -271,7 +271,8 @@ impl Snapshot {
             R::Switch => "switch",
             R::Radio => "radio",
             R::Adjustable | R::Scrollbar => "slider",
-            R::Button | R::ImageButton => "button",
+            R::Button | R::ImageButton | R::Option => "button",
+            R::List | R::Listbox => "list",
             _ => "text",
         };
         element

@@ -1,7 +1,7 @@
 //! Host-side checks for OHOS geometry, motion and native ownership protocols.
 
 extern crate self as ohos_arkui_binding;
-use native_ownership::{component, event, render, types};
+use native_ownership::{common, component, event, render, types};
 mod native_ownership;
 
 #[path = "../../src/accessibility/value.rs"]

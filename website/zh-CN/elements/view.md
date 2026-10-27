@@ -11,7 +11,7 @@ demo: el-view
 `View` 是每个界面的基本构件：一个原生容器（iOS 和 Mac Catalyst 上是 UIView，Android 上是 ViewGroup），用 flexbox 或 grid 布局子元素，绘制背景、边框、阴影和渐变，并处理按压。按钮、卡片、列表行和整个界面都是 view。Rust 用 `view()` 创建，TSX 用从 `nsh` 导入的 `<View>`。
 
 ```rust tabs
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 
 fn app() -> impl IntoElement {
     let liked = signal(false);
@@ -81,7 +81,18 @@ Tailwind 的 `flex` 类遵循 CSS 而不是样式的默认值：`class="flex"` �
 
 ## 属性
 
-除[通用属性](./index.md#通用属性)外，`View` 没有自己的属性：样式（`style`、`class`、`classList`；Rust 中为 `Styled` 方法）、`disabled`，按压属性（`onPress`、`onLongPress`、`onPressDown`、`onPressUp`、`delayLongPress`、`hitSlop`、`pointerEvents`），状态样式（`activeStyle`、`hoverStyle`、`focusStyle`、`disabledStyle`、`checkedStyle`），`onHoverIn` / `onHoverMove` / `onHoverOut`、`onContextMenu`，`onFileDragEnter` / `onFileDragLeave` / `onFileDrop`，`focusable`、`onLayout`、`ref`、`nativeID`、`testID`，手势属性（`pan`、`pinch`、`rotation` 及其事件），触摸与响应者属性，无障碍属性，以及 `ios` / `android` / `desktop`。
+`View` 有一个自己的属性 `selectable`（Rust 中为 `.selectable(true)`）：视图中的文字作为一个选区一起选择（[文字选择](./text-selection.md)）。其余是[通用属性](./index.md#通用属性)：样式（`style`、`class`、`classList`；Rust 中为 `Styled` 方法）、`disabled`，按压属性（`onPress`、`onLongPress`、`onPressDown`、`onPressUp`、`delayLongPress`、`hitSlop`、`pointerEvents`），状态样式（`activeStyle`、`hoverStyle`、`focusStyle`、`disabledStyle`、`checkedStyle`），`onHoverIn` / `onHoverMove` / `onHoverOut`、`onContextMenu`，`onFileDragEnter` / `onFileDragLeave` / `onFileDrop`，`focusable`、`onLayout`、`ref`、`nativeID`、`testID`，手势属性（`pan`、`pinch`、`rotation` 及其事件），触摸与响应者属性，无障碍属性，以及 `ios` / `android` / `desktop`。
+
+## 可选择的视图
+
+设置 `selectable` 后，选区按阅读顺序跨越视图中的 [`Text`](./text.md) 元素和 [`TextView`](./text-view.md)；设置了 `selectable={false}` 的文字不参与，可选择视图中的另一个可选择视图属于外层视图。各平台的手势参见[文字选择](./text-selection.md)。
+
+```tsx
+<View selectable class="gap-3 p-4">
+  <Text>One selection runs from here…</Text>
+  <Text>…to here.</Text>
+</View>
+```
 
 ## 按压反馈
 
@@ -139,7 +150,7 @@ view()
 | `onLongPress` | `.on_long_press` | 无 | 手指按住达到 `delayLongPress`（500 ms）。 |
 | `onPressDown` / `onPressUp` | `.on_press_down` / `.on_press_up` | 无 | 手指按下 / 抬起或移出。 |
 | `onHoverIn` / `onHoverOut` | `.on_hover_in` / `.on_hover_out` | 无 | 鼠标移到视图（或其内部的视图）上 / 离开视图或窗口（见[悬停](./index.md#悬停)）。 |
-| `onHoverMove` | `.on_hover_move` | `HoverEvent` | 没有按下按键时鼠标在视图上移动：`position`、`pagePosition`（`Point`）和 `modifiers`；每帧最多一次。 |
+| `onHoverMove` | `.on_hover_move` | `HoverEvent` | 没有按下按键时鼠标在视图上移动，或鼠标停在那里时按下或松开了修饰键：`position`、`pagePosition`（`Point`）和 `modifiers`；每帧最多一次。 |
 | `onMouseMove` | `.on_mouse_move` | TSX `Point`；Rust `Point<Points>` | macOS、Linux、Windows、GPUI 和 Web 上的鼠标移动，包括按键拖动。坐标以当前视图的点为单位；嵌套监听者从内向外接收，每帧最多一次。 |
 | `onContextMenu` | `.on_context_menu` | `ContextMenuEvent` | 辅助按钮在视图上按下（见[上下文菜单](./index.md#上下文菜单)）。 |
 | `onFileDragEnter` / `onFileDragLeave` | `.on_file_drag_enter` / `.on_file_drag_leave` | 无 | 本地文件拖入 / 离开当前桌面拖放目标。 |
@@ -195,7 +206,7 @@ const files = signal<string[]>([]);
 
 ## ref 方法
 
-普通 view 没有自己的命令。`ref`（Rust 中为 `.element_ref(&handle)`）拿到它的节点，例如可以传给 `setAccessibilityFocus`（[`nsh/accessibility`](../modules/nsh-accessibility.md)），或者测量它（Rust 中为 `handle.measure()`）。
+普通 view 没有自己的命令。`ref`（Rust 中为 `.element_ref(&handle)`）拿到它的节点，例如可以传给 `setAccessibilityFocus`（[`nsh` 的无障碍 API](../modules/nsh.md#accessibility)），或者测量它（Rust 中为 `handle.measure()`）。
 
 ## 文本中的视图
 

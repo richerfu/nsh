@@ -11,7 +11,7 @@ demo: el-list
 `List` 用来展示很长或无上限的数据。视口附近的行才真正存在：用户滚动时，离开视口的行会被回收，用来显示新进入的行。哪些行存在、它们的位置、多列布局、吸顶标题和可见性都在原生侧计算，所以滚动一个上千项的列表，开销和二十项的列表相当。Rust 用 `virtual_list(count, |at| row)` 创建，TSX 用从 `nsh` 导入的 `<List>`。
 
 ```rust tabs
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 
 #[derive(Clone, PartialEq)]
 struct Contact {
@@ -109,6 +109,8 @@ virtual_list(move || messages.with(|m| m.len()), move |at| {
 | `viewabilityConfig` | `.viewability(..)`、`.minimum_view_time(..)` | `ViewabilityConfig` | | 条目何时算作可见（见下文）。 |
 | `refreshing` | `.refreshing(..)` | `boolean` | | 显示下拉刷新的转圈。 |
 | `onRefresh` | `.on_refresh(..)` | `() => void` | | 用户下拉刷新。 |
+| `refreshIndicator` | `.refresh_indicator(Some(height))` | `{ height: number }` | | 应用自己绘制指示器，高 `height` 点：平台的转圈隐藏，下拉到 `height` 即刷新，刷新中在内容上方留出 `height`。`height` 不大于 0 时视为未设。 |
+| `pullValue` | `.pull_value(&value)` | `AnimatedValue` | | 一个动画值，写入列表被拉过顶部的距离（静止为 0，随下拉增大；刷新中为内容上方留出的空间，设了 `refreshIndicator` 时等于 `height`），用来绘制应用的指示器。 |
 | `scrollbar` | `.scrollbar(..)` | `boolean` | `true` | 显示滚动条。在桌面和桌面浏览器中，横向视图始终保留滚动条：它是鼠标的滚动条。 |
 | `scrollValue` | `.scroll_value(&value)` | `AnimatedValue` | | 接收滚动偏移的动画值，用于随滚动变化的动画。 |
 | `keyboardDismissMode` | `.keyboard_dismiss_mode(..)` | `"none" \| "on-drag" \| "interactive"` | `"none"` | 拖动时是否收起键盘。 |

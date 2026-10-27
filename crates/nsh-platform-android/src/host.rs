@@ -1179,6 +1179,43 @@ extern "system" fn Java_com_longbridge_nsh_Native_hover(
     }
 }
 
+/// A press event of node `id` (see `Native.press`).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+extern "system" fn Java_com_longbridge_nsh_Native_press(
+    _: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    id: jint,
+    kind: jint,
+    x: jfloat,
+    y: jfloat,
+    page_x: jfloat,
+    page_y: jfloat,
+    modifiers: jint,
+    clicks: jint,
+) {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    let Some(kind) = encode::kind_from(kind) else {
+        return;
+    };
+    let event = nsh_core::PressEvent {
+        position: point(px(x), px(y)),
+        page_position: point(px(page_x), px(page_y)),
+        modifiers: nsh_core::keymap::Modifiers {
+            ctrl: modifiers & 1 != 0,
+            alt: modifiers & 2 != 0,
+            shift: modifiers & 4 != 0,
+            cmd: modifiers & 8 != 0,
+        },
+        clicks: clicks.max(1) as u32,
+    };
+    if let Some(control) = host.control() {
+        control.dispatch_event(id as NodeId, kind, EventPayload::Press(event));
+    }
+}
+
 /// Touches for the JS responder system (see `Native.touch`).
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
@@ -1496,6 +1533,26 @@ extern "system" fn Java_com_longbridge_nsh_Native_scroll(
     }
     let mut ui = host.ui.lock().expect("ui");
     if !ui.scrolled(id as u32, x, y) {
+        return std::ptr::null_mut();
+    }
+    finish(host, &mut ui);
+    floats(&env, &ui.outputs())
+}
+
+/// A vertical scroll view is pulled `distance` (points) past its top: its
+/// pull value learns it. Returns bound values when one changed, else null.
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_Native_pull(
+    env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    id: jint,
+    distance: jfloat,
+) -> jfloatArray {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    let mut ui = host.ui.lock().expect("ui");
+    if !ui.pulled(id as u32, distance) {
         return std::ptr::null_mut();
     }
     finish(host, &mut ui);

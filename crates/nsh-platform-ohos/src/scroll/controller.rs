@@ -44,6 +44,8 @@ pub(crate) struct Scroller {
     corrections: Cell<u32>,
     phase: Cell<i32>,
     scroll_value: Cell<Option<u32>>,
+    pull_value: Cell<Option<u32>>,
+    pull: Cell<f32>,
     horizontal: Cell<bool>,
     mirrored: Cell<bool>,
     keyboard_dismiss: Cell<nsh_core::KeyboardDismissMode>,
@@ -157,6 +159,8 @@ impl Scroller {
             corrections: Cell::new(0),
             phase: Cell::new(0),
             scroll_value: Cell::new(None),
+            pull_value: Cell::new(None),
+            pull: Cell::new(0.0),
             horizontal: Cell::new(false),
             mirrored: Cell::new(false),
             keyboard_dismiss: Cell::new(nsh_core::KeyboardDismissMode::None),
@@ -394,10 +398,12 @@ impl Scroller {
         horizontal: bool,
         indicator: bool,
         value: Option<u32>,
+        pull_value: Option<u32>,
         keyboard_dismiss: nsh_core::KeyboardDismissMode,
         mirrored: bool,
     ) -> Result<()> {
         self.scroll_value.set(value);
+        self.pull_value.set(pull_value.filter(|_| !horizontal));
         self.horizontal.set(horizontal);
         self.keyboard_dismiss.set(keyboard_dismiss);
         let changed = self.mirrored.replace(horizontal && mirrored) != (horizontal && mirrored);
@@ -486,6 +492,7 @@ impl Scroller {
         *self.behavior.borrow_mut() = behavior.clone();
         self.snap_limit.set(None);
         self.configure_axes()?;
+        self.configure_refresh()?;
         self.zoom_to(self.zoom.get(), None, false)?;
         self.configure_pinch()?;
         Ok(())
@@ -573,6 +580,19 @@ impl Scroller {
                     },
                 )?;
             }
+            if !self.horizontal.get() && !self.refresh.borrow().is_mounted() {
+                self.pulled((-offset.1).max(0.0))?;
+            }
+        }
+        Ok(())
+    }
+    fn pulled(&self, distance: f32) -> Result<()> {
+        let pull = distance.max(0.0);
+        if self.pull.replace(pull) != pull
+            && let Some(value) = self.pull_value.get()
+            && let Some(owner) = self.owner.upgrade()
+        {
+            owner.animator.set(value, pull)?;
         }
         Ok(())
     }
@@ -712,7 +732,12 @@ impl Scroller {
             },
         )?;
         let body = self.body();
+        let behavior = self.behavior.borrow();
+        let own_indicator = behavior.refresh_indicator.map(|p| p.0);
+        let threshold = behavior.refresh_threshold().0;
+        drop(behavior);
         let weak = Rc::downgrade(self);
+        let offset_weak = Rc::downgrade(self);
         self.refresh.borrow_mut().update(
             &self.wrapper,
             &body,
@@ -720,6 +745,8 @@ impl Scroller {
                 enabled,
                 refreshing: self.refreshing.get(),
                 viewport: self.viewport_size.get(),
+                own_indicator,
+                threshold,
             },
             move |_| {
                 if let Some(scroll) = weak.upgrade()
@@ -728,6 +755,18 @@ impl Scroller {
                 {
                     owner.emit(EventKind::Refresh, EventPayload::None);
                 }
+            },
+            move |event| {
+                callback(|| {
+                    if let Some(scroll) = offset_weak.upgrade() {
+                        let offset = event
+                            .f32_value(0)
+                            .or_else(|| event.component_f32(0))
+                            .unwrap_or(0.0);
+                        scroll.pulled(offset)?;
+                    }
+                    Ok(())
+                });
             },
         )
     }

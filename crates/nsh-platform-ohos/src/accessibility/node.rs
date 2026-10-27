@@ -18,14 +18,16 @@ pub(crate) fn configure(owner: &Rc<Node>, old: &Accessibility, new: &Accessibili
     if old.role != new.role {
         let role = match new.role {
             R::None => None,
-            R::Button | R::ImageButton | R::KeyboardKey | R::Link | R::Menuitem => Some(K::Button),
+            R::Button | R::ImageButton | R::KeyboardKey | R::Link | R::Menuitem | R::Option => {
+                Some(K::Button)
+            }
             R::Image => Some(K::Image),
             R::Search => Some(K::TextInput),
             R::Adjustable | R::Scrollbar => Some(K::Slider),
             R::Checkbox | R::Switch => Some(K::Checkbox),
             R::Radio => Some(K::Radio),
             R::Progressbar => Some(K::Progress),
-            R::List => Some(K::List),
+            R::List | R::Listbox => Some(K::List),
             R::Grid => Some(K::Grid),
             _ => Some(K::Text),
         };

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 pub use nsh_macros::HostProps;
 
-use crate::{EdgeInsets, EventKind, geometry::Points, style::Color, ui::TsTypes};
+use crate::{EdgeInsets, EventKind, element::TsTypes, geometry::Points, style::Color};
 
 /// A JS value as host props read it.
 pub trait HostInput: Sized {
@@ -115,13 +115,10 @@ pub fn element_bits(tag: crate::Tag) -> u32 {
             Tag::WebView => on::WEBVIEW,
             Tag::Video => on::VIDEO,
             Tag::InputAccessory => on::INPUT_ACCESSORY,
-            Tag::View
-            | Tag::Cell
-            | Tag::Stack
-            | Tag::HeaderItem
-            | Tag::Canvas
-            | Tag::Native
-            | Tag::Overlay => 0,
+            Tag::View => on::VIEW,
+            Tag::Cell | Tag::Stack | Tag::HeaderItem | Tag::Canvas | Tag::Native | Tag::Overlay => {
+                0
+            }
         }
 }
 
@@ -163,6 +160,8 @@ pub mod on {
     pub const INPUT_ACCESSORY: u32 = 1 << 11;
     /// `<overlay>`.
     pub const OVERLAY: u32 = 1 << 12;
+    /// `<view>`.
+    pub const VIEW: u32 = 1 << 13;
     /// Set by the runtime itself, not part of the elements' types.
     pub const INTERNAL: u32 = 1 << 31;
 }
@@ -499,6 +498,8 @@ export interface CaretEvent {
 export interface PasteEvent {
   /** The plain text, `""` when there was none. */
   text: string;
+  /** The same content as HTML (`text/html`), with its formatting: what a browser, an office suite or a rich text editor copied; `""` when there was none. */
+  html: string;
   /** Files with their bytes: images (a screenshot, an image copied from a page or an app), as `File`s an app can upload. */
   files: File[];
   /** `file:` URLs of local files copied in a file manager (as `onFileDrop`'s). */
@@ -761,8 +762,18 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         "(e: { text: string }) => void",
         "",
     ),
-    (EventKind::Focus, on::INPUT, "() => void", ""),
-    (EventKind::Blur, on::INPUT, "() => void", ""),
+    (
+        EventKind::Focus,
+        on::ALL,
+        "() => void",
+        "It took the keyboard focus: an input, or a view that takes presses reached by Tab on the platforms that move the focus between pressables (macOS, the web).",
+    ),
+    (
+        EventKind::Blur,
+        on::ALL,
+        "() => void",
+        "It lost the keyboard focus.",
+    ),
     (
         EventKind::SelectionChange,
         on::INPUT,
@@ -869,6 +880,7 @@ pub const INTERNAL_EVENTS: &[EventKind] = &[
 /// to: `HostProps` for every element, `TextHostProps` for `<text>`, ...
 const GROUPS: &[(u32, &str, &str)] = &[
     (on::ALL, "", "every element"),
+    (on::VIEW, "View", "`<View>`"),
     (on::TEXT, "Text", "`<Text>`"),
     (on::IMAGE, "Image", "`<Image>`"),
     (

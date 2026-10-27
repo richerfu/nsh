@@ -7,12 +7,12 @@ use crate::{
     AccessibilityProp, AccessibilityRole, AccessibilityState, AutoFill, CellSlot, EdgeInsets,
     ImageScales, ImageSource, KeyboardTaps, ListContentStyle, ModalProp, Prop, ScrollProp,
     StatusBarSetting, StatusBarStyle, Viewability,
+    element::TsTypes,
     geometry::{Bounds, Points, point, size},
     mount::ModalConfig,
     ops::OverlayProp,
     overlay::{OverlayAnchor, TooltipContent},
     props::{AccessibilityActionDef, AccessibilityValue, Checked, PanActivation, Ripple},
-    ui::TsTypes,
 };
 
 fn number<I: HostInput>(input: &I, key: &str) -> Option<f32> {
@@ -436,13 +436,11 @@ pub(crate) fn overlay_anchor<I: HostInput>(input: &I, _: &mut HostCx) -> Option<
     Some(OverlayProp::Anchor(anchor))
 }
 
-/// `tooltip`: a string, an element (a node JS made), or nothing.
+/// `tooltip`: an element (a node JS made), or nothing.
 pub(crate) fn tooltip<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
-    let content = match (input.node(), input.as_string()) {
-        (Some(id), _) => TooltipContent::Node(id),
-        (None, Some(text)) if !text.is_empty() => TooltipContent::Text(text.into()),
-        _ => TooltipContent::None,
-    };
+    let content = input
+        .node()
+        .map_or(TooltipContent::None, TooltipContent::Node);
     Some(Prop::Tooltip(content))
 }
 
@@ -456,6 +454,11 @@ pub(crate) fn rotation<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> 
 /// `scrollValue`: an animated value.
 pub(crate) fn scroll_value<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
     Some(Prop::ScrollValue(input.animated_node()))
+}
+
+/// `pullValue`: an animated value.
+pub(crate) fn pull_value<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
+    Some(Prop::PullValue(input.animated_node()))
 }
 
 /// `stickyHeaderOffset`: a number, or an animated value.
@@ -537,6 +540,13 @@ pub(crate) fn deceleration<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Sc
 pub(crate) fn visible_content<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
     Some(Prop::FollowEnd(
         points(input, "autoscrollToBottomThreshold").map(|t| t.max(Points::ZERO)),
+    ))
+}
+
+/// `refreshIndicator`: `{ height }`.
+pub(crate) fn refresh_indicator<I: HostInput>(input: &I, _: &mut HostCx) -> Option<ScrollProp> {
+    Some(ScrollProp::RefreshIndicator(
+        points(input, "height").map(|h| h.max(Points::ZERO)),
     ))
 }
 

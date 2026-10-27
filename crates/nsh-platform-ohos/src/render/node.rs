@@ -114,6 +114,9 @@ pub(crate) struct Node {
     pub(crate) canvas: RefCell<Option<crate::render::canvas::CanvasView>>,
     pub(crate) image: RefCell<Option<Rc<crate::media::image::ImageView>>>,
     pub(crate) component: RefCell<Option<crate::interop::component::Instance>>,
+    pub(crate) component_slots: RefCell<Vec<std::sync::Arc<str>>>,
+    pub(crate) component_animated:
+        RefCell<Vec<Option<nsh_core::animation::AnimatedPropValue>>>,
     pub(crate) video: RefCell<Option<crate::media::video::Video>>,
     pub(crate) web: RefCell<Option<crate::media::webview::WebView>>,
     active: Cell<bool>,
@@ -181,6 +184,8 @@ impl Node {
             image: RefCell::new(None),
             canvas: RefCell::new(None),
             component: RefCell::new(None),
+            component_slots: RefCell::default(),
+            component_animated: RefCell::default(),
             web: RefCell::default(),
             video: RefCell::default(),
             active: Cell::new(true),
@@ -1131,11 +1136,40 @@ impl Node {
         let mut shadow = style.shadow;
         let mut has_shadow = false;
         let mut has_transform = false;
+        let mut component_props = Vec::new();
         for (prop, value) in values {
             match prop {
                 P::CanvasArg(slot) => {
                     if let Some(canvas) = self.canvas.borrow().as_ref() {
                         canvas.slot(*slot, *value)?;
+                    }
+                }
+                P::ComponentSlot(slot) => {
+                    let idx = *slot as usize;
+                    if let Some(name) = self.component_slots.borrow().get(idx).cloned() {
+                        let next = nsh_core::animation::AnimatedPropValue::from(*value);
+                        let mut cache = self.component_animated.borrow_mut();
+                        if cache.len() <= idx {
+                            cache.resize(idx + 1, None);
+                        }
+                        if cache[idx] != Some(next) {
+                            cache[idx] = Some(next);
+                            component_props.push((
+                                name,
+                                Some(match next {
+                                    nsh_core::animation::AnimatedPropValue::Number(n) => {
+                                        serde_json::Number::from_f64(n).map_or(
+                                            nsh_core::JsonValue::Null,
+                                            nsh_core::JsonValue::Number,
+                                        )
+                                    }
+                                    nsh_core::animation::AnimatedPropValue::Color(argb) => {
+                                        nsh_core::JsonValue::from(argb)
+                                    }
+                                    _ => nsh_core::JsonValue::Null,
+                                }),
+                            ));
+                        }
                     }
                 }
                 P::Color => {
@@ -1212,6 +1246,14 @@ impl Node {
                 animated_style.borders.colors.fill(color);
             }
             image.style(&animated_style)?;
+        }
+        drop(style);
+        if !component_props.is_empty() {
+            if let Some(component) = self.component.borrow().as_ref() {
+                component.props(component_props)?;
+            } else {
+                self.component_animated.borrow_mut().clear();
+            }
         }
         Ok(())
     }

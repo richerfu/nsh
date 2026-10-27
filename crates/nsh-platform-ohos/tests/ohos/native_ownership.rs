@@ -8,6 +8,7 @@ use std::{
 use crate::geometry::Size;
 
 #[path = "../../src/scroll/refresh.rs"]
+#[allow(dead_code)]
 mod refresh;
 
 type NativeNode = Rc<RefCell<Native>>;
@@ -46,6 +47,9 @@ impl Native {
     }
     fn children(&self) -> &[NativeNode] {
         &self.children
+    }
+    fn raw_handle(&self) -> *mut std::ffi::c_void {
+        std::ptr::null_mut()
     }
     fn dispose(&mut self) -> Result<()> {
         if self.this.strong_count() > 1 {
@@ -92,6 +96,14 @@ pub(crate) mod render {
         pub(crate) type Result<T> = std::result::Result<T, super::super::ControllerError>;
     }
 }
+pub(crate) mod common {
+    pub(crate) mod attribute {
+        #[allow(dead_code)]
+        pub(crate) enum ArkUINodeAttributeItem {
+            Object(*mut std::ffi::c_void),
+        }
+    }
+}
 pub(crate) mod types {
     pub(crate) mod advanced {
         pub(crate) enum LengthMetricUnit {
@@ -102,6 +114,8 @@ pub(crate) mod types {
         // Match the binding's attribute names in the production controller.
         #[allow(clippy::enum_variant_names)]
         pub(crate) enum ArkUINodeAttributeType {
+            RefreshContent,
+            RefreshOffset,
             RefreshPullDownRatio,
             RefreshPullToRefresh,
             RefreshRefreshing,
@@ -110,6 +124,7 @@ pub(crate) mod types {
     pub(crate) mod event {
         pub(crate) enum NodeEventType {
             RefreshOnRefresh,
+            RefreshOnOffsetChange,
         }
     }
 }
@@ -122,6 +137,7 @@ pub(crate) mod component {
     pub(crate) mod attribute {
         use super::super::{Native, Result};
         use crate::{
+            common::attribute::ArkUINodeAttributeItem,
             event::inner_event::Event,
             types::{
                 advanced::LengthMetricUnit, attribute::ArkUINodeAttributeType, event::NodeEventType,
@@ -136,6 +152,16 @@ pub(crate) mod component {
                 Ok(())
             }
             fn height(&self, _: f32) -> Result<()> {
+                Ok(())
+            }
+            fn set_attribute(
+                &self,
+                _: ArkUINodeAttributeType,
+                _: ArkUINodeAttributeItem,
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn reset_attribute(&self, _: ArkUINodeAttributeType) -> Result<()> {
                 Ok(())
             }
             fn set_f32_attribute(&self, _: ArkUINodeAttributeType, _: f32) -> Result<()> {
@@ -158,6 +184,16 @@ pub(crate) mod component {
         use super::super::{Native, NativeNode, Result};
         pub(crate) struct Refresh;
         impl Refresh {
+            #[allow(clippy::unnecessary_wraps)]
+            pub(crate) fn new() -> Result<Self> {
+                Ok(Self)
+            }
+            pub(crate) fn into_node(self) -> NativeNode {
+                Native::new()
+            }
+        }
+        pub(crate) struct Stack;
+        impl Stack {
             #[allow(clippy::unnecessary_wraps)]
             pub(crate) fn new() -> Result<Self> {
                 Ok(Self)
@@ -196,7 +232,10 @@ impl Fixture {
                     enabled: true,
                     refreshing: false,
                     viewport: Size::new(100.0, 80.0),
+                    own_indicator: None,
+                    threshold: 64.0,
                 },
+                |_| {},
                 |_| {},
             )
             .unwrap();

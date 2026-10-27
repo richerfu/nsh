@@ -39,6 +39,8 @@ const FORWARDED: &[&str] = &[
     "scrollbar",
     "refreshing",
     "onRefresh",
+    "pullValue",
+    "refreshIndicator",
     "onLoadMore",
     "onLoadMoreAtStart",
     "onScrollEnd",
@@ -1232,7 +1234,7 @@ mod tests {
         host.eval_source(
             "import { mount } from \"nsh\";\n\
              import { text } from \"nsh:rt\";\n\
-             import { List } from \"nsh/list\";\n\
+             import { List } from \"nsh\";\n\
              mount(() => List({\n\
                each: [1, 2],\n\
                children: (n) => text(`Row ${n()}`),\n\
