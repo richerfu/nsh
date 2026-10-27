@@ -461,10 +461,11 @@ impl Mounter {
         }
         self.delete_now(id)
     }
-    fn delete_now(&mut self, id: NodeId) -> Result<()> {
+    fn orphan_subtree(&mut self, id: NodeId) -> Result<()> {
         self.detach(id)?;
-        // Children can be deleted later in the batch. Sever every native edge
-        // before either endpoint is eligible for disposal.
+        // Children can be deleted later in the batch (or when QuickJS collects a
+        // reference cycle). Sever every native edge and release native attachments
+        // across the orphaned subtree before any endpoint is eligible for disposal.
         loop {
             let child = self
                 .node(id)?
@@ -473,13 +474,19 @@ impl Mounter {
                 .last()
                 .and_then(|n| n.upgrade());
             let Some(child) = child else { break };
-            self.detach(child.id)?;
+            self.orphan_subtree(child.id)?;
         }
-        if let Some(node) = self.slots[id as usize].take() {
+        if let Ok(node) = self.node(id) {
             self.animator.remove(id);
             node.deactivate();
             *node.bitmap.borrow_mut() = None;
             *node.raster.borrow_mut() = None;
+        }
+        Ok(())
+    }
+    fn delete_now(&mut self, id: NodeId) -> Result<()> {
+        self.orphan_subtree(id)?;
+        if let Some(node) = self.slots[id as usize].take() {
             self.removed.push(node);
         }
         Ok(())

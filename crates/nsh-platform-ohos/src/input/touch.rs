@@ -721,13 +721,18 @@ fn hit(root: &Rc<Node>, point: (f32, f32), world: &nsh_core::Matrix) -> Result<O
         return Ok(None);
     };
     let frame = root.frame.get();
-    let slop = root.interaction.hit_slop();
-    let inside = x >= -slop.left.0
-        && y >= -slop.top.0
-        && x < frame.width + slop.right.0
-        && y < frame.height + slop.bottom.0;
-    let inside_clip = x >= 0.0 && y >= 0.0 && x < frame.width && y < frame.height;
-    if pointer != PointerEvents::BoxOnly && (inside_clip || !root.clips_children()) {
+    let area = nsh_core::input::hit_area(
+        nsh_core::geometry::point(nsh_core::Points(x), nsh_core::Points(y)),
+        nsh_core::geometry::size(
+            nsh_core::Points(frame.width),
+            nsh_core::Points(frame.height),
+        ),
+        root.interaction.hit_slop(),
+        root.overflow.get().map(Into::into),
+        root.clips_children(),
+        nsh_core::input::laid_out(root.kind, root.id),
+    );
+    if pointer != PointerEvents::BoxOnly && area.children {
         // Sticky cells are raised above their siblings in the native tree.
         for priority in [true, false] {
             for child in root
@@ -746,7 +751,7 @@ fn hit(root: &Rc<Node>, point: (f32, f32), world: &nsh_core::Matrix) -> Result<O
             }
         }
     }
-    Ok((inside && pointer != PointerEvents::BoxNone).then(|| root.clone()))
+    Ok((area.in_slop && pointer != PointerEvents::BoxNone).then(|| root.clone()))
 }
 // Each native callback takes one short-lived borrow; the engine owns responder negotiation.
 pub(crate) type State = RefCell<Touches>;

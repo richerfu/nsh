@@ -51,11 +51,16 @@ impl Interaction {
         self.props.borrow().test_id.as_deref().map(str::to_owned)
     }
     pub(crate) fn hit_region(&self, owner: &Node) -> Result<()> {
-        let mut slop = self.props.borrow().hit_slop;
+        let frame = owner.frame.get();
+        let has_area = frame.width > 0.0 || frame.height > 0.0 || owner.overflow.get().is_some();
+        let mut slop = if has_area {
+            self.props.borrow().hit_slop
+        } else {
+            nsh_core::EdgeInsets::default()
+        };
         if !owner.clips_children()
             && let Some(extent) = owner.overflow.get()
         {
-            let frame = owner.frame.get();
             slop.left = slop.left.max(nsh_core::Points(-extent.x));
             slop.top = slop.top.max(nsh_core::Points(-extent.y));
             slop.right = slop

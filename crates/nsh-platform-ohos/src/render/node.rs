@@ -506,8 +506,10 @@ impl Node {
                 .is_none_or(|parent| parent.paint_visible())
     }
     pub(crate) fn deactivate(&self) {
+        if !self.active.replace(false) {
+            return;
+        }
         callback(|| self.selection_clear());
-        self.active.set(false);
         self.invalidate_scene();
         #[cfg(feature = "api-23")]
         self.accessibility_provider.clear();
@@ -649,6 +651,13 @@ impl Node {
             }
             if let Some(screen) = self.screen.borrow().as_ref() {
                 screen.update(screen.has_back())?;
+            }
+            if self.bitmap.borrow().is_some()
+                || self.canvas.borrow().is_some()
+                || self.style.borrow().effects.is_some()
+                || self.outlined.get()
+            {
+                self.native.borrow().mark_dirty(NodeDirtyFlag::NeedRender)?;
             }
         }
         self.native
@@ -1623,17 +1632,21 @@ impl Node {
         Ok(())
     }
     fn draw(&self, event: &NodeCustomEvent) {
-        let has_effects = self
-            .style
-            .borrow()
-            .effects
-            .as_ref()
-            .is_some_and(|e| !e.background_images.is_empty() || !e.box_shadows.is_empty());
+        let frame = self.frame.get();
+        let has_area = frame.width > 0.0 && frame.height > 0.0;
+        let has_effects = has_area
+            && self
+                .style
+                .borrow()
+                .effects
+                .as_ref()
+                .is_some_and(|e| !e.background_images.is_empty() || !e.box_shadows.is_empty());
         if !has_effects {
             self.decoration.clear_paint_cache();
-            if self.canvas.borrow().is_none()
-                && self.bitmap.borrow().is_none()
-                && self.selection.range.get().is_none()
+            if !has_area
+                || (self.canvas.borrow().is_none()
+                    && self.bitmap.borrow().is_none()
+                    && self.selection.range.get().is_none())
             {
                 return;
             }
@@ -1642,7 +1655,6 @@ impl Node {
             // SAFETY: ArkUI owns this canvas for the duration of this draw callback.
             let canvas = unsafe { Canvas::from_raw_borrowed(raw) };
             if has_effects {
-                let frame = self.frame.get();
                 self.decoration.background(
                     &canvas,
                     &self.style.borrow(),
