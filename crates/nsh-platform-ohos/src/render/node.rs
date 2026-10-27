@@ -617,6 +617,7 @@ impl Node {
         if old == frame {
             return Ok(());
         }
+        self.invalidate_ink(self.applied.get().ink_outset)?;
         let size_changed = old.width != frame.width || old.height != frame.height;
         if size_changed && let Some(canvas) = self.canvas.borrow().as_ref() {
             canvas.invalidate()?;
@@ -961,11 +962,9 @@ impl Node {
         self.applied.set(applied);
         Ok(())
     }
-    /// Box shadows and outlines are drawn by the node's own draw callbacks,
-    /// outside its bounds; ArkUI repaints a moved or restyled node only
-    /// within its draw region, so its old shadow would stay on screen. A
-    /// transparent native outline as wide as that paint extends the region
-    /// (ArkUI counts outlines in it) without drawing anything.
+    /// How far the node's own paint (box shadows, outlines) reaches outside
+    /// its bounds: ArkUI repaints a moved node only within its bounds, so the
+    /// area that paint leaves is repainted with the parent (`invalidate_ink`).
     fn apply_ink_outset(&self, style: &ViewStyle) -> Result<()> {
         let mut outset = 0.0f32;
         if style.outline.is_visible() {
@@ -986,16 +985,23 @@ impl Node {
         let outset = outset.max(0.0).ceil();
         let mut applied = self.applied.get();
         if applied.ink_outset != outset {
-            let node = self.native.borrow();
-            if outset > 0.0 {
-                node.set_u32_attribute(Attribute::OutlineColor, 0)?;
-                node.set_number_attribute(Attribute::OutlineWidth, vec![Number::Float(outset); 4])?;
-            } else {
-                node.reset_attribute(Attribute::OutlineWidth)?;
-                node.reset_attribute(Attribute::OutlineColor)?;
-            }
             applied.ink_outset = outset;
             self.applied.set(applied);
+            self.invalidate_ink(outset.max(1.0))?;
+        }
+        Ok(())
+    }
+    /// A view whose paint reaches outside its bounds moved: ArkUI repaints
+    /// only the view's own region, so its parent repaints the area the paint
+    /// left (inside the parent's bounds).
+    fn invalidate_ink(&self, outset: f32) -> Result<()> {
+        if outset > 0.0
+            && let Some(parent) = self.parent_node.borrow().upgrade()
+        {
+            parent
+                .child_container()
+                .borrow()
+                .mark_dirty(NodeDirtyFlag::NeedRender)?;
         }
         Ok(())
     }
@@ -1231,6 +1237,7 @@ impl Node {
             if applied.transform.is_some() {
                 native.reset_attribute(Attribute::Transform)?;
                 applied.transform = None;
+                self.invalidate_ink(applied.ink_outset)?;
             }
             self.backface_away.set(false);
             let visibility = if !self.header_item_visible() {
@@ -1282,6 +1289,7 @@ impl Node {
                 raw_values.into_iter().map(Number::Float).collect(),
             )?;
             applied.transform = Some(raw_values);
+            self.invalidate_ink(applied.ink_outset)?;
         }
         self.backface_away
             .set(style.backface_hidden && m.0[10] < 0.0);
