@@ -59,7 +59,7 @@ pub enum Os {
     Ios,
     /// Android.
     Android,
-    /// OpenHarmony and HarmonyOS.
+    /// OpenHarmony.
     Ohos,
     /// macOS (a desktop backend).
     MacOs,
@@ -128,9 +128,10 @@ pub enum Idiom {
 
 impl Idiom {
     /// Whether desktop behavior applies on `os` in this idiom: a desktop
-    /// OS, or a browser in the desktop idiom (TS: `platform.idiom` `"desktop"`).
+    /// OS, or a browser or OHOS device in the desktop idiom (TS:
+    /// `platform.idiom` `"desktop"`).
     pub fn desktop_on(self, os: Os) -> bool {
-        os.is_desktop() || (os == Os::Web && self == Idiom::Desktop)
+        os.is_desktop() || (matches!(os, Os::Web | Os::Ohos) && self == Idiom::Desktop)
     }
 }
 
