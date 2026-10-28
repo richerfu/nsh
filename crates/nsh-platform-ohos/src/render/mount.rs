@@ -266,6 +266,9 @@ impl Mounter {
         }
         self.back_fallback()
     }
+    pub(crate) fn dismiss_keyboard(&self) -> Result<()> {
+        self.node(nsh_core::ROOT_ID)?.dismiss_keyboard()
+    }
     fn back_fallback(&self) -> Result<()> {
         if let Some(screen) = self.top_screen() {
             screen.request_back()?;
@@ -920,15 +923,12 @@ impl Mounter {
                                 nsh_core::platform::clipboard::files_answer(id, &[]),
                             );
                         }
-                        Command::PickImages { id, .. } => {
-                            self.control.dispatch_event(
-                                nsh_core::ROOT_ID,
-                                nsh_core::EventKind::Pick,
-                                nsh_core::EventPayload::Picked {
-                                    id,
-                                    files: Vec::new(),
-                                },
-                            );
+                        Command::PickImages { id, request } => {
+                            if let Err(error) =
+                                self.host.pick_images(self.dispatcher.clone(), id, request)
+                            {
+                                log::warn!("OHOS pickImages failed: {error}");
+                            }
                         }
                         Command::Native { name, args } => {
                             if let Some(component) = self.node(id)?.component.borrow().as_ref() {

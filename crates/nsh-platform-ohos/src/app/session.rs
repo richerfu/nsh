@@ -90,6 +90,7 @@ pub(crate) struct HostCommand {
     pub announcement: Option<String>,
     pub element_id: Option<i64>,
     pub open_id: Option<u32>,
+    pub limit: Option<u32>,
     pub url: Option<String>,
 }
 
@@ -200,8 +201,16 @@ enum Operation {
         text: Option<String>,
         request: Option<(u32, bool)>,
     },
+    PickImages {
+        route: Weak<Dispatcher>,
+        id: u32,
+        request: nsh_core::picker::PickRequest,
+        paths: Vec<PathBuf>,
+    },
     Stop,
 }
+
+type PendingPick = (u32, nsh_core::picker::PickRequest, Weak<Dispatcher>);
 
 pub(crate) struct Services {
     id: u32,
@@ -225,6 +234,7 @@ pub(crate) struct Services {
     command_tsfn: HostCommandCallback,
     next_open_id: AtomicU32,
     open_urls: Mutex<FxHashMap<u32, (u32, Weak<Dispatcher>)>>,
+    pick_images: Mutex<FxHashMap<u32, PendingPick>>,
     queue: mpsc::SyncSender<Operation>,
 }
 
@@ -380,6 +390,14 @@ impl Services {
             return None;
         }
         self.selected_route()
+    }
+
+    pub(crate) fn modifiers(&self) -> nsh_core::keymap::Modifiers {
+        self.keyboard
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or_else(Default::default, |keyboard| keyboard.modifiers())
     }
 
     fn apply_selected_status(&self) {
@@ -595,6 +613,7 @@ impl Services {
             command_tsfn,
             next_open_id: AtomicU32::new(1),
             open_urls: Mutex::default(),
+            pick_images: Mutex::default(),
             queue,
         });
         let weak = Arc::downgrade(&services);
@@ -623,6 +642,33 @@ impl Services {
                             text,
                             request,
                         } => services.clipboard(route, text, request),
+                        Operation::PickImages {
+                            route,
+                            id,
+                            request,
+                            paths,
+                        } => {
+                            let mut raw = nsh_core::picker::read_files(&paths, &request);
+                            for file in &mut raw {
+                                if let Some((_, original)) = file.name.split_once("__")
+                                    && !original.is_empty()
+                                {
+                                    file.name = original.to_owned();
+                                }
+                            }
+                            let files = nsh_core::picker::finish(&request, raw);
+                            for path in &paths {
+                                let _ = std::fs::remove_file(path);
+                            }
+                            if services.check().is_ok()
+                                && let Some(route) = route.upgrade()
+                            {
+                                route.send(Message::HostEvent(
+                                    EventKind::Pick,
+                                    EventPayload::Picked { id, files },
+                                ));
+                            }
+                        }
                         Operation::Stop => unreachable!(),
                     }
                 }
@@ -711,6 +757,7 @@ impl Services {
         if self.active.swap(false, Ordering::AcqRel) {
             self.keyboard.lock().unwrap().take();
             self.open_urls.lock().unwrap().clear();
+            self.pick_images.lock().unwrap().clear();
             self.broadcast(|| Message::HostClosed);
             let _ = self.queue.try_send(Operation::Stop);
             if notify_host {
@@ -849,6 +896,88 @@ impl Services {
                     ("id", PayloadValue::Number(id as f64)),
                     ("opened", PayloadValue::Bool(opened)),
                 ]),
+            ));
+        }
+    }
+
+    pub(crate) fn pick_images(
+        &self,
+        route: Weak<Dispatcher>,
+        id: u32,
+        request: nsh_core::picker::PickRequest,
+    ) -> Result<()> {
+        self.check()?;
+        let pick_id = self
+            .next_open_id
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .map_err(|_| Error::from_reason("pickImages request IDs exhausted"))?;
+        self.pick_images
+            .lock()
+            .unwrap()
+            .insert(pick_id, (id, request, route.clone()));
+        if let Err(error) = self.send_host_command(HostCommand {
+            kind: "pick-images".into(),
+            open_id: Some(pick_id),
+            limit: Some(request.limit),
+            ..Default::default()
+        }) {
+            self.pick_images.lock().unwrap().remove(&pick_id);
+            if let Some(route) = route.upgrade() {
+                route.send(Message::HostEvent(
+                    EventKind::Pick,
+                    EventPayload::Picked {
+                        id,
+                        files: Vec::new(),
+                    },
+                ));
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn complete_pick_images(&self, pick_id: u32, paths: Vec<String>) {
+        if self.check().is_err() {
+            for path in &paths {
+                let _ = std::fs::remove_file(path);
+            }
+            return;
+        }
+        let Some((id, request, route)) = self.pick_images.lock().unwrap().remove(&pick_id) else {
+            for path in &paths {
+                let _ = std::fs::remove_file(path);
+            }
+            return;
+        };
+        if paths.is_empty() {
+            if let Some(route) = route.upgrade() {
+                route.send(Message::HostEvent(
+                    EventKind::Pick,
+                    EventPayload::Picked {
+                        id,
+                        files: Vec::new(),
+                    },
+                ));
+            }
+            return;
+        }
+        let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+        if self
+            .enqueue(Operation::PickImages {
+                route: route.clone(),
+                id,
+                request,
+                paths,
+            })
+            .is_err()
+            && let Some(route) = route.upgrade()
+        {
+            route.send(Message::HostEvent(
+                EventKind::Pick,
+                EventPayload::Picked {
+                    id,
+                    files: Vec::new(),
+                },
             ));
         }
     }

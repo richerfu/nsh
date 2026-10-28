@@ -9,6 +9,8 @@ import {
 } from "@kit.AbilityKit";
 import { accessibility } from "@kit.AccessibilityKit";
 import { NodeContent, window } from "@kit.ArkUI";
+import { fileIo as fs } from "@kit.CoreFileKit";
+import { photoAccessHelper } from "@kit.MediaLibraryKit";
 import { FrameNode } from "@ohos.arkui.node";
 import { UIContext } from "@ohos.arkui.UIContext";
 import deviceInfo from "@ohos.deviceInfo";
@@ -57,6 +59,7 @@ interface HostCommandPayload {
   announcement?: string;
   elementId?: number;
   openId?: number;
+  limit?: number;
   url?: string;
 }
 
@@ -88,6 +91,7 @@ interface NshNativeModule {
     keyboard: AvoidAreaPayload,
   ): void;
   nshOpenUrlResult(sessionId: number, openId: number, opened: boolean): void;
+  nshPickImagesResult(sessionId: number, pickId: number, paths: string[]): void;
   nshReportHostError(sessionId: number, message: string): void;
   nshAttachNativeNode(targetId: number, content: FrameNode): void;
   nshAttachNativeSubtree(targetId: number, content: FrameNode, slot: NodeContent): void;
@@ -765,6 +769,63 @@ class HostSession {
               this.mod.nshOpenUrlResult(this.sessionId, openId, false);
             });
         });
+      return;
+    }
+
+    if (command.kind === "pick-images") {
+      const pickId = command.openId ?? 0;
+      const limit = Math.max(1, Math.min(100, command.limit ?? 1));
+      try {
+        const picker = new photoAccessHelper.PhotoViewPicker();
+        const options = new photoAccessHelper.PhotoSelectOptions();
+        options.MIMEType = photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE;
+        options.maxSelectNumber = limit;
+        picker
+          .select(options)
+          .then((result: photoAccessHelper.PhotoSelectResult): void => {
+            const uris = result?.photoUris ?? [];
+            const paths: string[] = [];
+            const cacheBase = this.abilityContext.cacheDir ?? "";
+            for (let i = 0; i < uris.length && i < limit; i++) {
+              const uri = uris[i];
+              if (!uri) {
+                continue;
+              }
+              let srcFile: fs.File | undefined = undefined;
+              let dstFile: fs.File | undefined = undefined;
+              try {
+                srcFile = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+                const rawName = decodeURIComponent(uri.split("/").pop() ?? `image_${i}`);
+                const safeName = rawName.replace(/[^A-Za-z0-9._-]/g, "_") || `image_${i}`;
+                const dstPath = `${cacheBase}/nsh_pick_${this.sessionId}_${pickId}_${i}__${safeName}`;
+                dstFile = fs.openSync(
+                  dstPath,
+                  fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC,
+                );
+                fs.copyFileSync(srcFile.fd, dstFile.fd);
+                paths.push(dstPath);
+              } catch {
+              } finally {
+                if (srcFile !== undefined) {
+                  try {
+                    fs.closeSync(srcFile);
+                  } catch {}
+                }
+                if (dstFile !== undefined) {
+                  try {
+                    fs.closeSync(dstFile);
+                  } catch {}
+                }
+              }
+            }
+            this.mod.nshPickImagesResult(this.sessionId, pickId, paths);
+          })
+          .catch((): void => {
+            this.mod.nshPickImagesResult(this.sessionId, pickId, []);
+          });
+      } catch {
+        this.mod.nshPickImagesResult(this.sessionId, pickId, []);
+      }
     }
   }
 }

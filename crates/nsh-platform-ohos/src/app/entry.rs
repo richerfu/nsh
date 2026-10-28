@@ -189,6 +189,17 @@ pub(crate) fn nsh_open_url_result(session_id: u32, open_id: u32, opened: bool) {
 }
 
 #[napi]
+pub(crate) fn nsh_pick_images_result(session_id: u32, pick_id: u32, paths: Vec<String>) {
+    if let Ok(host) = crate::app::session::get(session_id) {
+        host.complete_pick_images(pick_id, paths);
+    } else {
+        for path in &paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[napi]
 pub(crate) fn nsh_report_host_error(session_id: u32, message: String) {
     if let Ok(host) = crate::app::session::get(session_id) {
         host.broadcast(|| Message::Error(message.clone()));

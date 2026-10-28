@@ -68,6 +68,9 @@ impl KeyboardWindow {
     pub(crate) fn clear(&self) {
         self.route.held.lock().unwrap().keys.clear();
     }
+    pub(crate) fn modifiers(&self) -> Modifiers {
+        self.route.held.lock().unwrap().modifiers()
+    }
     pub(crate) fn new(
         id: i32,
         host: std::sync::Weak<crate::app::session::Services>,
@@ -213,12 +216,47 @@ impl WindowRoute {
             if matched.consumed() {
                 return true;
             }
+            if !repeat {
+                if stroke.key == Key::Escape && stroke.modifiers == Modifiers::default() {
+                    if snapshot.input.is_some() {
+                        route.send(crate::app::runtime::Message::DismissKeyboard);
+                        return true;
+                    }
+                    drop(snapshot);
+                    return host.handle_back();
+                }
+                if snapshot.focused.is_none()
+                    && ((stroke.key == Key::Left
+                        && stroke.modifiers
+                            == Modifiers {
+                                alt: true,
+                                ..Modifiers::default()
+                            })
+                        || (stroke.key == Key::Char('[')
+                            && stroke.modifiers
+                                == Modifiers {
+                                    cmd: true,
+                                    ..Modifiers::default()
+                                }))
+                {
+                    drop(snapshot);
+                    return host.handle_back();
+                }
+            }
             false
         })
     }
 }
 
 impl Held {
+    fn modifiers(&self) -> Modifiers {
+        Modifiers {
+            ctrl: self.has(N::CtrlLeft, N::CtrlRight),
+            alt: self.has(N::AltLeft, N::AltRight),
+            shift: self.has(N::ShiftLeft, N::ShiftRight),
+            cmd: self.has(N::MetaLeft, N::MetaRight),
+        }
+    }
     fn cancel(&mut self, action: i32) -> bool {
         if action == KeyEventRef::ACTION_CANCEL {
             self.keys.clear();
@@ -241,12 +279,7 @@ impl Held {
         if action != KeyEventRef::ACTION_DOWN {
             return false;
         }
-        let modifiers = Modifiers {
-            ctrl: self.has(N::CtrlLeft, N::CtrlRight),
-            alt: self.has(N::AltLeft, N::AltRight),
-            shift: self.has(N::ShiftLeft, N::ShiftRight),
-            cmd: self.has(N::MetaLeft, N::MetaRight),
-        };
+        let modifiers = self.modifiers();
         let consumed =
             key(code).is_some_and(|key| fire(Keystroke { key, modifiers }, old.is_some()));
         if let Some(index) = old {

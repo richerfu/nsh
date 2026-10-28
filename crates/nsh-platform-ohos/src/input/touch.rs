@@ -20,6 +20,12 @@ struct KeyboardTap {
     start: (f32, f32),
     input: Weak<Node>,
 }
+struct LastTap {
+    time_ms: f64,
+    window: (f32, f32),
+    clicks: u32,
+    event_time_ns: i64,
+}
 struct BackSwipe {
     screen: Weak<crate::navigation::stack::Screen>,
     target: Weak<Node>,
@@ -63,10 +69,50 @@ pub(crate) struct Touches {
     back: Option<BackSwipe>,
     primary: Option<u32>,
     selection: Option<SelectionDrag>,
+    last_tap: Option<LastTap>,
 }
 impl Touches {
+    pub(crate) fn record_down(&mut self, scale: f32, input: &ArkUIInputEvent) {
+        if input.action != UIInputAction::Down || input.pointer_count() != 1 {
+            return;
+        }
+        let event_time_ns = input.event_time();
+        if self
+            .last_tap
+            .as_ref()
+            .is_some_and(|last| last.event_time_ns == event_time_ns)
+        {
+            return;
+        }
+        let time_ms = event_time_ns as f64 / 1_000_000.0;
+        let window = (
+            input.pointer_window_x_by_index(0),
+            input.pointer_window_y_by_index(0),
+        );
+        let max_dist = 24.0 * scale.max(1.0);
+        let clicks = match &self.last_tap {
+            Some(last)
+                if time_ms >= last.time_ms
+                    && time_ms - last.time_ms <= 350.0
+                    && (window.0 - last.window.0).hypot(window.1 - last.window.1) <= max_dist =>
+            {
+                (last.clicks % 3) + 1
+            }
+            _ => 1,
+        };
+        self.last_tap = Some(LastTap {
+            time_ms,
+            window,
+            clicks,
+            event_time_ns,
+        });
+    }
+    pub(crate) fn clicks(&self) -> u32 {
+        self.last_tap.as_ref().map_or(1, |tap| tap.clicks)
+    }
     pub(crate) fn cancel(&mut self, root: &Node) -> Result<()> {
         self.primary = None;
+        self.last_tap = None;
         if let Some(drag) = self.selection.take() {
             drag.unblock()?;
             if let Some(owner) = drag.owner.upgrade() {
@@ -113,6 +159,7 @@ impl Touches {
     }
 
     pub(crate) fn input(&mut self, root: &Rc<Node>, input: &ArkUIInputEvent) -> Result<()> {
+        self.record_down(root.scale, input);
         self.timestamp = input.event_time() as f64 / 1_000_000.0;
         let phase = match input.action {
             UIInputAction::Down => TouchPhase::Start,
@@ -689,7 +736,7 @@ impl Touches {
             start,
             input: Rc::downgrade(&input),
         });
-        policy == Some(KeyboardTaps::Never)
+        policy == Some(KeyboardTaps::Never) && root.platform.get().keyboard_height.0 > 0.0
     }
 }
 fn find(root: &Rc<Node>, id: nsh_core::NodeId) -> Option<Rc<Node>> {

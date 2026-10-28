@@ -173,6 +173,7 @@ impl Interaction {
                             let y = input.pointer_y_by_index(0);
                             match input.action {
                                 UIInputAction::Down => {
+                                    owner.touches.borrow_mut().record_down(owner.scale, &input);
                                     owner.interaction.long_fired.set(false);
                                     if owner.press_feedback_allowed() {
                                         owner.interaction.state(&owner, state::PRESSED, true)?;
@@ -227,7 +228,9 @@ impl Interaction {
             }
         }
         let mouse = !blocked
-            && (events.contains(EventKind::HoverMove)
+            && (owner.id == nsh_core::ROOT_ID
+                || owner.kind == nsh_core::ViewKind::Modal
+                || events.contains(EventKind::HoverMove)
                 || events.contains(EventKind::MouseMove)
                 || events.contains(EventKind::ContextMenu));
         if self.mouse_registered.replace(mouse) != mouse {
@@ -266,6 +269,13 @@ impl Interaction {
                                         EventKind::ContextMenu,
                                         owner.context_menu_payload(x, y),
                                     );
+                                }
+                                UIMouseEventAction::Press
+                                    if input.mouse_button() == UIMouseEventButton::Back
+                                        && (owner.id == nsh_core::ROOT_ID
+                                            || owner.kind == nsh_core::ViewKind::Modal) =>
+                                {
+                                    let _ = owner.host.handle_back();
                                 }
                                 _ => {}
                             }

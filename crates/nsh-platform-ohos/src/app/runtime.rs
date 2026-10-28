@@ -93,6 +93,7 @@ pub(crate) enum Message {
     Chunk(std::result::Result<nsh_engine::Chunk, (String, String)>),
     Active(bool),
     Back,
+    DismissKeyboard,
     ReconcileNavigation,
     ScrollPosition {
         id: u32,
@@ -272,6 +273,9 @@ impl State {
             }
             Message::Back => {
                 self.mounter.as_mut().unwrap().back()?;
+            }
+            Message::DismissKeyboard => {
+                self.mounter.as_ref().unwrap().dismiss_keyboard()?;
             }
             Message::ScrollPosition { id, x, y, animated } => self
                 .mounter
