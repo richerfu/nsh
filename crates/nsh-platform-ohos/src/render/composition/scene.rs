@@ -189,13 +189,34 @@ impl Scene {
         }
         if let Some(frames) = frames {
             let mut bitmaps = self.bitmaps.borrow_mut();
-            bitmaps.clear();
+            let max_id = frames
+                .iter()
+                .map(|frame| frame.id as usize + 1)
+                .max()
+                .unwrap_or(0);
+            if bitmaps.len() < max_id {
+                bitmaps.resize_with(max_id, || None);
+            }
+            let mut active_ids = vec![false; bitmaps.len()];
             for frame in frames {
-                let mut bitmap = Bitmap::new(frame.width, frame.height, BitmapFormat::default());
-                bitmap.pixels_mut().copy_from_slice(&frame.pixels);
-                let len = bitmaps.len().max(frame.id as usize + 1);
-                bitmaps.resize_with(len, || None);
-                bitmaps[frame.id as usize] = Some(bitmap);
+                let idx = frame.id as usize;
+                active_ids[idx] = true;
+                if let Some(existing) = bitmaps[idx].as_mut()
+                    && existing.width() == frame.width
+                    && existing.height() == frame.height
+                {
+                    existing.pixels_mut().copy_from_slice(&frame.pixels);
+                } else {
+                    let mut bitmap =
+                        Bitmap::new(frame.width, frame.height, BitmapFormat::default());
+                    bitmap.pixels_mut().copy_from_slice(&frame.pixels);
+                    bitmaps[idx] = Some(bitmap);
+                }
+            }
+            for (idx, active) in active_ids.into_iter().enumerate() {
+                if !active {
+                    bitmaps[idx] = None;
+                }
             }
             for root in self.roots.borrow().iter().filter_map(Weak::upgrade) {
                 root.mounted()

@@ -2,16 +2,15 @@
 use std::{cell::RefCell, sync::Arc};
 
 use nsh_core::{
-    BorderStyle, Bounds, Corners, Gradient, GradientKind, GradientSize, Point, Points,
-    Size as CoreSize, ViewStyle,
+    BorderStyle, Gradient, GradientKind, GradientSize, Points, Size as CoreSize, ViewStyle,
 };
 use ohos_arkui_binding::{
     component::attribute::ArkUICommonAttribute,
     types::{attribute::ArkUINodeAttributeType as A, view::BlendMode as B},
 };
 use ohos_drawing_binding::{
-    Brush, Canvas, ClipOperation, Filter, MaskFilter, Matrix, Path, PathDirection, PathEffect,
-    PathFillType, Pen, ShaderEffect, TileMode,
+    Brush, Canvas, ClipOperation, CornerPosition, Filter, MaskFilter, Matrix, Path, PathDirection,
+    PathEffect, PathFillType, Pen, Rect, RoundRect, ShaderEffect, TileMode,
 };
 
 use crate::{
@@ -25,7 +24,7 @@ use crate::{
 pub(crate) struct Decoration {
     backgrounds: RefCell<Option<Backgrounds>>,
     native: RefCell<Option<NativeEffects>>,
-    shadows: RefCell<Option<Shadows>>,
+    shadows: RefCell<[Option<Shadows>; 2]>,
 }
 struct Shadows {
     effects: Option<Arc<nsh_core::Effects>>,
@@ -40,6 +39,7 @@ struct Shadows {
 struct ShadowPaint {
     inset: bool,
     path: Path,
+    hole: Option<Path>,
     brush: Brush,
 }
 struct Backgrounds {
@@ -52,12 +52,14 @@ struct Backgrounds {
 }
 #[derive(Clone, PartialEq)]
 struct NativeEffects {
+    blur: f32,
     backdrop_blur: f32,
     blend: nsh_core::BlendMode,
 }
 impl Default for NativeEffects {
     fn default() -> Self {
         Self {
+            blur: 0.0,
             backdrop_blur: 0.0,
             blend: nsh_core::BlendMode::Normal,
         }
@@ -69,7 +71,7 @@ impl Decoration {
     }
     pub(crate) fn clear_paint_cache(&self) {
         self.backgrounds.borrow_mut().take();
-        self.shadows.borrow_mut().take();
+        *self.shadows.borrow_mut() = [None, None];
     }
     pub(crate) fn native(&self, owner: &Node, style: &ViewStyle) -> Result<()> {
         use nsh_core::{BlendMode as M, Filter as F};
@@ -108,10 +110,29 @@ impl Decoration {
                 effect.backdrop_blur += radius.0;
             }
         }
+        if !owner.scene_active()
+            && let Some(effects) = style.effects.as_ref()
+            && effects
+                .filters
+                .iter()
+                .all(|filter| matches!(filter, F::Blur(_)))
+        {
+            for filter in &effects.filters {
+                if let F::Blur(radius) = filter {
+                    effect.blur += radius.0;
+                }
+            }
+        }
         let mut previous = self.native.borrow_mut();
         let default = NativeEffects::default();
         let old = previous.as_ref().unwrap_or(&default);
         let native = owner.native.borrow();
+        if old.blur != effect.blur {
+            owner
+                .visual_node()
+                .borrow()
+                .set_f32_attribute(A::Blur, effect.blur * owner.scale)?;
+        }
         if old.backdrop_blur != effect.backdrop_blur {
             native.set_f32_attribute(A::BackdropBlur, effect.backdrop_blur * owner.scale)?;
         }
@@ -149,15 +170,14 @@ impl Decoration {
     pub(crate) fn background(&self, canvas: &Canvas, style: &ViewStyle, size: Size, scale: f32) {
         let Some(effects) = style.effects.as_ref() else {
             self.backgrounds.borrow_mut().take();
-            self.shadows.borrow_mut().take();
+            *self.shadows.borrow_mut() = [None, None];
             return;
         };
         if effects.background_images.is_empty() && effects.box_shadows.is_empty() {
             self.backgrounds.borrow_mut().take();
-            self.shadows.borrow_mut().take();
+            *self.shadows.borrow_mut() = [None, None];
             return;
         }
-        self.shadows(canvas, style, size, scale, false);
         let images = effects.background_images.as_slice();
         if images.is_empty() {
             self.backgrounds.borrow_mut().take();
@@ -189,9 +209,9 @@ impl Decoration {
             });
         }
         let cache = backgrounds.as_ref().unwrap();
+        let (sx, sy) = pixel_scale(size, scale);
         canvas.save();
-        canvas.scale(scale, scale);
-        canvas.clip_path(&cache.path, ClipOperation::Intersect, true);
+        canvas.scale(sx, sy);
         for brush in &cache.paints {
             canvas.attach_brush(brush);
             canvas.draw_path(&cache.path);
@@ -200,21 +220,31 @@ impl Decoration {
         canvas.restore();
         self.shadows(canvas, style, size, scale, true);
     }
-    fn shadows(&self, canvas: &Canvas, style: &ViewStyle, size: Size, scale: f32, inset: bool) {
+    pub(crate) fn shadows(
+        &self,
+        canvas: &Canvas,
+        style: &ViewStyle,
+        size: Size,
+        scale: f32,
+        inset: bool,
+    ) {
         let layers = style
             .effects
             .as_ref()
             .map_or(&[][..], |effects| effects.box_shadows.as_slice());
-        if layers.is_empty() {
-            self.shadows.borrow_mut().take();
+        let visible_layer =
+            |layer: &nsh_core::BoxShadow| layer.inset == inset && layer.is_visible() && (!inset || layer.blur.0 > 0.0);
+        if !layers.iter().any(visible_layer) {
+            self.shadows.borrow_mut()[usize::from(inset)] = None;
             return;
         }
         let radii = style
             .corner_radius
             .map(|radius| radius.unwrap_or(style.border_radius).0)
             .to_array();
-        let borders = style.borders.widths.to_array().map(|w| w.0);
-        let mut cache = self.shadows.borrow_mut();
+        let borders = style.borders.widths.to_array().map(|v| v.0);
+        let mut caches = self.shadows.borrow_mut();
+        let cache = &mut caches[usize::from(inset)];
         if cache.as_ref().is_none_or(|cache| {
             cache.size != size
                 || cache.radii != radii
@@ -230,7 +260,7 @@ impl Decoration {
             let paints = layers
                 .iter()
                 .rev()
-                .filter(|layer| layer.is_visible())
+                .filter(|layer| visible_layer(layer))
                 .map(|layer| {
                     let mut brush = Brush::new();
                     brush.set_anti_alias(true);
@@ -241,21 +271,7 @@ impl Decoration {
                         filter.set_mask_filter(mask.as_ref());
                         brush.set_filter(Some(&filter));
                     }
-                    let path = if layer.inset {
-                        let reach = layer.offset_x.0.abs()
-                            + layer.offset_y.0.abs()
-                            + layer.spread.0.abs()
-                            + layer.blur.0.max(0.0) * 2.0
-                            + 4.0;
-                        let mut outer = Path::new();
-                        outer.set_fill_type(PathFillType::EvenOdd);
-                        outer.add_rect(
-                            -reach,
-                            -reach,
-                            size.width + reach,
-                            size.height + reach,
-                            PathDirection::Cw,
-                        );
+                    let (path, hole) = if layer.inset {
                         let mut hole = padding_outline(style, size, layer.spread.0);
                         hole.transform(&Matrix::from_affine(
                             1.0,
@@ -265,8 +281,26 @@ impl Decoration {
                             layer.offset_x.0,
                             layer.offset_y.0,
                         ));
-                        outer.add_path(&hole, None);
-                        outer
+                        if layer.blur.0 <= 0.0 {
+                            (Path::new(), Some(hole))
+                        } else {
+                            let reach = layer.offset_x.0.abs()
+                                + layer.offset_y.0.abs()
+                                + layer.spread.0.abs()
+                                + layer.blur.0.max(0.0) * 2.0
+                                + 4.0;
+                            let mut outer = Path::new();
+                            outer.set_fill_type(PathFillType::EvenOdd);
+                            outer.add_rect(
+                                -reach,
+                                -reach,
+                                size.width + reach,
+                                size.height + reach,
+                                PathDirection::Cw,
+                            );
+                            outer.add_path(&hole, None);
+                            (outer, None)
+                        }
                     } else {
                         let mut path = outline(style, size, layer.spread.0);
                         path.transform(&Matrix::from_affine(
@@ -277,11 +311,12 @@ impl Decoration {
                             layer.offset_x.0,
                             layer.offset_y.0,
                         ));
-                        path
+                        (path, None)
                     };
                     ShadowPaint {
                         inset: layer.inset,
                         path,
+                        hole,
                         brush,
                     }
                 })
@@ -298,8 +333,9 @@ impl Decoration {
             });
         }
         let cache = cache.as_ref().unwrap();
+        let (sx, sy) = pixel_scale(size, scale);
         canvas.save();
-        canvas.scale(scale, scale);
+        canvas.scale(sx, sy);
         canvas.clip_path(
             if inset { &cache.padding } else { &cache.border },
             if inset {
@@ -310,9 +346,18 @@ impl Decoration {
             true,
         );
         for paint in cache.paints.iter().filter(|paint| paint.inset == inset) {
-            canvas.attach_brush(&paint.brush);
-            canvas.draw_path(&paint.path);
-            canvas.detach_brush();
+            if let Some(hole) = &paint.hole {
+                canvas.save();
+                canvas.clip_path(hole, ClipOperation::Difference, true);
+                canvas.attach_brush(&paint.brush);
+                canvas.draw_path(&cache.padding);
+                canvas.detach_brush();
+                canvas.restore();
+            } else {
+                canvas.attach_brush(&paint.brush);
+                canvas.draw_path(&paint.path);
+                canvas.detach_brush();
+            }
         }
         canvas.restore();
     }
@@ -332,13 +377,27 @@ impl Decoration {
             BorderStyle::Dotted => PathEffect::dash(&[width, width], 0.0),
         };
         pen.set_path_effect(dash.as_ref());
+        let (sx, sy) = pixel_scale(size, scale);
         canvas.save();
-        canvas.scale(scale, scale);
+        canvas.scale(sx, sy);
         canvas.attach_pen(&pen);
         canvas.draw_path(&outline(style, size, o.offset.0 + width * 0.5));
         canvas.detach_pen();
         canvas.restore();
     }
+}
+fn pixel_scale(size: Size, scale: f32) -> (f32, f32) {
+    let sx = if size.width > 0.0 {
+        (size.width * scale).round().max(1.0) / size.width
+    } else {
+        scale
+    };
+    let sy = if size.height > 0.0 {
+        (size.height * scale).round().max(1.0) / size.height
+    } else {
+        scale
+    };
+    (sx, sy)
 }
 fn padding_outline(style: &ViewStyle, size: Size, spread: f32) -> Path {
     let [top, right, bottom, left] = style
@@ -359,63 +418,51 @@ fn padding_outline(style: &ViewStyle, size: Size, spread: f32) -> Path {
     if size.width <= left + right || size.height <= top + bottom {
         return path;
     }
-    nsh_core::shape::rounded_rect(
-        Bounds::new(
-            Point::new(Points(left), Points(top)),
-            CoreSize::new(
-                Points(size.width - left - right),
-                Points(size.height - top - bottom),
-            ),
-        ),
-        Corners::from(std::array::from_fn(|i| {
-            CoreSize::new(
-                Points((radii[i] - corners[i].0).max(0.0)),
-                Points((radii[i] - corners[i].1).max(0.0)),
-            )
-        })),
-        // ArkUI's native `BorderRadius` / `BorderWidth` / `BackgroundColor`
-        // uses circular corners, so custom decoration paths match circular
-        // geometry too (as the Linux backend does).
-        false,
-        false,
-        &mut |segment| match segment {
-            nsh_core::shape::Segment::Move(p) => path.move_to(p.x.0, p.y.0),
-            nsh_core::shape::Segment::Line(p) => path.line_to(p.x.0, p.y.0),
-            nsh_core::shape::Segment::Cubic([a, b, c]) => {
-                path.bezier_curve_to(a.x.0, a.y.0, b.x.0, b.y.0, c.x.0, c.y.0);
-            }
-            nsh_core::shape::Segment::Close => path.close(),
-        },
-    );
+    let rect = Rect::new(left, top, size.width - right, size.height - bottom);
+    let mut round_rect = RoundRect::new(&rect, 0.0, 0.0);
+    let positions = [
+        CornerPosition::TopLeft,
+        CornerPosition::TopRight,
+        CornerPosition::BottomRight,
+        CornerPosition::BottomLeft,
+    ];
+    for (i, pos) in positions.into_iter().enumerate() {
+        round_rect.set_corner(
+            pos,
+            (radii[i] - corners[i].0).max(0.0),
+            (radii[i] - corners[i].1).max(0.0),
+        );
+    }
+    path.add_round_rect(&round_rect, PathDirection::Cw);
     path
 }
 pub(crate) fn outline(style: &ViewStyle, size: Size, spread: f32) -> Path {
     let mut path = Path::new();
     let w = (size.width + spread * 2.0).max(0.0);
     let h = (size.height + spread * 2.0).max(0.0);
+    if w <= 0.0 || h <= 0.0 {
+        return path;
+    }
     let radii = nsh_core::canvas::fit_radii(
         CoreSize::new(Points(w), Points(h)),
         style
             .corner_radius
             .map(|r| Points((r.unwrap_or(style.border_radius).0 + spread).max(0.0))),
-    );
-    nsh_core::shape::rounded_rect(
-        Bounds::new(
-            Point::new(Points(-spread), Points(-spread)),
-            CoreSize::new(Points(w), Points(h)),
-        ),
-        radii.map(|&r| CoreSize::new(r, r)),
-        false,
-        false,
-        &mut |s| match s {
-            nsh_core::shape::Segment::Move(p) => path.move_to(p.x.0, p.y.0),
-            nsh_core::shape::Segment::Line(p) => path.line_to(p.x.0, p.y.0),
-            nsh_core::shape::Segment::Cubic([a, b, c]) => {
-                path.bezier_curve_to(a.x.0, a.y.0, b.x.0, b.y.0, c.x.0, c.y.0);
-            }
-            nsh_core::shape::Segment::Close => path.close(),
-        },
-    );
+    )
+    .to_array()
+    .map(|r| r.0);
+    let rect = Rect::new(-spread, -spread, -spread + w, -spread + h);
+    let mut round_rect = RoundRect::new(&rect, 0.0, 0.0);
+    let positions = [
+        CornerPosition::TopLeft,
+        CornerPosition::TopRight,
+        CornerPosition::BottomRight,
+        CornerPosition::BottomLeft,
+    ];
+    for (i, pos) in positions.into_iter().enumerate() {
+        round_rect.set_corner(pos, radii[i], radii[i]);
+    }
+    path.add_round_rect(&round_rect, PathDirection::Cw);
     path
 }
 pub(crate) fn drawing_blend(mode: nsh_core::BlendMode) -> ohos_drawing_binding::BlendMode {

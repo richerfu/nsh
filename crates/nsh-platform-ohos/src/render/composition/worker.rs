@@ -453,9 +453,19 @@ impl Composite {
         }
         self.shared.posted.store(false, Ordering::Release);
         if let Some(output) = self.shared.state.lock().unwrap().output.take() {
-            let mut bitmap = Bitmap::new(output.width, output.height, BitmapFormat::default());
-            bitmap.pixels_mut().copy_from_slice(&output.pixels);
-            *self.bitmap.borrow_mut() = Some((bitmap, output.x, output.y));
+            let mut slot = self.bitmap.borrow_mut();
+            if let Some((existing, x, y)) = slot.as_mut()
+                && existing.width() == output.width
+                && existing.height() == output.height
+            {
+                existing.pixels_mut().copy_from_slice(&output.pixels);
+                *x = output.x;
+                *y = output.y;
+            } else {
+                let mut bitmap = Bitmap::new(output.width, output.height, BitmapFormat::default());
+                bitmap.pixels_mut().copy_from_slice(&output.pixels);
+                *slot = Some((bitmap, output.x, output.y));
+            }
         }
     }
     pub(crate) fn draw(&self, canvas: &Canvas) {

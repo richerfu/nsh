@@ -327,16 +327,22 @@ impl Node {
         if crate::get_capabilities().api26 && spec.actions.len() > 16 {
             log::warn!("OHOS accessibility: showing the first 16 custom actions");
         }
+        let non_blur_filter = self
+            .style
+            .borrow()
+            .effects
+            .as_ref()
+            .is_some_and(|effects| {
+                effects
+                    .filters
+                    .iter()
+                    .any(|filter| !matches!(filter, nsh_core::Filter::Blur(_)))
+            });
         let needed = self.kind == nsh_core::ViewKind::Modal
             || self.scene_active() && self.has_native_paint()
             || self.selectable()
             || owns_semantics(&spec)
-            || self
-                .style
-                .borrow()
-                .effects
-                .as_ref()
-                .is_some_and(|effects| !effects.filters.is_empty());
+            || non_blur_filter;
         drop(spec);
         if needed && self.wrapper.borrow().is_none() {
             let parent = self.mount_parent.borrow().upgrade();
@@ -380,13 +386,7 @@ impl Node {
             #[cfg(feature = "api-23")]
             self.accessibility_provider.clear();
         }
-        let needs_texture = self.scene_active() && self.has_native_paint()
-            || self
-                .style
-                .borrow()
-                .effects
-                .as_ref()
-                .is_some_and(|effects| !effects.filters.is_empty());
+        let needs_texture = self.scene_active() && self.has_native_paint() || non_blur_filter;
         if !needs_texture
             && let Some(wrapper) = self.wrapper.borrow().as_ref()
             && wrapper.composite.borrow_mut().take().is_some()

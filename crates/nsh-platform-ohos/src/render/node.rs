@@ -92,6 +92,7 @@ impl Default for AppliedStyle {
 }
 
 pub(crate) struct Node {
+    weak: Weak<Node>,
     pub(crate) accessibility_state: crate::accessibility::state::State,
     #[cfg(feature = "api-23")]
     pub(crate) accessibility_provider: crate::accessibility::provider::State,
@@ -131,6 +132,7 @@ pub(crate) struct Node {
     navigation_presentation: Cell<(f32, f32)>,
     decoration: crate::render::decor::Decoration,
     outlined: Cell<bool>,
+    shadow_layer: RefCell<Option<Rc<super::shadow::ShadowLayer>>>,
     pub(crate) bitmap: RefCell<Option<Bitmap>>,
     pub(crate) raster: RefCell<Option<nsh_core::TextLayout>>,
     pub(crate) selection: crate::text::selection::state::State,
@@ -161,7 +163,8 @@ impl Node {
             .borrow()
             .set_length_metric_unit(LengthMetricUnit::Vp)?;
         let visual_ptr = Rc::as_ptr(&native) as usize;
-        let node = Rc::new(Self {
+        let node = Rc::new_cyclic(|weak| Self {
+            weak: weak.clone(),
             accessibility_state: crate::accessibility::state::State::default(),
             #[cfg(feature = "api-23")]
             accessibility_provider: crate::accessibility::provider::State::default(),
@@ -204,6 +207,7 @@ impl Node {
             navigation_presentation: Cell::new((1.0, 0.0)),
             decoration: crate::render::decor::Decoration::default(),
             outlined: Cell::new(false),
+            shadow_layer: RefCell::default(),
             bitmap: RefCell::new(None),
             raster: RefCell::new(None),
             selection: Default::default(),
@@ -683,6 +687,10 @@ impl Node {
                 video.frame(Size::new(frame.width, frame.height))?;
             }
             let style = self.style.borrow();
+            self.apply_borders(&style)?;
+            if let Some(layer) = self.shadow_layer.borrow().as_ref() {
+                layer.update(self, &style)?;
+            }
             if !style.transform.is_identity()
                 || self.extra.get().1 != crate::render::transition::Extra::NONE
             {
@@ -911,10 +919,7 @@ impl Node {
                             node.decoration.outline(
                                 &canvas,
                                 &node.style.borrow(),
-                                Size::new(
-                                    (frame.width * node.scale).round() / node.scale,
-                                    (frame.height * node.scale).round() / node.scale,
-                                ),
+                                Size::new(frame.width, frame.height),
                                 node.scale,
                             );
                         }
@@ -1024,6 +1029,17 @@ impl Node {
                 nsh_core::ModalPresentation::FormSheet => [16.0; 4],
             };
         }
+        let frame = self.frame.get();
+        if frame.width > 0.0 && frame.height > 0.0 {
+            let short = frame.width.min(frame.height);
+            let half = short * 0.5;
+            let snapped_half = ((short * self.scale).round() * 0.5) / self.scale;
+            for r in &mut radius {
+                if *r >= half - 1e-4 && *r < snapped_half {
+                    *r = snapped_half;
+                }
+            }
+        }
         let widths = style.borders.widths.to_array().map(|v| v.0);
         let colors = style.borders.colors.map(argb);
         let border_style = match style.borders.style {
@@ -1061,25 +1077,11 @@ impl Node {
         self.applied.set(applied);
         Ok(())
     }
-    /// How far the node's own paint (box shadows, outlines) reaches outside
-    /// its bounds: ArkUI repaints a moved node only within its bounds, so the
-    /// area that paint leaves is repainted with the parent (`invalidate_ink`).
+    /// Outlines still use the foreground callback; box shadows own bounded nodes.
     fn apply_ink_outset(&self, style: &ViewStyle) -> Result<()> {
         let mut outset = 0.0f32;
         if style.outline.is_visible() {
             outset = outset.max(style.outline.width.0 + style.outline.offset.0);
-        }
-        for shadow in style
-            .effects
-            .iter()
-            .flat_map(|effects| &effects.box_shadows)
-            .filter(|shadow| !shadow.inset && shadow.is_visible())
-        {
-            outset = outset.max(
-                shadow.spread.0
-                    + shadow.blur.0.max(0.0) * 1.5
-                    + shadow.offset_x.0.abs().max(shadow.offset_y.0.abs()),
-            );
         }
         let outset = outset.max(0.0).ceil();
         let mut applied = self.applied.get();
@@ -1104,15 +1106,28 @@ impl Node {
         }
         Ok(())
     }
-    fn apply_shadow(&self, shadow: nsh_core::Shadow) -> Result<()> {
-        let next = shadow.is_visible().then(|| {
-            (
-                shadow.radius.0,
-                shadow.offset_x.0 * self.scale,
-                shadow.offset_y.0 * self.scale,
-                argb(shadow.color.with_alpha(shadow.opacity)),
-            )
-        });
+    fn apply_shadow(&self, style: &ViewStyle) -> Result<()> {
+        use super::shadow_geometry::{native_box_shadow, native_radius};
+        let shadow = style.shadow;
+        let next = native_box_shadow(style)
+            .map(|shadow| {
+                (
+                    native_radius(shadow.blur.0 * self.scale * 0.5),
+                    shadow.offset_x.0 * self.scale,
+                    shadow.offset_y.0 * self.scale,
+                    argb(shadow.color),
+                )
+            })
+            .or_else(|| {
+                shadow.is_visible().then(|| {
+                    (
+                        native_radius(shadow.radius.0 * self.scale),
+                        shadow.offset_x.0 * self.scale,
+                        shadow.offset_y.0 * self.scale,
+                        argb(shadow.color.with_alpha(shadow.opacity)),
+                    )
+                })
+            });
         let mut applied = self.applied.get();
         if applied.shadow != next {
             let node = self.native.borrow();
@@ -1155,7 +1170,21 @@ impl Node {
         }
         Ok(())
     }
+    fn ensure_shadow_layer(&self, style: &ViewStyle) -> Result<()> {
+        if self.shadow_layer.borrow().is_none()
+            && super::shadow_geometry::native_box_shadow(style).is_none()
+            && style
+                .effects
+                .as_ref()
+                .is_some_and(|e| e.box_shadows.iter().any(|s| !s.inset && s.is_visible()))
+            && let Some(owner) = self.weak.upgrade()
+        {
+            *self.shadow_layer.borrow_mut() = Some(super::shadow::ShadowLayer::new(&owner)?);
+        }
+        Ok(())
+    }
     fn apply_style(&self, style: &ViewStyle) -> Result<()> {
+        self.ensure_shadow_layer(style)?;
         let visual = self.visual_node();
         self.sync_visual_node(&visual);
         if let Some(wrapper) = self.wrapper.borrow().as_ref()
@@ -1171,7 +1200,10 @@ impl Node {
         self.transform(style, |_| None)?;
         self.apply_background_color(style.background_color)?;
         self.apply_borders(style)?;
-        self.apply_shadow(style.shadow)?;
+        self.apply_shadow(style)?;
+        if let Some(layer) = self.shadow_layer.borrow().as_ref() {
+            layer.update(self, style)?;
+        }
         self.apply_ink_outset(style)?;
         self.apply_clip()?;
         self.animator.apply_node(self)?;
@@ -1310,8 +1342,17 @@ impl Node {
                 self.applied.set(applied);
             }
         }
-        if has_shadow {
-            self.apply_shadow(shadow)?;
+        if has_shadow || bg.is_some() {
+            let mut presented = style.clone();
+            presented.shadow = shadow;
+            if let Some(bg) = bg {
+                presented.background_color = bg;
+            }
+            self.ensure_shadow_layer(&presented)?;
+            self.apply_shadow(&presented)?;
+            if let Some(layer) = self.shadow_layer.borrow().as_ref() {
+                layer.update(self, &presented)?;
+            }
         }
         if has_transform {
             self.transform(&style, |i| {
@@ -1404,7 +1445,9 @@ impl Node {
             }
             self.applied.set(applied);
             self.input_transform.set(Matrix::IDENTITY);
-            self.invalidate_scene();
+            if self.scene_active() {
+                self.invalidate_scene();
+            }
             return Ok(());
         }
         let mut m = style.transform.matrix(value);
@@ -1497,7 +1540,9 @@ impl Node {
         after.0[14] = origin.2;
         self.input_transform
             .set(before.mul(&Matrix(matrix)).mul(&after));
-        self.invalidate_scene();
+        if self.scene_active() {
+            self.invalidate_scene();
+        }
         Ok(())
     }
     pub(crate) fn navigation_presentation(&self, alpha: f32, x: f32) -> Result<()> {
@@ -1646,8 +1691,8 @@ impl Node {
         EventPayload::Press(nsh_core::PressEvent {
             position,
             page_position,
-            modifiers: Default::default(),
-            clicks: 1,
+            modifiers: self.host.modifiers(),
+            clicks: self.touches.borrow().clicks(),
         })
     }
     pub(crate) fn hover_payload(&self, x: f32, y: f32) -> EventPayload {
@@ -1655,7 +1700,7 @@ impl Node {
         EventPayload::Hover(nsh_core::HoverEvent {
             position,
             page_position,
-            modifiers: Default::default(),
+            modifiers: self.host.modifiers(),
         })
     }
     pub(crate) fn context_menu_payload(&self, x: f32, y: f32) -> EventPayload {
@@ -1663,7 +1708,7 @@ impl Node {
         EventPayload::ContextMenu(nsh_core::ContextMenuEvent {
             position,
             page_position,
-            modifiers: Default::default(),
+            modifiers: self.host.modifiers(),
         })
     }
     pub(crate) fn press_feedback_allowed(&self) -> bool {
@@ -1692,6 +1737,7 @@ impl Node {
             parent = node.parent_node.borrow().upgrade();
         }
         policy != Some(nsh_core::KeyboardTaps::Never)
+            || self.platform.get().keyboard_height.0 <= 0.0
             || self
                 .dispatcher
                 .upgrade()
@@ -1725,6 +1771,9 @@ impl Node {
             height = height.max(1);
         }
         event.set_measured_size(width, height)?;
+        if let Some(layer) = self.shadow_layer.borrow().as_ref() {
+            layer.measure(event)?;
+        }
         if let Some(input) = self.input.borrow().as_ref() {
             input.measure(event)?;
         } else if let Some(image) = self.image.borrow().as_ref() {
@@ -1768,6 +1817,9 @@ impl Node {
         Ok(())
     }
     fn layout(&self, event: &NodeCustomEvent) -> Result<()> {
+        if let Some(layer) = self.shadow_layer.borrow().as_ref() {
+            layer.layout(event)?;
+        }
         let position = event.position_in_layout();
         event.set_layout_position(position.x, position.y)?;
         #[cfg(feature = "api-23")]
@@ -1819,6 +1871,16 @@ impl Node {
         }
         Ok(())
     }
+    pub(crate) fn draw_outer_shadows(&self, canvas: &Canvas) {
+        let frame = self.frame.get();
+        self.decoration.shadows(
+            canvas,
+            &self.style.borrow(),
+            Size::new(frame.width, frame.height),
+            self.scale,
+            false,
+        );
+    }
     fn draw(&self, event: &NodeCustomEvent) {
         let frame = self.frame.get();
         let has_area = frame.width > 0.0 && frame.height > 0.0;
@@ -1846,10 +1908,7 @@ impl Node {
                 self.decoration.background(
                     &canvas,
                     &self.style.borrow(),
-                    Size::new(
-                        (frame.width * self.scale).round() / self.scale,
-                        (frame.height * self.scale).round() / self.scale,
-                    ),
+                    Size::new(frame.width, frame.height),
                     self.scale,
                 );
             }
@@ -1902,6 +1961,7 @@ impl Node {
 }
 impl Drop for Node {
     fn drop(&mut self) {
+        self.shadow_layer.borrow_mut().take();
         // Struct fields otherwise outlive this Drop body. Release controller
         // handles before recursively disposing their mounted native descendants.
         #[cfg(feature = "api-23")]

@@ -44,3 +44,6 @@ mod text_raster;
 
 #[path = "../../src/media/video/controls.rs"]
 mod video_controls;
+
+#[path = "../../src/render/shadow_geometry.rs"]
+mod shadow_geometry;

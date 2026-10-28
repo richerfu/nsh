@@ -6,4 +6,6 @@ pub(crate) mod decor;
 pub(crate) mod geometry;
 pub(crate) mod mount;
 pub(crate) mod node;
+pub(crate) mod shadow;
+pub(crate) mod shadow_geometry;
 pub(crate) mod transition;
