@@ -16,7 +16,7 @@ cp "$SDK/index.d.ts" "$APP/entry/src/main/cpp/types/libnsh_platform_ohos/Index.d
 cp "$OHOS_NDK_HOME/native/llvm/lib/aarch64-linux-ohos/libc++_shared.so" "$APP/entry/libs/arm64-v8a/"
 
 BUILD_FLAGS=()
-if [[ "${NSH_SPLIT:-0}" == 1 ]]; then BUILD_FLAGS+=(--split); fi
+if [[ "${NSH_SPLIT:-1}" == 1 ]]; then BUILD_FLAGS+=(--split); fi
 "${NSH_CLI:-$ROOT/target/debug/nsh}" build "$ROOT/${NSH_EXAMPLE:-examples/gallery}" \
   -o "$APP/entry/src/main/resources/rawfile" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"}
 

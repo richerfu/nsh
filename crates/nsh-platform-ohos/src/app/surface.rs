@@ -873,6 +873,7 @@ impl NshSurface {
             (token, state.generation.clone(), has_override)
         };
         let chunks = crate::app::chunks::ResourceChunks::new(host.clone(), &name);
+        let entry_chunks_loader = chunks.clone();
         let weak = Rc::downgrade(&self.state);
         let future = async move {
             let result = tokio::task::spawn_blocking(move || {
@@ -898,11 +899,30 @@ impl NshSurface {
                     || "app.json".to_owned(),
                     |(parent, _)| format!("{parent}/app.json"),
                 );
+                let mut manifest_specs = Vec::new();
                 if let Ok(bytes) = host.resource(&app_json)
                     && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
-                    && let Some(id) = value.get("id").and_then(serde_json::Value::as_str)
                 {
-                    bundle.app_id = Some(id.to_owned());
+                    if let Some(id) = value.get("id").and_then(serde_json::Value::as_str) {
+                        bundle.app_id = Some(id.to_owned());
+                    }
+                    if let Some(specs) = value
+                        .get("entryChunks")
+                        .and_then(serde_json::Value::as_array)
+                    {
+                        manifest_specs.extend(
+                            specs
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .map(str::to_owned),
+                        );
+                    }
+                }
+                let initial_chunks = entry_chunks_loader
+                    .collect_entry_chunks(&bundle, &manifest_specs)
+                    .map_err(Error::from_reason)?;
+                if !initial_chunks.is_empty() {
+                    bundle = bundle.with_chunks(initial_chunks);
                 }
                 if !has_override {
                     let companion = name.rsplit_once('/').map_or_else(
