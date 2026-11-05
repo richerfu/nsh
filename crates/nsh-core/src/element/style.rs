@@ -171,6 +171,8 @@ impl Variant {
     pub(crate) const HOVER: Self = Self::states(state::HOVERED);
     /// While focused.
     pub(crate) const FOCUS: Self = Self::states(state::FOCUSED);
+    /// While it or a view inside it is focused.
+    pub(crate) const FOCUS_WITHIN: Self = Self::states(state::FOCUS_WITHIN);
     /// While pressed.
     pub(crate) const ACTIVE: Self = Self::states(state::PRESSED);
     /// While disabled.
@@ -225,6 +227,7 @@ impl Variant {
         let keys = [
             (state::HOVERED, rank::HOVER),
             (state::FOCUSED, rank::FOCUS),
+            (state::FOCUS_WITHIN, rank::FOCUS_WITHIN),
             (state::PRESSED, rank::ACTIVE),
             (state::DISABLED, rank::DISABLED),
             (state::SELECTED, rank::SELECTED),
@@ -942,6 +945,23 @@ impl StyleRefinement {
             }
         };
         u8::try_from(at + 1).expect("fewer than 255 group names")
+    }
+
+    /// The color its last static declaration of `key` in no state sets
+    /// (bound parts left out): `None` for none or `unset`.
+    pub(crate) fn static_color(&self, key: StyleKey) -> Option<AdaptiveColor> {
+        self.entries.iter().rev().find_map(|(variant, d)| {
+            if *variant != Variant::default() {
+                return None;
+            }
+            match d {
+                Declaration::Color(k, color) if *k == key => Some(Some(*color)),
+                Declaration::Value(k, PropertyValue::Color(color)) if *k == key => {
+                    Some(color.map(AdaptiveColor::from))
+                }
+                _ => None,
+            }
+        })?
     }
 
     /// No declarations, and no bound parts.

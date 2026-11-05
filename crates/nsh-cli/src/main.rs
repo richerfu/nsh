@@ -24,6 +24,7 @@ mod test_host;
 mod test_ios;
 mod test_web;
 mod ui;
+mod updater;
 mod web;
 mod windows;
 
@@ -164,7 +165,8 @@ enum Command {
         junit: Option<PathBuf>,
         /// Run the apps the tests open on this platform's development host
         /// instead of headless: the steps act with the platform's own input
-        /// (macos, linux, windows, gpui, web, ios and android; web runs them
+        /// (macos, linux, windows, gpui, tui, web, ios and android; tui uses
+        /// an in-memory terminal; web runs them
         /// in a headless Chrome, Edge or Chromium, ios in a simulator,
         /// android on the first device adb lists).
         #[arg(long, value_enum)]
@@ -239,7 +241,7 @@ enum Command {
     Package(Box<PackageArgs>),
     /// Run an app in a development host with hot reload. Defaults to
     /// AppKit on macOS, GTK on Linux and Win32 on Windows; select mobile
-    /// hosts, Mac Catalyst, GPUI or a browser with --target.
+    /// hosts, Mac Catalyst, GPUI, a terminal or a browser with --target.
     Run {
         /// The entry module, or the app's directory (default: the current one),
         /// whose `App.tsx` is the entry.
@@ -265,7 +267,8 @@ enum Command {
         /// Show the performance monitor over the app: frame rate, frame and
         /// commit costs, CPU, GPU, memory (`--target macos`, which also logs
         /// its readings once a second; `--target linux`, `windows` and `ios`
-        /// log them).
+        /// log them). On `tui`, show FPS/idle, frame p95, apply/draw/flush
+        /// times, bytes and changed Cells; C-h p toggles the line.
         #[arg(long)]
         fps: bool,
         /// Where to run.
@@ -275,6 +278,9 @@ enum Command {
         /// the newest iPhone.
         #[arg(long)]
         device: Option<String>,
+        /// Points per terminal Cell, overriding nsh.json tui.pointsPerCell (default: 8x16).
+        #[arg(long, value_name = "WIDTHxHEIGHT", value_parser = run::parse_points_per_cell)]
+        points_per_cell: Option<String>,
         /// The app's name in the host (the menu bar, the window title;
         /// `nsh.json`'s name by default; `--target macos` only).
         #[arg(long)]
@@ -295,6 +301,32 @@ enum Command {
     Keygen {
         /// Path and name of the key files, e.g. `keys/root`.
         name: PathBuf,
+    },
+    /// Write an app's update manifest (`latest.json`, signed with `--key`)
+    /// from the archives `nsh package` made for each platform; publish them
+    /// together.
+    UpdateManifest {
+        /// The archives named `<name>-<version>-<os>-<arch>.<ext>`.
+        #[arg(required = true)]
+        archives: Vec<PathBuf>,
+        /// The app's directory or entry, whose `nsh.json` has the id and version.
+        #[arg(long, default_value = ".")]
+        entry: PathBuf,
+        /// The secret key (`nsh keygen`'s `.secret`) of the app's `updater.publicKey`.
+        #[arg(long)]
+        key: Option<PathBuf>,
+        /// A text file with what changed.
+        #[arg(long)]
+        notes: Option<PathBuf>,
+        /// Where iOS or Android users get it: `ios=<url>`, `android=<url>` (repeatable).
+        #[arg(long = "link")]
+        links: Vec<String>,
+        /// Prefix of the archives' URLs (default: next to the manifest).
+        #[arg(long)]
+        base_url: Option<String>,
+        /// The directory the manifest is written to.
+        #[arg(short, long, default_value = ".")]
+        out: PathBuf,
     },
     /// Certify a release key with a root key, for some app ids and a time
     /// window; packages carry the certificate.
@@ -317,10 +349,12 @@ enum Command {
     },
     /// Build an app in release mode and sign it into a package (`.nshpkg`)
     /// for apps that embed nsh to verify and run. Metadata comes from
-    /// `nsh.json` next to the entry, overridden by the flags below.
+    /// `nsh.json` next to the entry, overridden by the flags below. Given a
+    /// package instead of an app, signs it again with this key: only its
+    /// certificate, signing time and signature change.
     Publish {
-        /// The entry module, or the app's directory (default: the current one),
-        /// whose `App.tsx` is the entry.
+        /// The entry module, the app's directory (default: the current one),
+        /// whose `App.tsx` is the entry, or a package (`.nshpkg`) to sign again.
         #[arg(default_value = ".")]
         entry: PathBuf,
         /// The release key's secret key (`.secret`).
@@ -329,7 +363,8 @@ enum Command {
         /// Its certificate (`nsh certify`).
         #[arg(long)]
         cert: PathBuf,
-        /// The package to write (default: `.nsh/out/<id>-<build>.nshpkg`).
+        /// The package to write (default: `.nsh/out/<id>-<build>.nshpkg`); a
+        /// package signed again may name the one read.
         #[arg(short, long)]
         out: Option<PathBuf>,
         /// App id, e.g. `com.example.app`.
@@ -343,9 +378,10 @@ enum Command {
         build: Option<u32>,
         /// Where the source map goes: into the package (devices report
         /// errors at app source positions), into a file next to it
-        /// (`<package>.map`, for `nsh symbolicate`), or nowhere.
-        #[arg(long, value_enum, default_value_t = sign::SourceMapOut::Package)]
-        source_map: sign::SourceMapOut,
+        /// (`<package>.map`, for `nsh symbolicate`), or nowhere (default:
+        /// into the package).
+        #[arg(long, value_enum)]
+        source_map: Option<sign::SourceMapOut>,
         /// Leave the line and column tables out of the bytecode: a smaller
         /// package whose error stacks have no positions.
         #[arg(long)]
@@ -468,6 +504,7 @@ impl Command {
             Command::Package(args) => Some(&mut args.entry),
             Command::Init { .. }
             | Command::Keygen { .. }
+            | Command::UpdateManifest { .. }
             | Command::Certify { .. }
             | Command::Verify { .. }
             | Command::Symbolicate { .. }
@@ -515,6 +552,36 @@ fn no_limits_for_rust(
 }
 
 fn run(mut command: Command) -> anyhow::Result<()> {
+    // A package given to `nsh publish` has no app to resolve or build.
+    if let Command::Publish {
+        entry,
+        key,
+        cert,
+        out,
+        id,
+        version,
+        build,
+        source_map,
+        strip_debug,
+        min_runtime,
+    } = &command
+        && sign::is_package(entry)
+    {
+        let build_flags = [
+            ("--id", id.is_some()),
+            ("--app-version", version.is_some()),
+            ("--build", build.is_some()),
+            ("--source-map", source_map.is_some()),
+            ("--strip-debug", *strip_debug),
+            ("--min-runtime", min_runtime.is_some()),
+        ];
+        if let Some((flag, _)) = build_flags.iter().find(|(_, given)| *given) {
+            anyhow::bail!(
+                "{flag} applies to a build: a package signed again keeps its contents as they are"
+            );
+        }
+        return sign::resign(entry, key, cert, out.clone());
+    }
     let mut types = true;
     // The app a test's path is part of.
     if let Command::Test { path, entry, .. } = &mut command {
@@ -531,6 +598,24 @@ fn run(mut command: Command) -> anyhow::Result<()> {
     // rule from this command has been cleaned up.
     let _port = match &command {
         Command::Run { port, .. } | Command::Dev { port, .. } => dev_port::Session::acquire(*port)?,
+        _ => None,
+    };
+    let _terminal_logs = match &command {
+        Command::Run {
+            entry,
+            target: run::Target::Tui,
+            ..
+        }
+        | Command::Dev {
+            entry,
+            target: run::Target::Tui,
+            server_only: false,
+            ..
+        } => {
+            let work = entry.parent().context("app directory")?.join(".nsh");
+            std::fs::create_dir_all(&work)?;
+            Some(ui::LogFile::open(&work.join("tui.log"))?)
+        }
         _ => None,
     };
     // A Rust app (`nsh.json` "root") has no bundle: it is built, checked,
@@ -683,6 +768,7 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
                         limits,
                         trace: false,
                         fps: false,
+                        points_per_cell: None,
                     },
                     target,
                     device.as_deref(),
@@ -744,13 +830,19 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             name,
             size,
             display,
+            points_per_cell,
         } => {
             no_limits_for_rust(&entry, limits)?;
             run::run(
                 &entry,
                 port,
                 release,
-                run::HostFlags { limits, trace, fps },
+                run::HostFlags {
+                    limits,
+                    trace,
+                    fps,
+                    points_per_cell,
+                },
                 target,
                 device.as_deref(),
                 run::HostWindow {
@@ -761,6 +853,23 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             )
         }
         Command::Keygen { name } => sign::keygen(&name),
+        Command::UpdateManifest {
+            archives,
+            entry,
+            key,
+            notes,
+            links,
+            base_url,
+            out,
+        } => updater::manifest(updater::ManifestOptions {
+            archives: &archives,
+            entry: &entry,
+            key: key.as_deref(),
+            notes: notes.as_deref(),
+            links: &links,
+            base_url: base_url.as_deref(),
+            out: &out,
+        }),
         Command::Certify {
             root,
             key,
@@ -791,7 +900,7 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
                 cert: &cert,
                 out,
                 config,
-                source_map,
+                source_map: source_map.unwrap_or(sign::SourceMapOut::Package),
                 strip_debug,
             })
         }
@@ -817,6 +926,25 @@ mod command_tests {
     use clap::Parser as _;
 
     use super::{Cli, Command, run::Target};
+
+    /// Signing a package again changes no contents, so a flag that shapes a
+    /// build is refused rather than ignored, before any file is read.
+    #[test]
+    fn publishing_a_package_refuses_the_flags_of_a_build() {
+        for (flag, args) in [
+            ("--id", &["--id", "a.b"][..]),
+            ("--app-version", &["--app-version", "2.0.0"]),
+            ("--build", &["--build", "2"]),
+            ("--source-map", &["--source-map", "package"]),
+            ("--strip-debug", &["--strip-debug"]),
+            ("--min-runtime", &["--min-runtime", "0.2.0"]),
+        ] {
+            let mut line = vec!["nsh", "publish", "a.nshpkg", "--key", "k", "--cert", "c"];
+            line.extend_from_slice(args);
+            let error = super::run(Cli::try_parse_from(line).unwrap().command).unwrap_err();
+            assert!(error.to_string().starts_with(flag), "{flag}: {error}");
+        }
+    }
 
     #[test]
     fn version_includes_the_source_revision() {

@@ -27,9 +27,13 @@ WORKFLOWS = {
     "core.yml": {
         "packages": [
             "nsh-core", "nsh-macros", "nsh-js", "nsh-engine",
-            "nsh-bundler", "nsh-package", "nsh-base", "nsh-testing",
+            "nsh-bundler", "nsh-package", "nsh-updater", "nsh-base", "nsh-testing",
         ],
-        "files": ["examples/counter/**", "examples/gallery/**", "examples/bench/**"],
+        # The fonts nsh-core's, nsh-macros' and nsh-bundler's tests read.
+        "files": [
+            "examples/counter/**", "examples/gallery/**", "examples/bench/**",
+            "tests/compat/cases/layout/fonts/**",
+        ],
     },
     "compat.yml": {
         # `nsh build` builds the apps, nsh-compat's checks link the rest.

@@ -14,28 +14,26 @@
   views decoding at different sizes) and report `onProgress` at most every 100ms; `Image.getSize` / `Image.prefetch` (Rust,
   `nsh_core::runtime`) ask with `Command::ImageInfo`, are answered by the root's `ImageInfo` event (which the core
   resolves, never JS) and keep the downloaded bytes in a data cache (32 MB) until a view
-  decodes them. Android `ImageBox` draws its borders above the
+  decodes them; in a terminal (`Idiom::Terminal`) the core answers them at once and sends no command, and `Image`'s
+  functions reject with `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`. Android `ImageBox` draws its borders above the
   image (as Core Animation's layer border).
 - **Loading and memory** (`nsh_core::image`, the design in `image-loading-design.md`; Linux, Windows, macOS and
   GPUI: iOS and Android keep their own loaders, above). One loader per process (`image::loader`) reads every view's, canvas's, `getSize` / `prefetch`'s and `element::svg`'s bytes: a
   `Location` (`http(s)`, a file, `asset:/` by the surface's `AssetBase` — the dev server, a directory, or
   `Directories` looked in in order — or the engine's `Assets` reader, bytes in memory) named by one source key (`Location::key`); one read per key in flight, later requests waiting on it; reads
-  and downloads on their own threads (`DOWNLOADS` 6, `PER_HOST` 4) apart from decodes (`decoders()`,
-  `min(cores − 1, 4)`), both highest `Priority` first (`Visible`, `Normal`, `Prefetch`; `Ticket::set_priority` moves
+  and downloads on their own threads apart from decodes, both highest `Priority` first (`Visible`, `Normal`, `Prefetch`; `Ticket::set_priority` moves
   a waiting one); the download itself is a `Transport` (`Context::transport`, else the process's
   `set_transport`, else ureq with feature `loader`): macOS sets an `NSURLSession` one and builds without ureq (the system's proxies,
   authentication and App Transport Security), Linux, Windows and GPUI use ureq, and the loader checks the size limit
-  and cancellation again on what a transport returns; a bounded read queue (`MAX_QUEUED` 512: a full one turns away its lowest priority); a `Ticket`
+  and cancellation again on what a transport returns; a bounded read queue; a `Ticket`
   dropped by its last waiter cancels the read in its queue or between two chunks of its download. Limits:
   `MAX_BYTES` (64 MiB) a response or file, `TIMEOUT` (60 s) a request, `MAX_REDIRECTS` (20) redirects, each checked
   by `Access::media_redirect` and never from `https` to `http`. A failed read is answered from memory for
-  `FAILURE_TTL` (30 s). L3: the encoded bytes of the last reads (`ENCODED_BYTES`, 32 MiB; 16 on phones; an entry over
-  a quarter is not kept), so a decode at another size, an SVG parsed again or `getSize` reads nothing again.
+  `FAILURE_TTL` (30 s). L3: the encoded bytes of the last reads, so a decode at another size, an SVG parsed again or `getSize` reads nothing again.
   Decoded images (L4, `Images<V>`: the backend gives it its decoder, bytes to its picture at a `Target`) are decoded
   at the size their view shows them: `Want` (the box in points, the device scale, the resize mode; an empty box: the
   natural size; one side alone scales by that side) gives the longest side the fitted image needs in pixels, rounded
-  up to a size bucket (`image::bucket`: powers of √2, never above the natural size; an SVG's within 8192), so views of
-  similar sizes share an entry and a view that grows asks for the next bucket. The natural size comes from the
+  up to a size bucket (`image::bucket`), so views of similar sizes share an entry. The natural size comes from the
   bytes' header (`Natural::of`, `imagesize`; an SVG's `svg::size`) before the decode, and is remembered, so a request
   for an image decoded before is answered from memory, here and now. Entries are keyed by (source key, bucket,
   `Frames`), one decode per key at a time. Every entry, the SVG drawings of `element::svg` included, counts in one

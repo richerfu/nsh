@@ -41,25 +41,27 @@ use std::{
 
 use dispatch2::DispatchQueue;
 use nsh_core::{
-    EventKind, EventPayload, PayloadValue, ROOT_ID,
+    EventKind, EventPayload, ImageSource, PayloadValue, ROOT_ID,
     desktop::{
         DesktopCommand, Key, MenuAction, MenuItem, MenuRole, Shortcut, TitleBarStyle, WindowFrame,
-        WindowLevel,
+        WindowLevel, menu_icon,
     },
-    geometry::{Edges, Points},
+    geometry::{DevicePixels, Edges, Points, size},
 };
 use objc2::{
-    DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class,
+    msg_send,
     rc::{Retained, Weak},
     runtime::Sel,
     sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSEvent, NSEventModifierFlags, NSFloatingWindowLevel, NSMenu, NSMenuItem,
-    NSNormalWindowLevel, NSRunningApplication, NSScreen, NSToolbar, NSWindow, NSWindowButton,
-    NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility, NSWindowToolbarStyle,
+    NSApplication, NSEvent, NSEventModifierFlags, NSFloatingWindowLevel, NSImage, NSMenu,
+    NSMenuItem, NSNormalWindowLevel, NSRunningApplication, NSScreen, NSToolbar, NSWindow,
+    NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSWindowToolbarStyle,
 };
-use objc2_core_graphics::kCGDesktopIconWindowLevel;
+use objc2_core_graphics::{CGImage, kCGDesktopIconWindowLevel};
 use objc2_foundation::{
     NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUserDefaults, ns_string,
 };
@@ -135,6 +137,8 @@ pub(crate) struct Chrome {
     target: RefCell<Option<Retained<MenuTarget>>>,
     /// The main menu it set (`setApplicationMenu`).
     menu: RefCell<Option<Retained<NSMenu>>>,
+    /// The loads of the icons of that menu, given up with it.
+    menu_icons: RefCell<Vec<crate::image::Load>>,
     /// Only the toolbar this surface attached; dropping it restores the window.
     toolbar: RefCell<Option<TitleBarToolbar>>,
 }
@@ -164,6 +168,7 @@ fn full_screen(window: &NSWindow) -> bool {
 /// Tells the app the hidden title bar's area (after a style change, a
 /// resize, full screen).
 pub(crate) fn update_area(surface: &Surface) {
+    sync_toolbar_visibility(surface);
     let area = match window(surface) {
         Some(window)
             if surface.chrome.style.get() == TitleBarStyle::Hidden && !full_screen(&window) =>
@@ -179,8 +184,14 @@ pub(crate) fn update_area(surface: &Surface) {
             // A toolbar's native height is determined by AppKit, not the
             // requested height that selected its style. Include a host's
             // toolbar too, so the app reserves its actual obscured area.
+            // The title bar view that holds the window's buttons and the
+            // toolbar has that height whatever the window's: the content
+            // layout rectangle is only laid out for the new frame later,
+            // so read during a resize it gives the old one's.
             let height = if window.toolbar().is_some() {
-                toolbar_height(frame.size.height, window.contentLayoutRect(), natural)
+                title_bar_view_height(&window).unwrap_or_else(|| {
+                    toolbar_height(frame.size.height, window.contentLayoutRect(), natural)
+                })
             } else {
                 natural
             };
@@ -210,6 +221,31 @@ pub(crate) fn update_area(surface: &Surface) {
         env.title_bar = area;
         surface.set_environment(env);
     }
+}
+
+/// Hides our empty toolbar in full screen and shows it again outside it.
+/// Full screen keeps a visible toolbar on screen as an opaque strip over the
+/// app's content; without one, AppKit reveals the title bar on hover instead.
+fn sync_toolbar_visibility(surface: &Surface) {
+    let Some(window) = window(surface) else {
+        return;
+    };
+    let owned = surface.chrome.toolbar.borrow();
+    let Some(owned) = owned.as_ref().filter(|t| t.is_installed(&window)) else {
+        return;
+    };
+    let visible = !full_screen(&window);
+    if owned.toolbar.isVisible() != visible {
+        owned.toolbar.setVisible(visible);
+    }
+}
+
+/// The height of the title bar view around the window's buttons (with a
+/// toolbar, the toolbar's row too), when the window has one.
+fn title_bar_view_height(window: &NSWindow) -> Option<f32> {
+    let button = window.standardWindowButton(NSWindowButton::CloseButton)?;
+    let height = crate::view::superview(&button)?.frame().size.height;
+    (height.is_finite() && height > 0.0).then_some(height as f32)
 }
 
 /// The unobscured rectangle is in window coordinates, including its origin.
@@ -323,9 +359,18 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
             }
         }
         DesktopCommand::Close => {
-            if let Some(window) = window(surface) {
-                window.performClose(None);
-            }
+            // Close after the batch, as Windows posts WM_CLOSE and GTK
+            // waits for idle: performClose runs windowWillClose: at once,
+            // which stops the surface while this batch still holds its
+            // mounter.
+            let key = surface.key();
+            DispatchQueue::main().exec_async(move || {
+                if let Some(surface) = Surface::with_key(key)
+                    && let Some(window) = window(&surface)
+                {
+                    window.performClose(None);
+                }
+            });
         }
         DesktopCommand::SetMenu(items) => set_menu(surface, items.as_deref()),
         // The menu bar is the system's.
@@ -597,8 +642,69 @@ fn key_equivalent(shortcut: &Shortcut) -> (String, NSEventModifierFlags) {
     (key, mask)
 }
 
-/// A menu of `items`, titled `title`.
-fn menu(surface: &Surface, title: &str, items: &[MenuItem]) -> Retained<NSMenu> {
+/// The pixels per point menu icons draw at: the largest of the screens',
+/// since a menu opens on whichever screen it is asked to, not only the
+/// window's (the menu bar is on each of them).
+fn menu_icon_scale(mtm: MainThreadMarker) -> f32 {
+    NSScreen::screens(mtm)
+        .iter()
+        .map(|screen| screen.backingScaleFactor() as f32)
+        .fold(1.0, f32::max)
+}
+
+/// Gives `item` its icon once it has loaded (now when it is in memory); one
+/// that fails leaves the item as it is. The load goes in `loads`, whose
+/// owner gives it up with the menu.
+fn set_icon(
+    surface: &Surface,
+    item: &NSMenuItem,
+    icon: Option<&ImageSource>,
+    loads: &mut Vec<crate::image::Load>,
+) {
+    let Some(icon) = icon else { return };
+    // From macOS 27 AppKit hides menu items' images unless they ask to be
+    // shown (`NSMenuItemImageVisibilityVisible`, a system symbol's too; not
+    // in objc2-app-kit yet).
+    if item.respondsToSelector(sel!(setPreferredImageVisibility:)) {
+        // SAFETY: the property, an `NSInteger`, exists: just checked.
+        let () = unsafe { msg_send![item, setPreferredImageVisibility: 1_isize] };
+    }
+    let item = item.retain();
+    let uri = icon.uri.clone();
+    let scale = menu_icon_scale(surface.mtm);
+    let load = crate::image::load_menu_icon(surface, icon, scale, move |loaded| match loaded {
+        Ok(loaded) => item.setImage(Some(&menu_image(&loaded))),
+        Err(e) => log::warn!("menu icon {uri}: {e}"),
+    });
+    loads.extend(load);
+}
+
+/// `icon` as an image for a menu item, of the size it shows at whatever the
+/// size it was decoded at: AppKit draws the image at its size, so its
+/// pixels at the screen's scale are what make it sharp.
+fn menu_image(icon: &crate::image::MenuIcon) -> Retained<NSImage> {
+    let pixels = size(
+        DevicePixels(CGImage::width(Some(&icon.image)) as i32),
+        DevicePixels(CGImage::height(Some(&icon.image)) as i32),
+    );
+    let shown = menu_icon::fitted(pixels, menu_icon::SIDE);
+    let image = NSImage::initWithCGImage_size(
+        NSImage::alloc(),
+        &icon.image,
+        NSSize::new(shown.width.0 as f64, shown.height.0 as f64),
+    );
+    image.setTemplate(icon.template);
+    image
+}
+
+/// A menu of `items`, titled `title`; the loads of their icons go in
+/// `loads`.
+fn menu(
+    surface: &Surface,
+    title: &str,
+    items: &[MenuItem],
+    loads: &mut Vec<crate::image::Load>,
+) -> Retained<NSMenu> {
     let mtm = surface.mtm;
     let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
     let mut last_separator = true;
@@ -646,6 +752,7 @@ fn menu(surface: &Surface, title: &str, items: &[MenuItem]) -> Retained<NSMenu> 
                 if let Some(checked) = action.checked {
                     ns.setState(if checked { 1 } else { 0 });
                 }
+                set_icon(surface, &ns, action.icon.as_ref(), loads);
                 menu.addItem(&ns);
                 last_separator = false;
             }
@@ -653,8 +760,10 @@ fn menu(surface: &Surface, title: &str, items: &[MenuItem]) -> Retained<NSMenu> 
                 label,
                 enabled,
                 items,
+                icon,
             } => {
-                let ns = holder(surface, label, *enabled, items);
+                let ns = holder(surface, label, *enabled, items, loads);
+                set_icon(surface, &ns, icon.as_ref(), loads);
                 menu.addItem(&ns);
                 last_separator = false;
             }
@@ -669,8 +778,9 @@ fn holder(
     label: &str,
     enabled: bool,
     items: &[MenuItem],
+    loads: &mut Vec<crate::image::Load>,
 ) -> Retained<NSMenuItem> {
-    let sub = menu(surface, label, items);
+    let sub = menu(surface, label, items, loads);
     // SAFETY: an item with no action (or one nothing answers, which
     // disables it), holding the submenu.
     let ns = unsafe {
@@ -686,7 +796,8 @@ fn holder(
 }
 
 /// The application menu: the main menu, with a menu of the bar per
-/// top-level submenu (its top-level actions go to the first one).
+/// top-level submenu (its top-level actions go to the first one). The bar's
+/// titles are text: an icon is for the items of a menu.
 fn set_menu(surface: &Surface, items: Option<&[MenuItem]>) {
     let mtm = surface.mtm;
     let app = NSApplication::sharedApplication(mtm);
@@ -698,10 +809,12 @@ fn set_menu(surface: &Surface, items: Option<&[MenuItem]>) {
     });
     let Some(items) = items else {
         surface.chrome.menu.borrow_mut().take();
+        surface.chrome.menu_icons.borrow_mut().clear();
         restore_menu(&app);
         return;
     };
     let bar = NSMenu::new(mtm);
+    let mut loads = Vec::new();
     for item in items {
         // A top-level item that is not a submenu gets one of its own.
         let (label, enabled, sub_items) = match item {
@@ -709,14 +822,16 @@ fn set_menu(surface: &Surface, items: Option<&[MenuItem]>) {
                 label,
                 enabled,
                 items,
+                ..
             } => (label.clone(), *enabled, items.clone()),
             MenuItem::Action(action) => (title(action), true, vec![item.clone()]),
             MenuItem::Separator => continue,
         };
-        bar.addItem(&holder(surface, &label, enabled, &sub_items));
+        bar.addItem(&holder(surface, &label, enabled, &sub_items, &mut loads));
     }
     app.setMainMenu(Some(&bar));
     *surface.chrome.menu.borrow_mut() = Some(bar);
+    *surface.chrome.menu_icons.borrow_mut() = loads;
 }
 
 /// Brings back the main menu the app replaced.
@@ -778,7 +893,9 @@ pub(crate) fn close_open_menu() -> Result<(), String> {
 /// Shows a context menu at `at` (root coordinates) or at the mouse.
 fn popup(surface: &Rc<Surface>, items: &Arc<[MenuItem]>, at: Option<(f32, f32)>) {
     let root = surface.root.ns();
-    let menu = menu(surface, "", items);
+    // Kept while the menu is open: an icon that arrives then shows at once.
+    let mut loads = Vec::new();
+    let menu = menu(surface, "", items, &mut loads);
     // The root view is flipped: y goes down, as the app's. Without a
     // place, where the root's pointer events put the mouse: the hardware
     // cursor's place only when they put it nowhere, as synthesized input
@@ -796,6 +913,7 @@ fn popup(surface: &Rc<Surface>, items: &Arc<[MenuItem]>, at: Option<(f32, f32)>)
     OPEN_MENU.with(|open| *open.borrow_mut() = Some(menu.clone()));
     // Returns once the menu closed (the chosen item's action sent).
     menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(root));
+    drop(loads);
     #[cfg(feature = "dev")]
     OPEN_MENU.with(|open| open.borrow_mut().take());
     // A menu opened during a press (`onPressDown`, a long press) took its

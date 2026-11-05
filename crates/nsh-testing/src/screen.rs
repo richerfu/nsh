@@ -594,6 +594,7 @@ impl Screen {
                 View {
                     parent: Some(parent),
                     events: link.events,
+                    focusable: Some(link.focus_stop),
                     span: Some(Span {
                         view: id,
                         text: utf16_slice(&text.text, link.start, link.end),
@@ -1498,6 +1499,47 @@ impl Screen {
         out
     }
 
+    /// The views inside scroll view `id` that take a finger's drag
+    /// themselves: they hear touches (a responder, JS's or a component's,
+    /// which may keep them from the scroll view) or pan natively. A finger
+    /// that lands on one to scroll may move it instead, or the scroll view
+    /// only until the app's answer comes, so a step's scrolling lands
+    /// elsewhere. What one holds lands on it, and is not listed.
+    #[cfg(feature = "agent")]
+    pub(crate) fn drag_takers(&self, id: NodeId) -> Vec<NodeId> {
+        let attached: HashSet<NodeId> = self.attached().into_iter().collect();
+        let mut out = Vec::new();
+        let mut stack: Vec<NodeId> = self.children.get(&id).cloned().unwrap_or_default();
+        while let Some(id) = stack.pop() {
+            let Some(view) = self.nodes.get(&id) else {
+                continue;
+            };
+            let receives = view.pointer_events;
+            if !attached.contains(&id)
+                || view.canvas_node
+                || view.hidden
+                || receives == PointerEvents::None
+            {
+                continue;
+            }
+            let takes = view.events.contains(EventKind::Touch)
+                || view.events.contains(EventKind::PanStart)
+                || view.events.contains(EventKind::PanEnd)
+                || view.gestures.pan_x.is_some()
+                || view.gestures.pan_y.is_some();
+            if takes && receives != PointerEvents::BoxNone {
+                out.push(id);
+                continue;
+            }
+            if receives != PointerEvents::BoxOnly
+                && let Some(children) = self.children.get(&id)
+            {
+                stack.extend(children.iter().copied());
+            }
+        }
+        out
+    }
+
     fn up_to(&self, mut id: NodeId, test: impl Fn(&View) -> bool) -> Option<NodeId> {
         loop {
             let view = self.nodes.get(&id)?;
@@ -1770,16 +1812,40 @@ impl Screen {
                 if let Some(input) = &v.input {
                     return input.config.editable && !self.disabled_from(id, None);
                 }
+                // A link in a text view is a stop after it, in text order
+                // (`TextLink::focus_stop`).
+                if v.span.is_some() {
+                    return v.focusable == Some(true) && !self.disabled_from(id, None);
+                }
                 // Disabled is the ancestors' too here (`disabled_from`).
                 let props = nsh_core::ViewProps {
                     focusable: v.focusable,
                     ..Default::default()
                 };
-                v.span.is_none()
-                    && props.focus_stop(v.events.contains(EventKind::Press))
+                props.focus_stop(v.events.contains(EventKind::Press))
                     && !self.disabled_from(id, None)
             })
             .collect()
+    }
+
+    /// The stop a press on `id` gives the focus to in a terminal: `id` or
+    /// its nearest ancestor that Tab stops at (`tab_stops`), else the
+    /// topmost stop over the press's point (a table's hit layer over its
+    /// rows), as a terminal finds what is under the pointer.
+    pub(crate) fn stop_around(&self, id: NodeId) -> Option<NodeId> {
+        let stops = self.tab_stops();
+        let mut at = Some(id);
+        while let Some(id) = at {
+            if stops.contains(&id) {
+                return Some(id);
+            }
+            at = self.nodes.get(&id).and_then(|v| v.parent);
+        }
+        let point = self.bounds_in_root(id)?.center();
+        stops.iter().rev().copied().find(|&stop| {
+            self.bounds_in_root(stop)
+                .is_some_and(|bounds| bounds.contains(&point))
+        })
     }
 
     pub(crate) fn scroll(&self, id: NodeId) -> Option<&Scroll> {
@@ -1891,6 +1957,49 @@ mod tests {
         screen.nodes.get_mut(&2).unwrap().clips = false;
         screen.nodes.get_mut(&2).unwrap().pointer_events = PointerEvents::BoxOnly;
         assert_eq!(screen.pressable(&selector), Pick::None);
+    }
+
+    #[test]
+    #[cfg(feature = "agent")]
+    fn a_scroll_views_drag_takers_are_the_views_that_take_touches_or_pan() {
+        let mut screen = Screen::default();
+        let mut items = vec![create(2, ViewKind::Scroll), insert(1, 2)];
+        for id in [4, 6, 8, 10, 12, 14, 16] {
+            items.extend([create(id, ViewKind::View), insert(2, id)]);
+        }
+        // Inside the responder at 4, and inside the view at 12 that keeps
+        // touches from what it holds.
+        items.extend([
+            create(18, ViewKind::View),
+            insert(4, 18),
+            create(20, ViewKind::View),
+            insert(12, 20),
+        ]);
+        screen.apply(&batch(items));
+        let events = |screen: &mut Screen, id: NodeId, kind: EventKind| {
+            screen.nodes.get_mut(&id).unwrap().events.set(kind, true);
+        };
+        // A responder, a native pan, a button, a responder no touch
+        // reaches, a responder only what it holds hears, and a drag that
+        // moves a value.
+        for (id, kind) in [
+            (4, EventKind::Touch),
+            (6, EventKind::PanStart),
+            (8, EventKind::Press),
+            (10, EventKind::Touch),
+            (14, EventKind::Touch),
+            (18, EventKind::Touch),
+            (20, EventKind::Touch),
+        ] {
+            events(&mut screen, id, kind);
+        }
+        screen.nodes.get_mut(&10).unwrap().pointer_events = PointerEvents::None;
+        screen.nodes.get_mut(&12).unwrap().pointer_events = PointerEvents::BoxOnly;
+        screen.nodes.get_mut(&14).unwrap().pointer_events = PointerEvents::BoxNone;
+        screen.nodes.get_mut(&16).unwrap().gestures.pan_y = Some(1);
+        let mut takers = screen.drag_takers(2);
+        takers.sort_unstable();
+        assert_eq!(takers, [4, 6, 16]);
     }
 
     fn batch(items: Vec<MountItem>) -> MountBatch {
@@ -2091,6 +2200,7 @@ mod tests {
             end,
             node,
             events,
+            focus_stop: true,
         };
         let linked = |links: Vec<nsh_core::TextLink>| MountItem::Text {
             id: 4,

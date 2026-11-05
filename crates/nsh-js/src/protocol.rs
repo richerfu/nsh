@@ -148,6 +148,10 @@ pub(crate) fn decode_command<'js>(
         "stopLoading" => Command::StopLoading,
         "injectJavaScript" => Command::InjectJavaScript(string(&arg)?),
         "postMessage" => Command::PostMessage(string(&arg)?),
+        "sendInput" => match web_input(&arg) {
+            Some(input) => Command::SendInput(input),
+            None => return Ok(None),
+        },
         "seek" => Command::Seek(arg.as_number().unwrap_or(0.0)),
         "native" => {
             let o = arg.as_object();
@@ -250,6 +254,28 @@ fn number(value: &Value<'_>) -> Option<f32> {
     value.as_number().map(|n| n as f32)
 }
 
+/// `sendInput`'s argument (`None`: none of its forms, which sends nothing).
+fn web_input(arg: &Value<'_>) -> Option<nsh_core::WebInput> {
+    use nsh_core::{WebInput, WebKey};
+    let o = arg.as_object()?;
+    let text = |key: &str| o.get::<_, Option<String>>(key).ok().flatten();
+    let number = |key: &str| {
+        o.get::<_, Option<f64>>(key)
+            .ok()
+            .flatten()
+            .filter(|n| n.is_finite())
+    };
+    match text("type")?.as_str() {
+        "click" => Some(WebInput::Click {
+            x: nsh_core::Points(number("x")? as f32),
+            y: nsh_core::Points(number("y")? as f32),
+        }),
+        "text" => text("text").map(WebInput::Text),
+        "key" => WebKey::from_name(&text("key")?).map(WebInput::Key),
+        _ => None,
+    }
+}
+
 /// A string prop; anything else (null, undefined) is the empty string.
 fn string(value: &Value<'_>) -> rquickjs::Result<String> {
     match value.as_string() {
@@ -260,6 +286,12 @@ fn string(value: &Value<'_>) -> rquickjs::Result<String> {
 
 fn field_f32(obj: &Object<'_>, key: &str) -> rquickjs::Result<Option<f32>> {
     Ok(obj.get::<_, Option<f64>>(key)?.map(|v| v as f32))
+}
+
+/// An image source as `<Image>`'s `src` reads it: a string or an imported
+/// image. `None` for anything else, an empty string among them (no image).
+pub(crate) fn image_source(value: Value<'_>) -> Option<nsh_core::ImageSource> {
+    <nsh_core::ImageSource as HostValue>::decode(&Js(value), &mut HostCx::default())
 }
 
 /// A QuickJS value as host props read it.

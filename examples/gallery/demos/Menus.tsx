@@ -1,10 +1,10 @@
 import { type JSX, LayoutAnimation, reduceMotion, Scroll, setColorScheme, signal, Text, token, View } from "nsh";
-import { ContextMenu, Menu, MenuItem, MenuSeparator, type OpenChangeReason, Submenu } from "nsh/base";
+import { ContextMenu, Menu, MenuItem, MenuSeparator, type OpenChangeReason, Submenu, Toolbar } from "nsh/base";
 import { platform } from "nsh";
 import { keymap } from "nsh";
 import { Icon, LucideIcon, type LucideIconName } from "../icons";
 import { toast, updateToast } from "../toast";
-import { alpha, Badge, Button, Caption, Card, colors, DemoPage, finish, isDark, menuIndicator, MenuMark, mono, PopIn, type PopupSide, popupSurface, Row, Segmented, Tip } from "../ui";
+import { alpha, Badge, Button, Caption, Card, colors, DemoPage, finish, isDark, menuIndicator, MenuMark, mono, PopIn, type PopupSide, popupSurface, Row, Segmented, terminal, Tip } from "../ui";
 
 // The look of every menu here is the gallery's: `nsh/base` draws none.
 
@@ -46,6 +46,8 @@ const hovered = () => ({ backgroundColor: token("accent") });
 const pressed = () => ({ backgroundColor: alpha(colors.text, 0.1) });
 
 /** An item's height, corners and type. */
+/** An item's inset from the popup's sides: in a terminal the popup's own padding is its Cell from the frame. */
+const inset = terminal ? 0 : 8;
 const item = pointer ? { height: 26, radius: 6, font: 13, note: 11.5, icon: 14 } : { height: 46, radius: 10, font: 16, note: 14, icon: 18 };
 
 /**
@@ -78,12 +80,12 @@ function Item(props: {
       hoverStyle={hovered()}
       activeStyle={pressed()}
       disabledStyle={{ opacity: 0.35 }}
-      style={{ flexDirection: "row", alignItems: "center", gap: 8, height: item.height, paddingHorizontal: 8, borderRadius: item.radius }}
+      style={{ flexDirection: "row", alignItems: "center", gap: 8, height: item.height, paddingHorizontal: inset, borderRadius: item.radius }}
     >
       <If when={props.icon && props.checked === undefined}>
         <LucideIcon name={props.icon!} size={item.icon} tint={props.danger ? colors.danger : colors.muted} />
       </If>
-      <Text style={{ flex: 1, fontSize: item.font, color: props.danger ? colors.danger : colors.text }}>{props.label}</Text>
+      <Text style={{ numberOfLines: 1, flexGrow: 1, flexShrink: 0, fontSize: item.font, color: props.danger ? colors.danger : colors.text }}>{props.label}</Text>
       <If when={props.shortcut ?? props.note}>
         <Text style={{ fontSize: item.note, color: colors.faint }}>{props.shortcut ?? props.note}</Text>
       </If>
@@ -95,22 +97,23 @@ function Item(props: {
 function SubmenuOf(props: { label: string; icon?: LucideIconName; children: JSX.Element; disabled?: boolean }) {
   return (
     <Submenu
+      offset={4}
       disabled={props.disabled}
       trigger={
         <View
           hoverStyle={hovered()}
           activeStyle={pressed()}
-          style={{ flexDirection: "row", alignItems: "center", gap: 8, height: item.height, paddingHorizontal: 8, borderRadius: item.radius, opacity: props.disabled ? 0.35 : 1 }}
+          style={{ flexDirection: "row", alignItems: "center", gap: 8, height: item.height, paddingHorizontal: inset, borderRadius: item.radius, opacity: props.disabled ? 0.35 : 1 }}
         >
           <If when={props.icon}>
             <LucideIcon name={props.icon!} size={item.icon} tint={colors.muted} />
           </If>
-          <Text style={{ flex: 1, fontSize: item.font, color: colors.text }}>{props.label}</Text>
+          <Text style={{ numberOfLines: 1, flexGrow: 1, flexShrink: 0, fontSize: item.font, color: colors.text }}>{props.label}</Text>
           <Icon name="chevron" size={pointer ? 12 : 14} tint={colors.faint} />
         </View>
       }
       back={
-        <View activeStyle={pressed()} style={{ flexDirection: "row", alignItems: "center", gap: 6, height: item.height, paddingHorizontal: 8, borderRadius: item.radius }}>
+        <View activeStyle={pressed()} style={{ flexDirection: "row", alignItems: "center", gap: 6, height: item.height, paddingHorizontal: inset, borderRadius: item.radius }}>
           <Icon name="back" size={14} tint={colors.accent} />
           <Text style={{ fontSize: item.font, fontWeight: "600", color: colors.accent }}>{props.label}</Text>
         </View>
@@ -124,7 +127,7 @@ function SubmenuOf(props: { label: string; icon?: LucideIconName; children: JSX.
 /** A group's title: not an item, nothing to press. */
 function Label(props: { text: string }) {
   return (
-    <Text style={{ fontSize: pointer ? 11 : 13, fontWeight: "600", color: colors.faint, paddingHorizontal: 8, paddingTop: 6, paddingBottom: 2 }}>
+    <Text style={{ fontSize: pointer ? 11 : 13, fontWeight: "600", color: colors.faint, paddingHorizontal: inset, paddingTop: 6, paddingBottom: 2 }}>
       {props.text}
     </Text>
   );
@@ -314,7 +317,8 @@ export function Menus() {
     const key = (k: string) => (platform.desktop ? keymap.label(k) : undefined);
     return (
       <Card icon="lists" title="Menu bar" subtitle={platform.desktop ? "Hover across submenus; the shortcuts work too" : "Each menu a sheet; submenus take its place"}>
-        <View style={{ flexDirection: "row", gap: 2, marginLeft: pointer ? -10 : 0 }}>
+        {/* A toolbar: with one menu open, the pointer over another title opens it. */}
+        <Toolbar accessibilityLabel="Menu bar" style={{ flexDirection: "row", gap: 2, marginLeft: pointer ? -10 : 0 }}>
           <Menu offset={4} margin={8} popupStyle={sheet} backdropStyle={backdrop} onOpenChange={changed("File")} trigger={<Chip bar label="File" open={isOpen("File")} />}>
             <Panel>
               <Item label="New document" icon="file-plus" shortcut={key("mod+alt+n")} onSelect={() => act("New document")} />
@@ -367,7 +371,7 @@ export function Menus() {
               </SubmenuOf>
             </Panel>
           </Menu>
-        </View>
+        </Toolbar>
         <Preview sidebar={sidebar()} minimap={minimap()} sort={sort()} zoom={zoom()} />
         <Caption label={`Sidebar ${sidebar() ? "on" : "off"} · minimap ${minimap() ? "on" : "off"} · by ${sort()} · zoom ${zoom()}`} />
         <Caption label={history().length ? `Done: ${history().join(", ")}` : "Nothing done yet"} />
@@ -424,14 +428,16 @@ export function Menus() {
                         hoverStyle={hovered()}
                         activeStyle={{ backgroundColor: alpha(colors.text, 0.1) }}
                         style={{
-                          paddingHorizontal: 8,
+                          width: 28,
                           height: 28,
+                          alignItems: "center",
                           justifyContent: "center",
                           borderRadius: 6,
                           backgroundColor: isOpen(`${file().name} ⋯`) ? token("accent") : "transparent",
                         }}
                       >
-                        <LucideIcon name="ellipsis" size={16} tint={colors.muted} />
+                        {/* The terminal draws no icons: the ellipsis as text, not a popup's ▾. */}
+                        {terminal ? <Text style={{ color: colors.muted }}>⋯</Text> : <LucideIcon name="ellipsis" size={16} tint={colors.muted} />}
                       </View>
                     }>
                       {actions(file)}

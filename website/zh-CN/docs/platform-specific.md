@@ -91,6 +91,9 @@ TSX 的这些对象和其他属性一样是响应式的；从对象中移除的�
 | `.supported_orientations(..)` | `ios={{ supportedOrientations }}` | `Dialog` | 允许的方向。 |
 | `.back_forward_gestures(..)` | `ios={{ allowsBackForwardNavigationGestures }}` | `WebView` | 滑动在页面历史中前进后退。 |
 | `.header_right_system_item(..)` | `ios={{ headerRightSystemItem }}` | `NavPage` | 标题栏末尾显示 UIKit 自带的按钮，按下即按下 `headerRight`。 |
+| `.header_left_system_item(..)` | `ios={{ headerLeftSystemItem }}` | `NavPage` | 标题栏开头显示 UIKit 自带的按钮，按下即按下 `headerLeft`。 |
+| `.header_right_symbol(..)` | `ios={{ headerRightSymbol }}` | `NavPage` | 标题栏末尾显示 UIKit 自带的 SF Symbol 按钮，按下即按下 `headerRight`。 |
+| `.header_left_symbol(..)` | `ios={{ headerLeftSymbol }}` | `NavPage` | 标题栏开头显示 UIKit 自带的 SF Symbol 按钮，按下即按下 `headerLeft`。 |
 | `.back_forward_gestures(..)` | `desktop={{ allowsBackForwardNavigationGestures }}` | `WebView` | macOS：双指在触控板上轻扫，在页面历史中前进后退；Windows：在触摸屏上轻扫；Linux：在触控板上轻扫。 |
 | `.window_drag(..)` | `desktop={{ windowDrag }}` | 所有元素 | 按住它拖动窗口，像系统标题栏一样（见 [nsh/desktop](../modules/nsh-desktop.md#自定义标题栏)）。 |
 
@@ -162,7 +165,7 @@ Rust 应用用 `nsh_core::element::desktop` 绘制自己的标题栏（[用 Rust
 |---|---|
 | `Window` | 窗口：`setTitle`、`setTitleBar({ style: "hidden" })`（自定义标题栏）、`minimize`、`toggleMaximize`、`toggleFullScreen`、`close`。 |
 | `titleBar` | 隐藏的标题栏的高度，以及系统窗口按钮占用的空间（响应式）。 |
-| `Menu` | `setApplicationMenu(items)`（菜单栏，带快捷键）和 `popup(items, at?)`（右键菜单）。 |
+| `Menu` | `setApplicationMenu(items)`（菜单栏，带快捷键）和 `popup(items, at?)`（右键菜单）。菜单项的 `icon` 和 `<Image>` 的 `src` 一样是图片，菜单因此显示应用自己的图标：SVG 跟随菜单文字的颜色，位图保留自己的颜色。macOS 和 Windows 上会显示；GTK 的菜单不在文字旁显示图标。 |
 | `isAvailable` | 在窗口和菜单 API 可用的地方为 `true`：macOS、Windows 和 Linux。桌面浏览器的 `platform.desktop` 为 `true`，窗口和菜单仍是浏览器自己的。 |
 
 见 [nsh/desktop](../modules/nsh-desktop.md)。

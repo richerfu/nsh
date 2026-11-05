@@ -21,6 +21,8 @@ cargo xtask clippy-ohos                  # clippy across default, dev, api-23 an
 
 `cargo xtask ohos` builds `libnsh_platform_ohos.so`, generates `index.d.ts`, and stages the companion `@nsh/ohos`
 ArkTS package under `target/ohos/arkts-deps/nsh/`.
+The SDK enables the core's shader compiler and the base library's editor, highlighting, math, plot and rich-editor
+features explicitly, so the shared component exports remain present after the 0.4.0 feature split.
 
 Features:
 - Default / `dev`: API 20 baseline (`OH_ArkUI_*` custom nodes, `OH_Drawing_Typography`, `NativeVSync`, `AVPlayer`,
@@ -53,3 +55,42 @@ Features:
   a visible, opaque header, else the safe area's top.
 - **Hit areas**: `hitSlop` and overflowing children widen `NODE_RESPONSE_REGION`, whose width and height are
   percentages of the node's size (`100` is the node itself), not ratios.
+
+## Upstream integration: 2026-11-05
+
+Baseline: `201d780a`; integrated main: `2fd62283` (193 commits, NSH 0.4.0). This is a source-level adaptation audit;
+cross-compilation and host tests do not establish native rendering or interaction parity.
+
+The integration updates `EngineConfig::speech`, the shader built-ins' 32-byte buffer (`progress` and `overflow`),
+and the exhaustive mount protocol. `TreeOrder` and `ProjectStates` are opt-in projections used by the terminal
+backend; OHOS does not request them. Shader fills continue to draw in their XComponents. Effects show their
+children directly, transitions change them immediately, and pages and dialogs retain their ordinary `animation`,
+following the fallback also used by GPUI. Only `ShaderRole::Fill` is passed to the OHOS GPU renderer.
+
+The following work remains for native feature parity, in suggested order:
+
+| Priority | API or behavior | Current OHOS behavior and implementation boundary |
+|---|---|---|
+| High | `lifecycle()` / Rust `lifecycle()` | `Environment::lifecycle` stays at its default `Active`. `arkts/src/main/ets/NshHost.ets` folds window inactivity and background into one foreground boolean; `src/app/runtime.rs` uses it to gate frames but does not publish lifecycle changes. Preserve three states and send the environment to the engine, including the initial state. |
+| High | `fontFamily` lists; WOFF / WOFF2 imports | `src/text/typography.rs` and `src/render/canvas.rs` pass a list as one font name. Use `nsh_core::style::font_families` with native generic-family mappings; check the native editor path too. `register_font` parses raw bytes as TTF/OTF: call bounded `nsh_core::text::font_data` before parsing and retain the decompressed bytes. |
+| High | `ShaderEffect`, `ShaderTransition`, `ScreenEffect`, `ScreenTransition`, `transitionShader` | The fallback above preserves content. Full support needs subtree/surface/backdrop pictures, texture bindings, invalidation, transition clocks and presentation above live children in `src/render/shader/` and navigation. Passing effect programs to the fill pipeline is insufficient. |
+| Medium | `Speech.available()`, `Speech.start()` | `Environment::speech` is false and `EngineConfig::speech` is `None`; the core answers unavailable (after capability checks). Add a native recognizer or expose an embedding backend, with permission, cancellation and session teardown. |
+| Medium | `Notifications` permission, show, cancel, badge and press events | `Environment::notifications` is false; the core answers unavailable. `Command::Notification` has no OHOS handler. Add permission requests, native notification IDs, badge handling and cold-start press delivery before enabling the flag. |
+| Medium | `ViewProps::continues_text`, selectable views | OHOS selection is per paragraph (`src/text/selection/`), with no `SelectionTexts` adapter. Cross-view selection was already a gap; the new soft-wrapped `DiffView` continuation contract additionally needs joins without inserted line breaks. |
+| Medium | `AccessibilityState::has_popup`; diagonal resize cursors | The new popup distinction and `Cursor::NwseResize` / `NeswResize` are not consumed by the OHOS backend. Extend native accessibility and pointer presentation where supported. |
+| Optional extension | `WebView.sendInput`, `onDownload` | These land with macOS implementations. OHOS handles neither trusted `Command::SendInput` nor native download events; an ArkWeb implementation is separate work, including its input capability and download lifetime/storage rules. |
+| Follow-up | System alert/action-sheet and TabBar theme colors | Upstream now derives these from design tokens. OHOS does not handle `Command::DesignTokens`; connect token changes to the ArkTS system controls when adopting that behavior. |
+
+Shared-layer additions need no new platform protocol: `Carousel`, `Tree`, `HoverCard`, `Command`, the new plot
+marks (`Rule`, `Dot`, `Cell`, `Treemap`, per-row `Bar` bases and a second y scale), Editor decorations, DiffView
+review/scroll APIs, `focusWithinStyle`, `data-*` state classes, and controls' `hitSlop` use the existing primitives.
+They still need native smoke tests, especially focus, popup placement, scrolling and accessibility.
+`fetch(asset:/...)` is served by the engine through the existing OHOS `Assets` implementation.
+`nsh/updater` is for packaged apps; the OHOS embedding host supplies no updater host, so checks return no update.
+
+Validation for this integration: `cargo xtask ohos` builds the API 20 SDK; `cargo xtask clippy-ohos` passes default,
+dev, API 23 and API 26 with warnings denied; `cargo test -p nsh-platform-ohos --locked` passes 68 host tests;
+`cargo test -p nsh-core --lib platform:: --locked` passes 10 tests, including OHOS desktop/terminal classification.
+The CI path check and formatting of the touched Rust files pass. The workspace-wide formatting check still reports
+six files identical to upstream (base library, macOS, Windows and xtask); its whitespace check also reports the
+upstream KaTeX license and browser-size document. No device smoke tests were run in this integration.

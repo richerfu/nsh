@@ -14,6 +14,9 @@ demo: el-menu
 
 选择一个条目、外部按压、Escape、Android 返回键和 VoiceOver 的退出手势都会关闭它。`ContextMenu` 是同样的菜单，由辅助按键（右键单击）在指针处打开，或在触摸屏上由手指按住触发元素打开。
 
+在获得焦点的触发元素上按 Return、Space 或 Down 键打开菜单时，键盘焦点落在第一个可用的条目上；按 Up 键打开时落在最后一个上，之后用方向键在条目间移动。按压打开时不聚焦任何条目。
+在桌面和终端中，在 `Submenu` 的条目上按 Right、Return 或 Space 键打开它，键盘焦点落在它第一个可用的条目上；在它的条目上按 Left 键或按 Escape 键关闭它，焦点回到它的条目上。
+
 ```rust tabs
 use nsh_base::{menu, menu_item, menu_separator, submenu};
 use nsh_core::prelude::*;
@@ -82,6 +85,17 @@ function FileMenu() {
 这五个组件都来自 [`nsh/base`](../modules/nsh-base.md)。条目会自己找到所属的菜单，所以你可以自由地编排它们：放在视图里分组、加标签、用 `If` 让条目出现和消失。`popupClass` 在桌面上设置弹出层的样式，在手机上设置 sheet 的样式；两者需要不同样式时，可以把 `platform.idiom`（`nsh`）与 `"desktop"` 比较。
 
 <a id="context-menus"></a>
+
+## 菜单栏
+
+同一个 `Toolbar` 里的多个 `Menu` 组成菜单栏：其中一个菜单打开时，指针移到另一个菜单的触发器上就会改为打开那个菜单，方向键在各触发器之间移动。
+
+```tsx
+<Toolbar accessibilityLabel="Menu bar">
+  <Menu trigger={<View><Text>File</Text></View>}>{/* … */}</Menu>
+  <Menu trigger={<View><Text>Edit</Text></View>}>{/* … */}</Menu>
+</Toolbar>
+```
 
 ## 上下文菜单
 
@@ -264,6 +278,7 @@ function ViewMenu() {
 | `trigger` | `.trigger(..)` | `JSX.Element` | 无 | 打开它的条目。 |
 | `back` | `.back(..)` | `JSX.Element` | 无 | 手机：它的条目上方返回上一级条目的那一行。 |
 | `disabled` | `.disabled(..)` | `boolean` | `false` | 它不会打开。 |
+| `offset` | `.offset(..)` | `number` | `0` | 桌面端：它的弹出层与外层菜单之间的间距。 |
 | `children` | `.child(..)` | `JSX.Element` | 无 | 它的条目。 |
 
 `MenuSeparator` 是一个由你设置样式（`class`、`style`）的视图，与所在层级的条目一起显示。
@@ -285,4 +300,4 @@ function ViewMenu() {
 
 ## 无障碍
 
-对屏幕阅读器而言，弹出层或 sheet 是一个菜单，其中的条目是菜单项；触发元素会告诉屏幕阅读器菜单是否已展开。可勾选的条目是复选或单选菜单项，读作已勾选或未勾选；它的标记是条目的一部分。在 TSX 中，触发元素就是你传入的元素：按压和展开状态都在它自己身上，所以它自己的 `active:` 类和 `activeStyle` 会在按下时生效，它自己的 `onPress` 也照常运行。屏幕上只有当前显示层级的条目，所以屏幕阅读器读到的就是显示出来的内容。
+对屏幕阅读器而言，弹出层或 sheet 是一个菜单，其中的条目是菜单项；触发元素会告诉屏幕阅读器菜单是否已展开。可勾选的条目是复选或单选菜单项，读作已勾选或未勾选；它的标记是条目的一部分。在 TSX 中，触发元素就是你传入的元素（`Button` 或你自己的视图都可以）：按压和展开状态都在它自己身上，所以它自己的 `active:` 类和 `activeStyle` 会在按下时生效，它自己的 `onPress` 也照常运行。屏幕上只有当前显示层级的条目，所以屏幕阅读器读到的就是显示出来的内容。

@@ -205,6 +205,10 @@ import strings from "./strings.json";
 
 它们都会被打包进同一个脚本。JSON 文件导入后就是解析后的值。
 
+### 从二进制中去掉部分功能
+
+如果你用 Cargo 自己构建可执行文件（嵌入 NSH，或自己写 `main`），可以去掉可选功能：平台 crate 默认全部开启，在平台 crate（以及 `nsh-base`）上设置 `default-features = false`，再从 `js`、`shader`、`editor`（含 `DiffView`）、`rich-editor`、`plot`、`highlight`、`math`、`zlib`、`crypto` 中列出要保留的项。应用导入了构建时去掉的功能，会在加载时报错。`nsh package` 构建的应用始终包含全部功能。
+
 ### 按需加载代码
 
 对应用自己的模块调用 `import()`，会得到一个兑现为其导出的 promise，和浏览器里一样：
@@ -278,7 +282,7 @@ import Inter from "./assets/Inter.ttf";     // "Inter"
 |---|---|
 | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.heic` | 一个 `ImageAsset`：`{ url, size, scales? }`，单位为点。文件名带 `@2x` / `@3x` 后缀时，像素尺寸除以 2 / 3。不带后缀的文件还会发布它的 `@1.5x`–`@4x` 同名文件（列在 `scales` 中），并加载适合屏幕的变体（[像素密度](./images-and-assets.md#像素密度)）。 |
 | `.svg` | 一个 `ImageAsset`，尺寸取自 SVG 的 `width` 和 `height`（或 `viewBox`），单位为点。 |
-| `.ttf`, `.otf` | 字体的族名，一个字符串。字体会在第一帧之前注册。 |
+| `.ttf`, `.otf`, `.woff`, `.woff2` | 字体的族名，一个字符串。字体会在第一帧之前注册。 |
 | `.json` | 解析后的 JSON |
 
 参见 [图片与资源](./images-and-assets.md) 和 [字体](./fonts.md)。

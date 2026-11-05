@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 unicode-linebreak.workspace = true
+unicode-properties.workspace = true
 rustc-hash.workspace = true
 slab.workspace = true
 taffy.workspace = true
@@ -28,7 +29,9 @@ url.workspace = true
 sha2.workspace = true
 # Picked images' sizes and types (`picker.rs`).
 imagesize.workspace = true
-naga.workspace = true
+naga = { workspace = true, optional = true }
+# WOFF and WOFF2 fonts (`text::font_data`).
+wuff.workspace = true
 
 [features]
 # SVG images for the native backends (`svg`: sniffing, sizes and rasters with
@@ -37,8 +40,16 @@ svg = ["dep:resvg", "dep:flate2"]
 # Remote images for the shared image loader (`image::loader`: downloads with
 # ureq). Without it, the loader reads files, assets and inline bytes only.
 loader = ["dep:ureq"]
+# The shader compiler (`Shader::compile`, on naga). Without it every shader
+# source is refused, and the views and transitions asking for one draw none.
+shader = ["dep:naga"]
 # Shaders as GLSL ES 3.00 (`Shader::glsl_es`), for the web runtime's WebGL 2.
-glsl = ["naga/glsl-out"]
+glsl = ["shader", "naga/glsl-out"]
+# The text of declarations (documentation and TypeScript of the specs),
+# which only `.nsh/types` needs: `nsh` and the program describing an app's
+# UI sets turn it on; apps and the web runtime go without
+# (`element::DECLARATIONS`).
+declarations = []
 
 # Native socket/file implementations. Browser WebSockets and files use
 # the host services; their shared checks do not need these dependencies.
@@ -56,6 +67,8 @@ httpdate.workspace = true
 # The image loader's downloads (`image/loader.rs`, feature `loader`).
 ureq = { workspace = true, optional = true }
 crc32fast.workspace = true
+# `nsh/updater`.
+nsh-updater.workspace = true
 
 # `process`'s children on Windows: their jobs (`runtime/process.rs`); the
 # machine's memory for the image budget (`image/memory.rs`).
@@ -70,6 +83,10 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# The tests compile shaders.
+nsh-core = { path = ".", features = ["shader"] }
 # The `unit_types` check reads the crate's public API.
 syn = { workspace = true, features = ["visit"] }
+# The fonts `text::font_data` decompresses are checked as fonts.
+ttf-parser.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }

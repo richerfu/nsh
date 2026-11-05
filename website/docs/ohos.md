@@ -49,6 +49,10 @@ Place `libnsh_platform_ohos.so` and `libc++_shared.so` (from `$OHOS_NDK_HOME/nat
 
 ## Ship a bundle with the app
 
+The SDK includes `Editor`, `DiffView`, rich editing, charts, syntax highlighting and formula typesetting. `Shader`
+draws a fill through an XComponent. Shader effects display their children directly, shader transitions display the
+new content immediately, and pages and dialogs use their `animation` setting.
+
 Build the TSX app into the module's `rawfile` resources:
 
 ```sh

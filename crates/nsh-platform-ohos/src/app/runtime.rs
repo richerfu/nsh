@@ -771,6 +771,7 @@ impl Runtime {
             clipboard: None,
             host: config.channel.clone(),
             picker: None,
+            speech: None,
         };
         let host_tokens = config.host_tokens.clone();
         let engine = Engine::start_with(

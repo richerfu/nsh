@@ -234,6 +234,11 @@ pub(crate) struct Surface {
     /// The engine missed the deadline of a resize ([`RESIZE_WAIT`]): later
     /// resizes do not wait until it reports one done.
     resize_late: Cell<bool>,
+    /// The move count ([`crate::sight::moves`]) the last revisit started
+    /// at: frames revisit only when it moved ([`Surface::tick`]).
+    revisited: Cell<u64>,
+    /// Views resized since the last pass ([`Surface::draw_when_shown`]).
+    resized: RefCell<Vec<NshView>>,
     /// The background set under the root ([`crate::system`]).
     pub(crate) background: Cell<Option<nsh_core::Color>>,
     on_error: RefCell<Option<ErrorHandler>>,
@@ -293,6 +298,8 @@ impl Surface {
             last_tick: Cell::new(0.0),
             fallback: Cell::new(false),
             resize_late: Cell::new(false),
+            revisited: Cell::new(0),
+            resized: RefCell::default(),
             background: Cell::new(None),
             on_error: RefCell::new(None),
             on_hot_update_failed: RefCell::new(None),
@@ -851,7 +858,7 @@ impl Surface {
     }
 
     fn tick(self: &Rc<Self>, now: f64) {
-        self.apply_queued(FRAME_BATCHES);
+        let applied = self.apply_queued(FRAME_BATCHES);
         if self.anim.borrow().animating() {
             self.anim.borrow_mut().tick(now);
             self.write_animations();
@@ -869,16 +876,23 @@ impl Surface {
         if self.js_frame.replace(false) {
             self.control(|c| c.frame());
         }
-        self.revisit();
+        // A batch changes more than moves count (clips, deletions); else
+        // only a move can show a view put off. An endless animation keeps
+        // the frames coming without moving any view (transforms and
+        // opacity are not looked at): no pass on each of its frames.
+        if applied || crate::sight::moves() != self.revisited.get() {
+            self.revisit();
+        }
     }
 
     /// Applies the batches that waited for this frame, in order, until
     /// `budget` is spent (at least one): the rest wait for the next frame,
     /// so one frame's main-thread work stays bounded when the engine sent
     /// several. A batch is the state of one commit and is applied whole.
-    fn apply_queued(self: &Rc<Self>, budget: std::time::Duration) {
+    /// Whether any was.
+    fn apply_queued(self: &Rc<Self>, budget: std::time::Duration) -> bool {
         if self.queued.borrow().is_empty() {
-            return;
+            return false;
         }
         let monitor = self.perf.borrow().clone();
         let start = Instant::now();
@@ -892,13 +906,39 @@ impl Surface {
         if applied {
             self.write_animations();
         }
+        applied
+    }
+
+    /// `view`, already marked stale, is drawn at the next pass if it can be
+    /// seen. It may be placed while a batch holds the mounter, which is why
+    /// it waits here.
+    pub(crate) fn draw_when_shown(&self, view: NshView) {
+        self.resized.borrow_mut().push(view);
+    }
+
+    /// The window's live resize starts or ends.
+    pub(crate) fn live_resize(&self, on: bool) {
+        if let Ok(mut mounter) = self.mounter.try_borrow_mut() {
+            mounter.set_live_resize(on);
+        }
+        if !on {
+            self.revisit();
+        }
     }
 
     /// Draws views whose drawing changed out of sight and that show now
     /// ([`Mounter::draw_when_shown`]); after anything that moves views.
     pub(crate) fn revisit(&self) {
+        // Taken before the pass: a move during it is revisited next frame.
+        let moves = crate::sight::moves();
         if let Ok(mounter) = self.mounter.try_borrow() {
-            mounter.revisit();
+            mounter.place_shown();
+        }
+        if let Ok(mounter) = self.mounter.try_borrow()
+            && mounter.adopt_stale(&mut self.resized.borrow_mut())
+            && mounter.revisit()
+        {
+            self.revisited.set(moves);
         }
     }
 }

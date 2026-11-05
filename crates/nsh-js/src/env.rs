@@ -1,6 +1,6 @@
 //! The surface's environment: one signal per part
 //! (window, safe area, keyboard, color scheme, font scale, screen reader,
-//! reduced motion, pixel ratio, locale) written when the platform reports a
+//! reduced motion, pixel ratio, locale, lifecycle) written when the platform reports a
 //! change, read through read-only accessors; `nsh/device` (`platform`) and
 //! `nsh/accessibility`; the layout direction, which follows the user's
 //! language; the insets
@@ -43,9 +43,10 @@ enum Part {
     PixelRatio,
     TitleBar,
     Locale,
+    Lifecycle,
 }
 
-const PARTS: usize = 10;
+const PARTS: usize = 11;
 
 /// The environment's part of a context's state.
 pub(crate) struct Env {
@@ -376,6 +377,9 @@ pub(crate) fn set_environment(cx: *mut JsContext, next: &Environment) -> Result<
     if changed(&|p| p.pixel_ratio == next.pixel_ratio) {
         writes.push((Part::PixelRatio, number(next.pixel_ratio)));
     }
+    if changed(&|p| p.lifecycle == next.lifecycle) {
+        writes.push((Part::Lifecycle, string(cx, next.lifecycle.name())));
+    }
     // The layout direction follows the user's language.
     // SAFETY: the state's renderer, by shared reference.
     unsafe { &(*crate::state::state(cx)).dom }.set_direction(next.rtl);
@@ -517,7 +521,8 @@ fn os_version(env: &Environment) -> String {
     }
 }
 
-/// `platform.idiom`: `"desktop"` exactly where desktop behavior applies
+/// `platform.idiom`: `"terminal"` in a terminal, else `"desktop"` exactly
+/// where desktop behavior applies
 /// ([`nsh_core::platform::Idiom::reported_on`]).
 fn idiom(env: &Environment) -> &'static str {
     match env.reported_idiom() {
@@ -526,6 +531,7 @@ fn idiom(env: &Environment) -> &'static str {
         Idiom::Mac => "mac",
         Idiom::Tv => "tv",
         Idiom::Desktop => "desktop",
+        Idiom::Terminal => "terminal",
     }
 }
 
@@ -626,6 +632,14 @@ pub(crate) const DEVICE_EXPORTS: &[Item] = &[
         ),
     ),
     (
+        "lifecycle",
+        Export::Value(|cx| accessor(cx, Part::Lifecycle)),
+        Ts::value(
+            "Whether the app is in use (reactive): `\"active\"` in the foreground,\n`\"inactive\"` while visible without the focus (another app or window has\nit, or the system shows something over it), `\"background\"` while not\nvisible (in the background, minimized or hidden). An embedded app\nfollows the embedding app's.",
+            "Accessor<\"active\" | \"inactive\" | \"background\">",
+        ),
+    ),
+    (
         "platform",
         Export::Value(platform),
         Ts::value(
@@ -648,8 +662,8 @@ pub(crate) const DEVICE_TYPES: &str = r#"export interface PlatformSelectSpec<T> 
    * Android, OHOS outside the desktop idiom, and browsers in the phone
    * or tablet idiom. */
   mobile?: T;
-  /** Where `platform.desktop` is true: macOS, Windows, Linux, and browsers
-   * in the desktop idiom. */
+  /** Where `platform.desktop` is true: macOS, Windows, Linux, browsers in
+   * the desktop idiom, and terminals. */
   desktop?: T;
   /** Every platform but the web. */
   native?: T;
@@ -663,16 +677,18 @@ export interface PlatformInfo {
   /** iOS and desktops: the OS version (`"17.5"`); Android: the API level
    * (`"35"`); the web: `"0.0"`. */
   readonly version: string;
-  /** The kind of device. `"desktop"` exactly where `desktop` is true;
-   * elsewhere the idiom the system reports: `"phone"`, `"pad"`, `"tv"`, and
+  /** The kind of device. `"terminal"` in a terminal: drawn on a grid of
+   * character cells, with desktop behavior (`desktop` true; `os` is still
+   * the machine's). Elsewhere `"desktop"` exactly where `desktop` is true,
+   * else the idiom the system reports: `"phone"`, `"pad"`, `"tv"`, and
    * `"mac"`, UIKit's Mac idiom under Mac Catalyst (a mobile idiom). */
-  readonly idiom: "phone" | "pad" | "mac" | "tv" | "desktop";
+  readonly idiom: "phone" | "pad" | "mac" | "tv" | "desktop" | "terminal";
   /** Desktop behavior applies, NSH's one definition of desktop: macOS,
-   * Windows, Linux, and browsers in the desktop idiom (a mouse and a wide
-   * viewport). `desktop={{…}}` props and `select({ desktop })` follow it.
-   * Mac Catalyst runs the iOS backend and is mobile. `nsh/desktop`'s
-   * `isAvailable` is narrower: its window and menu APIs work on the desktop
-   * OSes, not in browsers. */
+   * Windows, Linux, browsers in the desktop idiom (a mouse and a wide
+   * viewport), and terminals. `desktop={{…}}` props and `select({ desktop })`
+   * follow it. Mac Catalyst runs the iOS backend and is mobile.
+   * `nsh/desktop`'s `isAvailable` is narrower: its window and menu APIs work
+   * on the desktop OSes, not in browsers. */
   readonly desktop: boolean;
   /** The app runs under Mac Catalyst, in the Mac or the iPad idiom
    * (`os` is `"ios"`, `desktop` false). */

@@ -68,7 +68,7 @@ Rust 列给出 `nsh_core::element::desktop` 中的函数。
 | `orderFront()` | `order_front()` | 把窗口提升到其所在层级的最前并聚焦（应用随之激活；macOS 会解除最小化，Windows 会恢复最小化的窗口并置于前台，GTK 会 present）。窗口保持原有层级。macOS 的桌面层级窗口保持在其他窗口之后。GPUI 激活其窗口；Linux 上的前台请求由窗口管理器决定。 |
 | `close()` | `close_window()` | 关闭窗口，应用随之结束。 |
 
-窗口尺寸调整适用于 macOS、Windows 和 Linux；窗口定位和层级控制适用于 macOS 和 Windows。Linux 的窗口位置和层级由窗口管理器决定。GPUI 窗口的尺寸、位置和层级由宿主在创建窗口时配置。
+窗口尺寸调整适用于 macOS、Windows 和 Linux；窗口定位和层级控制适用于 macOS 和 Windows。Linux 的窗口位置和层级由窗口管理器决定。在 GPUI 应用中，`setFrame` 设置窗口尺寸，窗口位置由平台决定；GPUI 窗口的位置和层级由宿主在创建窗口时配置。
 
 使用 `onLayout` 测量内容后调整窗口大小时，在 macOS 和 Windows 上应为窗口装饰预留空间。`width` 和 `height` 接受正有限数值；`x` 和 `y` 接受有限数值。无效字段保留原值。
 
@@ -128,7 +128,7 @@ function TitleBar() {
 }
 ```
 
-按住带 `windowDrag` 的视图会像按住系统标题栏一样拖动窗口：双击最大化（或执行用户的设置：macOS 的“连按窗口标题栏以”），在 Windows 和 Linux 上右键打开窗口菜单。
+按住带 `windowDrag` 的视图会像按住系统标题栏一样拖动窗口：双击最大化（或执行用户的设置：macOS 的“连按窗口标题栏以”），在 Windows 和 Linux 上右键打开窗口菜单。在 Linux 的 GPUI 应用中，若点击处的可拖动视图本身或其内部的视图监听 `onContextMenu`，右键点击交给应用；外层视图（包括根视图）上的监听不会取代窗口菜单。
 
 - 由最近的设置了 `windowDrag` 的视图决定：`.window_drag(false)`（`desktop={{ windowDrag: false }}`）让可拖动视图中的一部分保持可点击。
 - 可拖动视图中的文本框，以及带按压或触摸处理（`onPress`、`onTouch*`、responder）的视图，不用设置也保持可点击：上例中的搜索框和其中的按钮照常工作。

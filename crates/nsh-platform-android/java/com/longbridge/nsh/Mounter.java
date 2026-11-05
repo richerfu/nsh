@@ -63,10 +63,18 @@ final class Mounter {
     private static final int APPEARANCE = 33;
     private static final int COMPONENT_PROP_SLOTS = 34;
     private static final int SHADER = 35;
+    private static final int SHADER_TRANSITION = 36;
+    private static final int SHADER_INPUT = 37;
+    private static final int NAV_SHADER = 38;
     /** The surface lays out right to left: native widgets mirror. */
     boolean rtl;
     /** The app's appearance (`nsh_core::platform::Appearance`): 0 the system's, 1 light, 2 dark. */
     int appearance;
+    /**
+     * The app's colors for alerts and action sheets ({@code encode.rs} {@code DIALOG_TOKENS}): the dialog, its title,
+     * its message, its buttons and a destructive action, each light then dark ARGB (0: the system's).
+     */
+    final int[] dialogColors = new int[10];
     /** The status bar the app asked for last (style, hidden), applied again when the appearance changes. */
     private int barStyle = -1;
     private boolean barHidden;
@@ -177,6 +185,8 @@ final class Mounter {
     private final SparseArray<ModalHost> modals = new SparseArray<>();
     /** Screens' options, applied once the batch's stacks are settled. */
     private final SparseArray<ScreenOptions> screenOptions = new SparseArray<>();
+    /** The pages and dialogs that come and go through a shader (`transitionShader`; libnsh has it). */
+    final android.util.SparseBooleanArray navShaders = new android.util.SparseBooleanArray();
     /** Parents of screens, header items and modals (not their superviews). */
     private final android.util.SparseIntArray hosts = new android.util.SparseIntArray();
     private final java.util.LinkedHashSet<Integer> dirtyStacks = new java.util.LinkedHashSet<>();
@@ -521,12 +531,7 @@ final class Mounter {
                 case INPUT_CONTENT: {
                     View v = views.get(b.getInt());
                     float x = b.getFloat(), y = b.getFloat(), w = b.getFloat(), h = b.getFloat();
-                    if (v instanceof InputBox) {
-                        InputBox in = (InputBox) v;
-                        Box.Frame f = Box.frame(in);
-                        int width = f.right - f.left, height = f.bottom - f.top;
-                        in.setContent(px(x), px(y), Math.max(0, width - px(x + w)), Math.max(0, height - px(y + h)));
-                    }
+                    if (v instanceof InputBox) ((InputBox) v).setContent(px(x), px(y), px(x + w) - px(x), px(y + h) - px(y));
                     break;
                 }
                 case COMMAND: command(b, objects); break;
@@ -539,7 +544,27 @@ final class Mounter {
                     // The layer stays in libnsh, which renders it (`shader.rs`).
                     View v = views.get(b.getInt());
                     boolean on = b.getInt() != 0;
-                    if (v instanceof Box) ((Box) v).setShader(on);
+                    int role = b.getInt();
+                    float overflow = b.getFloat();
+                    int inputs = b.getInt();
+                    if (v instanceof Box) ((Box) v).setShader(on, role, overflow, inputs);
+                    break;
+                }
+                case SHADER_TRANSITION: {
+                    View v = views.get(b.getInt());
+                    float ms = b.getFloat();
+                    if (v instanceof Box) ((Box) v).startTransition(ms);
+                    break;
+                }
+                case SHADER_INPUT: {
+                    View v = views.get(b.getInt());
+                    if (v instanceof Box) ((Box) v).picturesChanged();
+                    break;
+                }
+                case NAV_SHADER: {
+                    int id = b.getInt();
+                    if (b.getInt() != 0) navShaders.put(id, true);
+                    else navShaders.delete(id);
                     break;
                 }
                 case COMPONENT_PROP_SLOTS: {
@@ -686,10 +711,25 @@ final class Mounter {
      * again.
      */
     void destroyComponents() {
+        Notifications.forget(this);
         for (int i = 0; i < views.size(); i++) {
             View v = views.valueAt(i);
             if (v instanceof ComponentBox) ((ComponentBox) v).destroy();
         }
+    }
+
+    /**
+     * The app stopped: its shader views stop picturing and drawing frames
+     * libnsh no longer renders (a screen shader gives the surface back), and
+     * its pages and dialogs no longer go through a shader. No {@code DELETE}
+     * follows for them.
+     */
+    void dropShaders() {
+        for (int i = 0; i < views.size(); i++) {
+            View v = views.valueAt(i);
+            if (v instanceof Box) ((Box) v).dropShader();
+        }
+        navShaders.clear();
     }
 
     /** Makes registered component {@code name} in box {@code id}. */
@@ -843,6 +883,8 @@ final class Mounter {
             selectableViews.remove(id);
         }
         screenOptions.remove(id);
+        navShaders.delete(id);
+        if (v instanceof Box) ((Box) v).dropShader();
         Animator running = layoutAnimators.get(id);
         if (running != null) running.cancel();
         detach(v);
@@ -990,6 +1032,7 @@ final class Mounter {
             decor.boxShadows = fx.shadows;
             decor.boxShadowColors = fx.shadowColors;
             decor.gradients = fx.gradients;
+            decor.masks = fx.masks;
             decor.outlineWidth = fx.outlineWidth;
             decor.outlineColor = fx.outlineColor;
             decor.outlineStyle = fx.outlineStyle;
@@ -1214,14 +1257,18 @@ final class Mounter {
                 modifiers(e.getMetaState()));
     }
 
-    /** An interaction state of `id` changed: tells the core if it reads it. */
+    /**
+     * An interaction state of `id` changed: tells the core if it reads it.
+     * The focus it always hears (`nsh_core::input::reported_states`): it
+     * works out `focus-within` from it.
+     */
     void reportState(int id, int bit, boolean on) {
         int states = currentStates.get(id);
         int next = on ? states | bit : states & ~bit;
         if (next == states) return;
         currentStates.put(id, next);
-        int tracked = trackedStates.get(id);
-        if ((tracked & bit) != 0) Native.states(handle(), id, next & tracked);
+        int reported = trackedStates.get(id) | STATE_FOCUSED;
+        if ((reported & bit) != 0) Native.states(handle(), id, next & reported);
     }
 
     /**
@@ -1440,7 +1487,9 @@ final class Mounter {
             panActivations.remove(id);
         }
         boolean selectableView = b.getInt() != 0;
+        boolean continuesText = b.getInt() != 0;
         if (v == null) return;
+        if (v instanceof TextBox) ((TextBox) v).continuesText = continuesText;
         SelectableView area = selectableViews.get(id);
         if (selectableView && (area == null || area.view != v)) {
             if (area != null) area.clear();
@@ -1934,6 +1983,19 @@ final class Mounter {
                 multiline, maxLength, editable, autoFocus, hasSelection, selection, hasCaret, caret, submit);
     }
 
+    /**
+     * A page or dialog leaves with the field that has the keyboard: the
+     * keyboard hides with it, as with a native back, not once the field is
+     * gone (which leaves it up). Focus goes to the host, as `blur()` does.
+     */
+    void hideKeyboardIn(View leaving) {
+        View f = leaving.findFocus();
+        if (f == null || !f.onCheckIsTextEditor()) return;
+        InputMethodManager imm = (InputMethodManager) context.getSystemService(Context.INPUT_METHOD_SERVICE);
+        imm.hideSoftInputFromWindow(f.getWindowToken(), 0);
+        if (f.getRootView() == host.getRootView()) host.requestFocus();
+    }
+
     private void command(ByteBuffer b, Object[] objects) {
         int id = b.getInt(), kind = b.getInt();
         View v = views.get(id);
@@ -1945,11 +2007,19 @@ final class Mounter {
                 if (v instanceof InputBox) {
                     ((InputBox) v).blur();
                 } else if (id == 1) {
+                    // Keyboard.dismiss(): hide the keyboard even when the field that showed it is gone (a page that
+                    // closed with it), which leaves no focused view in the host but the keyboard still up. Not when
+                    // an editor outside the host has it (the embedding app's, another NshView's): they share the window.
                     View f = host.findFocus();
-                    if (f != null && f != host) {
-                        InputMethodManager imm = (InputMethodManager) context.getSystemService(Context.INPUT_METHOD_SERVICE);
+                    InputMethodManager imm = (InputMethodManager) context.getSystemService(Context.INPUT_METHOD_SERVICE);
+                    if (f != null) {
                         imm.hideSoftInputFromWindow(f.getWindowToken(), 0);
-                        host.requestFocus();
+                        if (f != host) host.requestFocus();
+                    } else {
+                        View other = host.getRootView().findFocus();
+                        if (other == null || !other.onCheckIsTextEditor() || !imm.isActive(other)) {
+                            imm.hideSoftInputFromWindow(host.getWindowToken(), 0);
+                        }
                     }
                 }
                 break;
@@ -2049,6 +2119,14 @@ final class Mounter {
                 request.current = b.getInt() != 0;
                 request.view = host;
                 Picker.show(context, request);
+                break;
+            }
+            case 27: {
+                for (int i = 0; i < dialogColors.length; i++) dialogColors[i] = b.getInt();
+                break;
+            }
+            case 44: {
+                Notifications.command(this, b, objects);
                 break;
             }
             case 26: {
@@ -2275,7 +2353,7 @@ final class Mounter {
     }
 
     void event(int id, int kind) {
-        Native.event(handle(), id, kind, null, 0, 0, 0);
+        event(id, kind, null, 0, 0, 0);
     }
 
     /** A press's touch: where it is now and the modifier keys it began with. */
@@ -2328,11 +2406,20 @@ final class Mounter {
     }
 
     void eventMap(int id, int kind, String[] keys, Object[] values) {
-        Native.eventMap(handle(), id, kind, keys, values);
+        long handle = handle();
+        if (handle == 0) return;
+        Native.eventMap(handle, id, kind, keys, values);
     }
 
+    /**
+     * Sends a node's event. Loads finish on their own time (an image's {@code
+     * onLoad}, a video's, a web view's): once the view is destroyed there is
+     * no app to tell, and the native side takes a live handle only.
+     */
     void event(int id, int kind, String text, int count, float x, float y) {
-        Native.event(handle(), id, kind, text, count, x, y);
+        long handle = handle();
+        if (handle == 0) return;
+        Native.event(handle, id, kind, text, count, x, y);
     }
 
     void zoom(int id, float scale) {

@@ -119,6 +119,8 @@ pub enum HostPlatform {
     Web,
     /// The GPUI host (macOS, Windows, Linux).
     Gpui,
+    /// The terminal host (macOS, Windows, Linux).
+    Tui,
     /// A platform this version does not know.
     #[serde(other)]
     Other,
@@ -166,6 +168,22 @@ pub struct TestEnvironment {
     /// the test fails requests no route answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_network: Option<bool>,
+    /// The idiom the app starts in, in place of the one the host measures:
+    /// `"desktop"` for `open`'s desktop `platform`. Only the web's page
+    /// measures one (`nsh.js`'s `idiom` option); the desktops are desktops
+    /// and iOS and Android their devices whatever this says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idiom: Option<TestIdiom>,
+}
+
+/// The idiom a test starts its app in ([`TestEnvironment::idiom`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TestIdiom {
+    /// A desktop: a mouse that hovers, keyboard shortcuts, desktop popups
+    /// and scroll bars.
+    Desktop,
 }
 
 /// How a test moves its app's manual clock ([`TestEnvironment::clock`];
@@ -567,8 +585,8 @@ pub enum TestStep {
         /// The button's text (`None`: close it without one).
         button: Option<String>,
     },
-    /// A picture of the app's window: a PNG, base64-encoded (the test's
-    /// side saves it: the host may run on another machine).
+    /// A picture of the app, base64-encoded: PNG on graphical targets, UTF-8
+    /// Cell JSON on the terminal target. The test's side saves these bytes.
     Screenshot,
     /// Makes the window `width` × `height` points (`app.setViewport`).
     SetViewport {
@@ -615,6 +633,13 @@ pub enum SceneQuery {
     /// The scroll views around view `id`, innermost first.
     ScrollAncestors {
         /// The view.
+        id: u32,
+    },
+    /// The views inside scroll view `id` that take a finger's drag
+    /// themselves (responders, pans), where a step's scrolling does not
+    /// land.
+    DragTakers {
+        /// The scroll view.
         id: u32,
     },
     /// View `id`'s long press delay in milliseconds, if it says.

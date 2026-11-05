@@ -191,7 +191,7 @@ impl Gpu {
                 mapped_at_creation: false,
             })
         };
-        let builtins = buffer(16);
+        let builtins = buffer(32);
         let uniforms = (size > 0).then(|| buffer(size));
         let mut entries = vec![wgpu::BindGroupEntry {
             binding: 0,
@@ -476,7 +476,13 @@ impl View {
         gpu.queue.write_buffer(
             &bindings.builtins,
             0,
-            &words_bytes(&builtins(self.size, self.clock.time(now), scale)),
+            &words_bytes(&builtins(
+                self.size,
+                self.clock.time(now),
+                scale,
+                layer.progress,
+                layer.overflow,
+            )),
         );
         if let Some(uniforms) = &bindings.uniforms {
             gpu.queue

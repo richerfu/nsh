@@ -206,6 +206,10 @@ import strings from "./strings.json";
 
 All of them are bundled into one script. JSON files import as their parsed value.
 
+### Leaving parts out of the binary
+
+If you build your own executable with Cargo (embedding NSH, or your own `main`), you can leave optional parts out: the platform crates turn all of them on by default, so set `default-features = false` on the platform crate (and on `nsh-base`) and name what you keep from `js`, `shader`, `editor` (with `DiffView`), `rich-editor`, `plot`, `highlight`, `math`, `zlib` and `crypto`. An app that imports a part its build left out fails when it loads. What `nsh package` builds always includes everything.
+
 ### Loading code on demand
 
 `import()` of one of the app's modules returns a promise of its exports, as in a browser:
@@ -279,7 +283,7 @@ import Inter from "./assets/Inter.ttf";     // "Inter"
 |---|---|
 | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.heic` | An `ImageAsset`: `{ url, size, scales? }`, sized in points. An `@2x` / `@3x` suffix divides the pixel size by 2 / 3. A file without a suffix also ships its `@1.5x`–`@4x` siblings, listed in `scales`, and the screen's variant is loaded ([pixel densities](./images-and-assets.md#pixel-densities)). |
 | `.svg` | An `ImageAsset` sized in points by the SVG's `width` and `height` (or `viewBox`). |
-| `.ttf`, `.otf` | The font's family name, a string. The font is registered before the first frame. |
+| `.ttf`, `.otf`, `.woff`, `.woff2` | The font's family name, a string. The font is registered before the first frame. |
 | `.json` | The parsed JSON |
 
 See [Images and assets](./images-and-assets.md) and [Fonts](./fonts.md).

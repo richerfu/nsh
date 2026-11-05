@@ -49,6 +49,9 @@ cargo xtask ohos --release --dev    # 同时支持连接 `nsh dev` 开发服务�
 
 ## 随应用附带 bundle
 
+SDK 包含 `Editor`、`DiffView`、富文本编辑、图表、语法高亮和公式排版。`Shader` 通过 XComponent 绘制填充。
+Shader 特效直接显示子内容，Shader 转场立即显示新内容，页面和弹窗使用各自的 `animation` 设置。
+
 把 TSX 应用构建到模块的 `rawfile` 资源目录中：
 
 ```sh

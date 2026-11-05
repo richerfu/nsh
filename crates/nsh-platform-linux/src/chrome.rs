@@ -38,7 +38,7 @@ use std::{
 
 use gtk4::{self as gtk, gdk, gio, glib, prelude::*};
 use nsh_core::{
-    EventKind, EventPayload, PayloadValue, ROOT_ID,
+    EventKind, EventPayload, ImageSource, PayloadValue, ROOT_ID,
     desktop::{DesktopCommand, Key, MenuItem, MenuRole, Shortcut, TitleBarStyle},
     geometry::{Edges, Points},
 };
@@ -363,7 +363,12 @@ fn update_area(surface: &Surface) {
             if fullscreen {
                 Edges::default()
             } else {
-                let height = |w: &gtk::WindowControls| w.measure(gtk::Orientation::Vertical, -1).1;
+                // GTK includes placement margins in measure(); exclude them
+                // so centering does not depend on the previous top margin.
+                let height = |w: &gtk::WindowControls| {
+                    let measured = w.measure(gtk::Orientation::Vertical, -1).1;
+                    (measured - w.margin_top() - w.margin_bottom()).max(0)
+                };
                 let width = |w: &gtk::WindowControls| {
                     if w.is_empty() {
                         0.0
@@ -542,6 +547,20 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+    /// Sets `item`'s `icon` attribute. GTK shows none today: `GtkModelButton`
+    /// shows its image only without text or in an iconic section
+    /// (`update_visibility`: `has_icon && (iconic || !has_text)`). The
+    /// attribute keeps the model complete for a change there, or for the
+    /// custom rows that would show it.
+    fn set_icon(&self, item: &gio::MenuItem, icon: Option<&ImageSource>) {
+        let surface = self.surface.upgrade();
+        if let (Some(surface), Some(icon)) = (surface, icon)
+            && let Some(icon) = crate::image::menu_icon(&surface, icon)
+        {
+            item.set_icon(&icon);
+        }
+    }
+
     fn menu(&mut self, items: &[MenuItem]) -> gio::Menu {
         let menu = gio::Menu::new();
         let mut section = gio::Menu::new();
@@ -557,9 +576,11 @@ impl Builder<'_> {
                     label,
                     enabled,
                     items,
+                    icon,
                 } => {
                     let sub = self.menu(items);
                     let item = gio::MenuItem::new_submenu(Some(&label.replace('_', "__")), &sub);
+                    self.set_icon(&item, icon.as_ref());
                     if !enabled {
                         // A submenu opens while its `submenu-action` is
                         // enabled.
@@ -598,6 +619,7 @@ impl Builder<'_> {
                     };
                     let detailed = format!("{}.{name}", self.prefix);
                     let item = gio::MenuItem::new(Some(&label.replace('_', "__")), Some(&detailed));
+                    self.set_icon(&item, a.icon.as_ref());
                     if let Some(accel) = a.shortcut.as_ref().and_then(accelerator) {
                         item.set_attribute_value("accel", Some(&accel.to_variant()));
                         // The editing roles' keys stay the text field's.

@@ -8,7 +8,7 @@ use std::time::Duration;
 use nsh_core::{
     Dialog, ResolvedTextStyle,
     geometry::{Point, Points, Size},
-    platform::ColorScheme,
+    platform::{ColorScheme, Lifecycle},
 };
 use nsh_dev::protocol::{ClockChange, TestStep};
 use serde_json::Value;
@@ -65,6 +65,11 @@ pub(crate) trait Driver: Send {
     fn next_frame(&mut self, timeout: Duration) -> Result<Duration, String>;
     fn set_viewport(&mut self, size: Size<Points>) -> Result<(), String>;
     fn set_color_scheme(&mut self, scheme: ColorScheme) -> Result<(), String>;
+    /// Whether the app is in use, as the system reports it (`lifecycle()`).
+    fn set_lifecycle(&mut self, state: Lifecycle) -> Result<(), String> {
+        let _ = state;
+        Err(headless_only("setLifecycle"))
+    }
     fn run_for(&mut self, time: Duration) -> Result<(), String>;
     fn fast_forward(&mut self, time: Duration) -> Result<(), String>;
     fn set_system_time(&mut self, at: std::time::SystemTime) -> Result<(), String>;
@@ -85,6 +90,20 @@ pub(crate) trait Driver: Send {
     fn picks(&mut self) -> Result<Vec<nsh_core::picker::PickRequest>, String> {
         Err(headless_only("`picks()`"))
     }
+    /// What the app's speech sessions asked for, in order.
+    fn speech_requests(&mut self) -> Result<Vec<nsh_core::speech::SpeechRequest>, String> {
+        Err(headless_only("`speechRequests()`"))
+    }
+    /// The user says `text` to the session listening.
+    fn hear(&mut self, text: &str) -> Result<(), String> {
+        let _ = text;
+        Err(headless_only("speaking for the user"))
+    }
+    /// Ends the session listening, with `error` or as the user stops.
+    fn end_speech(&mut self, error: Option<nsh_core::speech::SpeechError>) -> Result<(), String> {
+        let _ = error;
+        Err(headless_only("ending a speech session"))
+    }
     fn texts(&mut self) -> Result<Vec<String>, String>;
     fn count(&mut self, selector: &str) -> Result<usize, String>;
     fn enabled(&mut self, selector: &str) -> Result<bool, String>;
@@ -101,7 +120,7 @@ pub(crate) trait Driver: Send {
     /// The URLs the app opened, in order (`app.openedUrls`): recorded,
     /// never opened.
     fn opened_urls(&mut self) -> Result<Vec<String>, String>;
-    /// A picture of the app's window, as a PNG.
+    /// A picture of the app: PNG bytes, or UTF-8 Cell JSON on the terminal target.
     fn screenshot(&mut self) -> Result<Vec<u8>, String>;
     /// The app's storage's entries, as a host keeps them (a headless
     /// engine's `App` reads its storage itself).
@@ -195,6 +214,11 @@ impl Driver for Headless {
             e.color_scheme = scheme;
         })
     }
+    fn set_lifecycle(&mut self, state: Lifecycle) -> Result<(), String> {
+        self.set_environment(&format!("setLifecycle({})", state.name()), |e| {
+            e.lifecycle = state;
+        })
+    }
     fn run_for(&mut self, time: Duration) -> Result<(), String> {
         Headless::run_for(self, time)
     }
@@ -219,6 +243,16 @@ impl Driver for Headless {
     fn picks(&mut self) -> Result<Vec<nsh_core::picker::PickRequest>, String> {
         self.catch_up();
         Ok(Headless::picks(self))
+    }
+    fn speech_requests(&mut self) -> Result<Vec<nsh_core::speech::SpeechRequest>, String> {
+        self.catch_up();
+        Ok(Headless::speech_requests(self))
+    }
+    fn hear(&mut self, text: &str) -> Result<(), String> {
+        Headless::hear(self, text)
+    }
+    fn end_speech(&mut self, error: Option<nsh_core::speech::SpeechError>) -> Result<(), String> {
+        Headless::end_speech(self, error)
     }
     fn texts(&mut self) -> Result<Vec<String>, String> {
         self.catch_up();

@@ -26,7 +26,7 @@ api-23 = [
 api-26 = ["api-23", "ohos-arkui-binding/api-26"]
 
 [target.'cfg(target_env = "ohos")'.dependencies]
-nsh-core = { workspace = true, features = ["svg"] }
+nsh-core = { workspace = true, features = ["svg", "shader"] }
 getrandom = { workspace = true, features = ["std"] }
 nsh-package.workspace = true
 nsh-dev = { workspace = true, features = ["client"], optional = true }
@@ -35,7 +35,7 @@ nsh-engine = { workspace = true, features = ["js"] }
 # Shader views: wgpu (GLES on OHOS) drawing into XComponent windows.
 wgpu.workspace = true
 pollster.workspace = true
-nsh-base = { workspace = true, features = ["highlight"] }
+nsh-base = { workspace = true, features = ["editor", "highlight", "math", "plot", "rich-editor"] }
 napi-ohos.workspace = true
 napi-derive-ohos.workspace = true
 tokio = { workspace = true, features = ["rt"] }

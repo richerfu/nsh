@@ -227,6 +227,10 @@ pub(crate) enum Cursor {
     ResizeEw,
     /// Resize up and down.
     ResizeNs,
+    /// Resize northwest and southeast.
+    ResizeNwse,
+    /// Resize northeast and southwest.
+    ResizeNesw,
     /// Busy.
     Wait,
     /// Working in the background.
@@ -488,11 +492,12 @@ pub(crate) fn track_states(surface: &Rc<Surface>, view: &NshView, states: u16) {
     {
         let mut s = view.state_mut();
         s.tracked = states;
-        // The core keeps the states still tracked and forgets the rest
+        // The core keeps the states still reported and forgets the rest
         // (`Core::update_tracking`): so do we, or a change it was not told
         // about (the pointer leaving a view whose hover was tracked
-        // throughout) would never reach it.
-        s.states &= states;
+        // throughout) would never reach it. The focus is reported
+        // whatever is tracked, so it stays.
+        s.states &= input::reported_states(states);
     }
     update_hover_tracking(surface, view);
 }
@@ -621,6 +626,8 @@ fn css_cursor(cursor: nsh_core::Cursor) -> Option<Cursor> {
         C::ZoomIn | C::ZoomOut => Cursor::Crosshair,
         C::ColResize => Cursor::ResizeEw,
         C::RowResize => Cursor::ResizeNs,
+        C::NwseResize => Cursor::ResizeNwse,
+        C::NeswResize => Cursor::ResizeNesw,
         C::None => Cursor::Hidden,
     })
 }
@@ -631,6 +638,28 @@ fn view_cursor(s: &ViewState) -> Option<Cursor> {
     css_cursor(s.style.cursor).or_else(|| {
         (s.kind == ViewKind::Input || crate::text::selectable(s)).then_some(Cursor::Text)
     })
+}
+
+/// Whether `(x, y)` (root coordinates) is on a pressable link span of text
+/// view `view` that sets no cursor of its own: the pointer there wins over
+/// the I-beam of selectable text, as on the other desktops.
+fn over_link(view: &NshView, x: f32, y: f32) -> bool {
+    {
+        let s = view.state();
+        if css_cursor(s.style.cursor).is_some()
+            || s.text.as_ref().is_none_or(|t| t.text.links.is_empty())
+        {
+            return false;
+        }
+    }
+    let (lx, ly) = local(view, x, y);
+    let s = view.state();
+    let Some(text) = s.text.as_ref() else {
+        return false;
+    };
+    crate::text::char_at(&s, lx, ly)
+        .and_then(|i| text.text.link_at(i))
+        .is_some_and(|link| has_press(link.events))
 }
 
 /// The cursor over `(x, y)` (root coordinates): the hosted item's there,
@@ -647,6 +676,9 @@ pub(crate) fn cursor(surface: &Rc<Surface>, x: f32, y: f32) -> Cursor {
         {
             return c;
         }
+    }
+    if over_link(&hit.view, x, y) {
+        return Cursor::Hand;
     }
     let in_area = crate::selectable_view::area_of(&hit.view).is_some();
     let mut view = Some(hit.view);
@@ -774,6 +806,32 @@ fn collect_drag(
     });
 }
 
+/// Whether a secondary click at `(x, y)` (root coordinates) on a window
+/// drag area goes to the app instead of opening the window menu: the view
+/// under it, or one around it up to the nearest view that sets
+/// `windowDrag: true`, listens to `onContextMenu` (nearer than a text
+/// field). Listeners further out, the root's included, leave the window
+/// menu to the drag area.
+pub(crate) fn hears_context_menu(root: &NshView, x: f32, y: f32) -> bool {
+    let Some(hit) = pick(root, x, y, true) else {
+        return false;
+    };
+    let mut view = Some(hit.view);
+    while let Some(v) = view {
+        {
+            let s = v.state();
+            if s.events.contains(EventKind::ContextMenu) {
+                return true;
+            }
+            if s.kind == ViewKind::Input || s.props.window_drag == Some(true) {
+                return false;
+            }
+        }
+        view = v.parent_view();
+    }
+    false
+}
+
 /// A secondary click at `(x, y)` (root coordinates): the nearest view
 /// around the one under it that listens to `onContextMenu` hears it,
 /// unless a text field or selectable text is nearer: that shows its edit
@@ -821,6 +879,21 @@ fn context_menu(surface: &Rc<Surface>, x: f32, y: f32, modifiers: Modifiers) {
             _ => {}
         }
         view = v.parent_view();
+    }
+}
+
+/// The closest view under `(x, y)` (root points) that listens to
+/// `onFileDrop`, within its modal ([`crate::file_drop`]).
+pub(crate) fn file_drop_target(surface: &Surface, x: f32, y: f32) -> Option<NshView> {
+    let mut view = pick(&surface.root, x, y, true)?.view;
+    loop {
+        if view.state().events.contains(EventKind::FileDrop) {
+            return Some(view);
+        }
+        if view.kind() == ViewKind::Modal || view.id() == ROOT_ID {
+            return None;
+        }
+        view = view.parent_view()?;
     }
 }
 
@@ -2634,6 +2707,76 @@ mod tests {
 
     use crate::geom::rect;
 
+    /// A title bar 200 × 40 at (10, 10) that drags the window, inside
+    /// `parent`, with a text field at (100, 5) in it and a sibling view
+    /// below it at (10, 60): (bar, field, sibling).
+    fn title_bar(parent: &NshView) -> (NshView, NshView, NshView) {
+        let bar = view(parent, 2, ViewKind::View, rect(10.0, 10.0, 200.0, 40.0));
+        bar.state_mut().props.window_drag = Some(true);
+        let field = view(&bar, 4, ViewKind::Input, rect(100.0, 5.0, 80.0, 30.0));
+        let sibling = view(parent, 6, ViewKind::View, rect(10.0, 60.0, 200.0, 40.0));
+        (bar, field, sibling)
+    }
+
+    fn listens(view: &NshView) {
+        view.state_mut().events.set(EventKind::ContextMenu, true);
+    }
+
+    #[test]
+    fn a_drag_area_s_own_listener_hears_its_secondary_click() {
+        let root = root();
+        let (bar, _, _) = title_bar(&root);
+        listens(&bar);
+        assert!(hears_context_menu(&root, 30.0, 30.0));
+        // So does a listener inside it.
+        let root = self::root();
+        let (bar, _, _) = title_bar(&root);
+        listens(&view(&bar, 8, ViewKind::View, rect(0.0, 0.0, 50.0, 40.0)));
+        assert!(hears_context_menu(&root, 30.0, 30.0));
+        assert!(!hears_context_menu(&root, 80.0, 30.0));
+    }
+
+    #[test]
+    fn a_listener_around_a_drag_area_leaves_it_the_window_menu() {
+        let root = root();
+        let parent = view(&root, 10, ViewKind::View, rect(0.0, 0.0, 300.0, 200.0));
+        listens(&parent);
+        title_bar(&parent);
+        assert!(!hears_context_menu(&root, 30.0, 30.0));
+    }
+
+    #[test]
+    fn a_root_listener_leaves_a_drag_area_the_window_menu() {
+        let root = root();
+        listens(&root);
+        title_bar(&root);
+        assert!(!hears_context_menu(&root, 30.0, 30.0));
+    }
+
+    #[test]
+    fn a_field_in_a_listening_drag_area_keeps_its_edit_menu() {
+        let root = root();
+        let (bar, _, _) = title_bar(&root);
+        listens(&bar);
+        assert!(!hears_context_menu(&root, 130.0, 30.0));
+        assert!(hears_context_menu(&root, 30.0, 30.0));
+    }
+
+    #[test]
+    fn a_listening_sibling_leaves_a_drag_area_the_window_menu() {
+        let root = root();
+        let (_, _, sibling) = title_bar(&root);
+        listens(&sibling);
+        assert!(!hears_context_menu(&root, 30.0, 30.0));
+    }
+
+    #[test]
+    fn a_drag_area_with_no_listener_keeps_the_window_menu() {
+        let root = root();
+        title_bar(&root);
+        assert!(!hears_context_menu(&root, 30.0, 30.0));
+    }
+
     #[test]
     fn picks_the_innermost_topmost_view() {
         let root = root();
@@ -2766,6 +2909,30 @@ mod tests {
     }
 
     #[test]
+    fn a_tall_scroll_views_bar_stays_in_view() {
+        // A horizontal scroll view 1000 tall in a vertical one 200 tall
+        // scrolled down by 600: the bar runs along the bottom of what is
+        // visible of it, where the mouse grabs it.
+        let root = root();
+        let outer = view(&root, 2, ViewKind::Scroll, rect(10.0, 10.0, 200.0, 200.0));
+        outer.state_mut().scroll.as_mut().unwrap().y = Points(600.0);
+        let inner = view(&outer, 4, ViewKind::Scroll, rect(0.0, 0.0, 200.0, 1000.0));
+        {
+            let mut s = inner.state_mut();
+            let scroll = s.scroll.as_mut().unwrap();
+            scroll.horizontal = true;
+            scroll.indicator = true;
+            scroll.content = nsh_core::geometry::size(Points(800.0), Points(1000.0));
+        }
+        let visible = inner.visible_bounds();
+        assert!((visible.origin.y.0 - 600.0).abs() < 1e-3, "{visible:?}");
+        assert!((visible.size.height.0 - 200.0).abs() < 1e-3, "{visible:?}");
+        assert!((visible.size.width.0 - 200.0).abs() < 1e-3, "{visible:?}");
+        assert!(crate::scroll::grabs_thumb(&inner, 20.0, 797.0));
+        assert!(!crate::scroll::grabs_thumb(&inner, 20.0, 997.0));
+    }
+
+    #[test]
     fn local_points_go_through_the_chain() {
         let root = root();
         let s = view(&root, 2, ViewKind::Scroll, rect(10.0, 10.0, 200.0, 200.0));
@@ -2783,6 +2950,8 @@ mod tests {
         assert_eq!(css_cursor(C::Pointer), Some(Cursor::Hand));
         assert_eq!(css_cursor(C::NotAllowed), Some(Cursor::NotAllowed));
         assert_eq!(css_cursor(C::None), Some(Cursor::Hidden));
+        assert_eq!(css_cursor(C::NwseResize), Some(Cursor::ResizeNwse));
+        assert_eq!(css_cursor(C::NeswResize), Some(Cursor::ResizeNesw));
     }
 
     #[test]

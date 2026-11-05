@@ -871,7 +871,18 @@ impl Mounter {
                             input.content(content.into())?;
                         }
                     }
-                    MountItem::Shader { id, layer } => self.shaders.set(self.node(id)?, layer)?,
+                    MountItem::Shader { id, layer } => {
+                        // The XComponent renderer draws fills. Effects keep their
+                        // children visible until native snapshots are supported.
+                        let fill =
+                            layer.filter(|layer| layer.role == nsh_core::shader::ShaderRole::Fill);
+                        self.shaders.set(self.node(id)?, fill)?;
+                    }
+                    MountItem::ShaderTransition { .. }
+                    | MountItem::ShaderInput { .. }
+                    | MountItem::NavShader { .. } => {}
+                    // These projections are opt-in for the terminal backend.
+                    MountItem::TreeOrder(_) | MountItem::ProjectStates { .. } => {}
                     MountItem::ScrollConfig {
                         id,
                         horizontal,

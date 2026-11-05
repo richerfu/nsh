@@ -82,9 +82,10 @@ pub(crate) struct AppConfig {
     /// Read and checked by the bundler.
     #[serde(default, rename = "tailwind")]
     _tailwind: Option<serde::de::IgnoredAny>,
-    /// Read and checked by the bundler.
-    #[serde(default, rename = "capabilities")]
-    _capabilities: Option<serde::de::IgnoredAny>,
+    /// Read and checked by the bundler; packages read only what the
+    /// system must be told ahead (`speech`'s usage descriptions).
+    #[serde(default)]
+    pub(crate) capabilities: Option<serde_json::Value>,
     /// `"light"` / `"dark"` / `"system"`: the app's appearance (checked by
     /// the bundler, which hands it to the runtime); packages also start in
     /// it (the launch screen, the window's theme).
@@ -108,7 +109,68 @@ pub(crate) struct AppConfig {
     /// What the web's packages add to the page (`web.rs`).
     #[serde(default)]
     pub(crate) web: WebConfig,
+    /// Where the app finds its updates (`update.rs`).
+    pub(crate) updater: Option<crate::updater::UpdaterConfig>,
+    /// Terminal layout options.
+    #[serde(default)]
+    pub(crate) tui: TuiConfig,
 }
+
+/// `nsh.json` `"tui"`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct TuiConfig {
+    /// Width and height of one Cell in points (`8x16` by default).
+    pub(crate) points_per_cell: Option<String>,
+}
+
+impl AppConfig {
+    /// Whether the app may recognize speech: it declares no capabilities
+    /// (it gets them all) or grants `speech`.
+    fn speech(&self) -> bool {
+        match &self.capabilities {
+            None => true,
+            Some(capabilities) => {
+                capabilities.get("speech") == Some(&serde_json::Value::Bool(true))
+            }
+        }
+    }
+
+    /// Whether the app may show notifications: it declares no capabilities
+    /// (it gets them all) or grants `notifications`.
+    pub(crate) fn notifications(&self) -> bool {
+        match &self.capabilities {
+            None => true,
+            Some(capabilities) => {
+                capabilities.get("notifications") == Some(&serde_json::Value::Bool(true))
+            }
+        }
+    }
+
+    /// Adds what the system shows when the app first asks for the
+    /// microphone and speech recognition, which it requires (it ends an app
+    /// that asks without them), when the app may recognize speech.
+    fn usage_descriptions(&self, info: &mut plist::Dictionary) {
+        if !self.speech() {
+            return;
+        }
+        for (key, text) in USAGE_DESCRIPTIONS {
+            info.insert(key.into(), plist::Value::String(text.to_owned()));
+        }
+    }
+}
+
+/// The usage descriptions of an app that recognizes speech (`Speech`).
+pub(crate) const USAGE_DESCRIPTIONS: [(&str, &str); 2] = [
+    (
+        "NSMicrophoneUsageDescription",
+        "The app listens to the microphone while you dictate.",
+    ),
+    (
+        "NSSpeechRecognitionUsageDescription",
+        "The app turns what you say into text.",
+    ),
+];
 
 /// `nsh.json` `"web"`.
 #[derive(Debug, Default, Deserialize)]
@@ -158,6 +220,9 @@ pub(crate) fn read_config(entry: &Path) -> anyhow::Result<AppConfig> {
     };
     let mut config: AppConfig =
         serde_json::from_str(&text).with_context(|| format!("invalid {}", path.display()))?;
+    if let Some(value) = &config.tui.points_per_cell {
+        crate::run::parse_points_per_cell(value).map_err(anyhow::Error::msg)?;
+    }
     config.icon = config.icon.map(|icon| dir.join(icon));
     config.web.host = config.web.host.map(|host| dir.join(host));
     Ok(config)
@@ -167,7 +232,9 @@ pub(crate) fn read_config(entry: &Path) -> anyhow::Result<AppConfig> {
 /// file must be inside the app's directory, symbolic links resolved, as the
 /// page ships it as it is.
 pub(crate) fn web_host_module(entry: &Path, host: &Path) -> anyhow::Result<PathBuf> {
-    let dir = dunce::canonicalize(entry.parent().unwrap_or(Path::new(".")))
+    // `App.tsx`'s parent is the empty path, which does not canonicalize.
+    let dir = entry.parent().filter(|d| !d.as_os_str().is_empty());
+    let dir = dunce::canonicalize(dir.unwrap_or(Path::new(".")))
         .with_context(|| format!("the app's directory of {}", entry.display()))?;
     let module = dunce::canonicalize(host)
         .with_context(|| format!("nsh.json web.host {}", host.display()))?;
@@ -259,7 +326,7 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
     // Web apps load what `import()` brings in when it is used; native
     // packages are one bundle. A Rust app has none: its runner mounts its
     // root (`rust_app::RustApp::runtime`).
-    let built = if crate::rust_app::is_root(&entry) {
+    let mut built = if crate::rust_app::is_root(&entry) {
         crate::build::rust_root()
     } else {
         let compile = match options.target {
@@ -270,6 +337,9 @@ pub(crate) fn package(options: PackageOptions<'_>) -> anyhow::Result<()> {
         ui::done(format!("built {} {}", ui::path(&entry), built.summary("")));
         built
     };
+    if options.target != PackageTarget::Web {
+        crate::updater::add_config(config, &id, options.out, &mut built)?;
+    }
     let platform = match options.target {
         PackageTarget::Ios => Platform::IphoneOs,
         PackageTarget::IosSimulator => Platform::IphoneSimulator,
@@ -503,6 +573,7 @@ fn package_android(
             version_code: config.build.unwrap_or(1),
             activity: "com.longbridge.nsh.AppActivity",
             dev: false,
+            notifications: config.notifications(),
             rust: built.rust_root,
             dark: config.appearance.as_deref() == Some("dark"),
             runtime: &runtime,
@@ -612,6 +683,7 @@ fn package_linux(
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
+    crate::updater::copy_archive(config, name, &archive, options.out)?;
     step.done(format!(
         "packaged {} and {}",
         ui::path(&dir),
@@ -703,6 +775,7 @@ fn package_macos(
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
+    crate::updater::archive_macos_app(config, name, &app, options.out)?;
     step.done(format!("packaged {}", ui::path(&app)));
     if options.run {
         let status = Command::new("open")
@@ -796,6 +869,7 @@ fn macos_info_plist(
     if icon {
         d.insert("CFBundleIconFile".into(), s("AppIcon"));
     }
+    config.usage_descriptions(&mut d);
     d
 }
 
@@ -856,6 +930,7 @@ fn info_plist(
         Value::Array(vec![1.into(), 2.into()]),
     );
     d.insert("LSRequiresIPhoneOS".into(), true.into());
+    config.usage_descriptions(&mut d);
     // A launch screen entry opts into the full screen (no letterboxing).
     d.insert(
         "UILaunchScreen".into(),
@@ -1101,6 +1176,26 @@ mod tests {
     }
 
     #[test]
+    fn apps_that_may_recognize_speech_explain_it() {
+        let usage = |capabilities: Option<serde_json::Value>| {
+            let config = AppConfig {
+                capabilities,
+                ..AppConfig::default()
+            };
+            let info = macos_info_plist("A", "com.a", "a", &config, false);
+            let ios = info_plist("A", "com.a", "a", &config, "iphoneos");
+            assert_eq!(
+                info.contains_key("NSMicrophoneUsageDescription"),
+                ios.contains_key("NSSpeechRecognitionUsageDescription")
+            );
+            info.contains_key("NSSpeechRecognitionUsageDescription")
+        };
+        assert!(usage(None));
+        assert!(usage(Some(serde_json::json!({ "speech": true }))));
+        assert!(!usage(Some(serde_json::json!({ "picker": true }))));
+    }
+
+    #[test]
     fn a_release_needs_the_apps_own_id() {
         let entry = Path::new("apps/Orders/App.tsx");
         let config = |id: Option<&str>| AppConfig {
@@ -1166,6 +1261,9 @@ mod tests {
             assert!(error.contains("inside the app's directory"), "{error}");
         }
         fs::remove_dir_all(&root).unwrap();
+        // An entry named without its directory is in the working directory
+        // (the crate's, under `cargo test`).
+        assert!(web_host_module(Path::new("App.tsx"), Path::new("Cargo.toml")).is_ok());
     }
 
     /// App icons are drawn at 1024 pixels, which `sips` alone cannot

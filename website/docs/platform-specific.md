@@ -91,6 +91,9 @@ What exists today:
 | `.supported_orientations(..)` | `ios={{ supportedOrientations }}` | `Dialog` | The orientations it allows. |
 | `.back_forward_gestures(..)` | `ios={{ allowsBackForwardNavigationGestures }}` | `WebView` | Swipe back and forward in the page history. |
 | `.header_right_system_item(..)` | `ios={{ headerRightSystemItem }}` | `NavPage` | UIKit's own bar button at the end of the header, pressing `headerRight`. |
+| `.header_left_system_item(..)` | `ios={{ headerLeftSystemItem }}` | `NavPage` | UIKit's own bar button at the start of the header, pressing `headerLeft`. |
+| `.header_right_symbol(..)` | `ios={{ headerRightSymbol }}` | `NavPage` | UIKit's own bar button showing an SF Symbol at the end of the header, pressing `headerRight`. |
+| `.header_left_symbol(..)` | `ios={{ headerLeftSymbol }}` | `NavPage` | UIKit's own bar button showing an SF Symbol at the start of the header, pressing `headerLeft`. |
 | `.back_forward_gestures(..)` | `desktop={{ allowsBackForwardNavigationGestures }}` | `WebView` | macOS: two-finger trackpad swipes go back and forward in the page history; Windows: touchscreen swipes; Linux: touchpad swipes. |
 | `.window_drag(..)` | `desktop={{ windowDrag }}` | every element | Pressing it drags the window, as the system's title bar would (see [nsh/desktop](../modules/nsh-desktop.md#a-title-bar-of-your-own)). |
 
@@ -164,7 +167,7 @@ Rust apps draw their own title bars with `nsh_core::element::desktop` ([Building
 |---|---|
 | `Window` | The window: `setTitle`, `setTitleBar({ style: "hidden" })` for a title bar of the app's own, `minimize`, `toggleMaximize`, `toggleFullScreen`, `close`. |
 | `titleBar` | The hidden title bar's height and the room the system's window controls take (reactive). |
-| `Menu` | `setApplicationMenu(items)` (the menu bar, with shortcuts) and `popup(items, at?)` (context menus). |
+| `Menu` | `setApplicationMenu(items)` (the menu bar, with shortcuts) and `popup(items, at?)` (context menus). An item's `icon` is an image as `<Image>`'s `src` takes it, so menus show the app's own icon set: an SVG takes the color of the menu's text, a bitmap keeps its colors. macOS and Windows show it; GTK's menus show no icon beside a label. |
 | `isAvailable` | `true` where the window and menu APIs work: macOS, Windows and Linux. Desktop browsers have `platform.desktop` and keep the browser's window and menus. |
 
 See [nsh/desktop](../modules/nsh-desktop.md).

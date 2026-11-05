@@ -34,6 +34,7 @@ use nsh_core::{
         Handle, KeptRows, SelectionModel, SelectionTexts, TextPosition, reading_order, reorder,
     },
 };
+use nsh_engine::EngineControl;
 use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
     rc::{Allocated, Retained},
@@ -47,8 +48,6 @@ use objc2_ui_kit::{
     UILongPressGestureRecognizer, UIPanGestureRecognizer, UIResponder, UIScrollView,
     UITapGestureRecognizer, UITouch, UITraitEnvironment, UIView,
 };
-
-use nsh_engine::EngineControl;
 
 use crate::{native_view::NshView, text_view::TextView};
 
@@ -75,6 +74,8 @@ struct Entry {
     text: std::sync::Arc<AttributedText>,
     /// The content box, in the area's coordinates.
     frame: Bounds<Points>,
+    /// It continues the text before it (`ViewProps::continues_text`).
+    continues: bool,
 }
 
 /// The texts of an area as the model sees them.
@@ -118,6 +119,10 @@ impl SelectionTexts for AreaTexts {
         // The text's node id.
         self.entries[i].view.tag() as u64
     }
+
+    fn continues(&self, i: usize) -> bool {
+        self.entries[i].continues
+    }
 }
 
 impl AreaTexts {
@@ -152,6 +157,7 @@ impl AreaTexts {
                     };
                     let r = text.convertRect_toView(rect, Some(area));
                     out.push(Entry {
+                        continues: text.continues_text(),
                         view: text.retain(),
                         text: content,
                         frame: bounds(

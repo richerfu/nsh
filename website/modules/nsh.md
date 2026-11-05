@@ -6,7 +6,7 @@ order: 2
 
 # nsh
 
-`nsh` is the core module: the reactive API (signals, computed values, effects, context), `mount`, `token`, the host elements `View`, `Text`, `Scroll` and `Overlay`, [selectable views](#selectable-views), [the safe area and the keyboard](#safe-area-and-keyboard), [animation](#animation), [the device and its environment](#device), [`PanResponder`](#panresponder), the [clipboard](#clipboard), the [photo picker](#picker), [storage](#storage), the [host channel](#host), [keyboard shortcuts](#keymap), [native components and modules](#nativecomponent-and-nativemodule), [accessibility](#accessibility), and the TypeScript types of elements, styles and events. The reactive graph itself runs natively in Rust; reading a signal is a call into the runtime that costs a few nanoseconds, and only your own closures run in the JavaScript interpreter.
+`nsh` is the core module: the reactive API (signals, computed values, effects, context), `mount`, `token`, the host elements `View`, `Text`, `Scroll` and `Overlay`, [selectable views](#selectable-views), [the safe area and the keyboard](#safe-area-and-keyboard), [animation](#animation), [the device and its environment](#device), [`PanResponder`](#panresponder), the [clipboard](#clipboard), the [photo picker](#picker), [speech recognition](#speech), [storage](#storage), the [host channel](#host), [keyboard shortcuts](#keymap), [native components and modules](#nativecomponent-and-nativemodule), [accessibility](#accessibility), and the TypeScript types of elements, styles and events. The reactive graph itself runs natively in Rust; reading a signal is a call into the runtime that costs a few nanoseconds, and only your own closures run in the JavaScript interpreter.
 
 ```ts
 import { batch, cleanup, computed, context, effect, ErrorBoundary, mount, Overlay, Scroll, signal, split, Text, token, untracked, View } from "nsh";
@@ -854,17 +854,17 @@ const toggle = () => {
 
 ## Device
 
-The device API tells the app about the device and its environment. Rust code calls the functions of `nsh_core::prelude` (`window()`, `dark()`, `font_scale()`, `locale()`, `os()`, `idiom()`, `pixel_ratio()`, `set_color_scheme()`, ...); TSX imports them from `nsh`. The window size, the color scheme, the font scale, the pixel ratio and the locale are reactive: read them in a binding (a closure passed to an element in Rust, JSX in TSX), `computed` or `effect`, and what reads them updates when the platform reports a change (rotation, a window resize, switching to dark mode, changing the text size or the language, moving to a screen of another density).
+The device API tells the app about the device and its environment. Rust code calls the functions of `nsh_core::prelude` (`window()`, `dark()`, `font_scale()`, `locale()`, `lifecycle()`, `os()`, `idiom()`, `pixel_ratio()`, `set_color_scheme()`, ...); TSX imports them from `nsh`. The window size, the color scheme, the font scale, the pixel ratio, the locale and the app state are reactive: read them in a binding (a closure passed to an element in Rust, JSX in TSX), `computed` or `effect`, and what reads them updates when the platform reports a change (rotation, a window resize, switching to dark mode, changing the text size or the language, moving to a screen of another density, leaving the app and coming back).
 
 ```rust tabs
 use nsh_core::{
-    platform::{Appearance, Idiom, Os},
-    prelude::*, // window, dark, font_scale, locale, os, idiom, pixel_ratio, set_color_scheme, ...
+    platform::{Appearance, Idiom, Lifecycle, Os},
+    prelude::*, // window, dark, font_scale, locale, lifecycle, os, idiom, pixel_ratio, set_color_scheme, ...
 };
 ```
 
 ```tsx tabs
-import { colorScheme, fontScale, locale, openUrl, pixelRatio, platform, setColorScheme, windowSize } from "nsh";
+import { colorScheme, fontScale, lifecycle, locale, openUrl, pixelRatio, platform, setColorScheme, windowSize } from "nsh";
 ```
 
 See [Device and environment](../docs/device-and-environment.md) for the guide.
@@ -923,6 +923,33 @@ const locale: Accessor<string>;
 
 The user's locale as a BCP 47 tag (`"en-US"`, `"zh-Hans-CN"`), or the locale the embedding app sets in its place. Reactive. Rust: `locale() -> Locale` (`locale().as_str()` is the tag). `Intl` formats for it by default; read it to choose the strings of your own translations ([Device and environment](../docs/device-and-environment.md#language-and-region)).
 
+### lifecycle
+
+```ts
+const lifecycle: Accessor<"active" | "inactive" | "background">;
+```
+
+Whether the app is in use, in React Native's `AppState` terms: `"active"` in the foreground and taking input, `"inactive"` while visible without the focus (another app or window has it, or the system shows something over it, such as the app switcher or an incoming call), `"background"` while not visible (in the background, minimized, a hidden browser tab). An app shown inside a native app follows that app's. Reactive. Rust: `lifecycle() -> Lifecycle` (`Lifecycle::Active`, `Inactive`, `Background`).
+
+Read it in an effect to pause work nobody sees and resume it when the app comes back:
+
+```rust tabs
+effect(move || {
+    if lifecycle() == Lifecycle::Background {
+        feed.pause();
+    } else {
+        feed.resume();
+    }
+});
+```
+
+```tsx tabs
+effect(() => {
+  if (lifecycle() === "background") feed.pause();
+  else feed.resume();
+});
+```
+
 ### setColorScheme
 
 ```ts
@@ -939,7 +966,7 @@ const platform: Platform;
 interface Platform {
   readonly os: "ios" | "android" | "macos" | "windows" | "linux" | "web";
   readonly version: string;
-  readonly idiom: "phone" | "pad" | "mac" | "tv" | "desktop";
+  readonly idiom: "phone" | "pad" | "mac" | "tv" | "desktop" | "terminal";
   readonly desktop: boolean;
   readonly catalyst: boolean;
   select<T>(spec: PlatformSelectSpec<T>): T | undefined;
@@ -952,8 +979,8 @@ The platform the app runs on, constant while it runs.
 |---|---|---|
 | `os` | `os() -> Os` (`os().name()` is the TS string) | The operating system. iOS, the iOS simulator and Mac Catalyst report `"ios"`, browsers `"web"`. |
 | `version` | `os_version() -> (u16, u16)` | iOS and desktops: the OS version (`"17.5"`); Android: the API level (`"35"`); the web: `"0.0"`. Rust gives the major and minor version, or the API level and 0 on Android. |
-| `idiom` | `idiom() -> Idiom` | The kind of device: `"desktop"` exactly where `desktop` is `true`; elsewhere `"phone"`, `"pad"` (an iPad, an Android tablet, Mac Catalyst in the iPad idiom), `"mac"` (Mac Catalyst in UIKit's Mac idiom, a mobile idiom) or `"tv"` (Apple TV, Android TV). |
-| `desktop` | `is_desktop() -> bool` | Desktop behavior applies: macOS, Windows, Linux, and browsers with a mouse and a wide window. `desktop={{…}}` props, `select({ desktop })` and `idiom` `"desktop"` all follow it. Mac Catalyst runs the iOS backend, so it is mobile: `ios={{…}}` props apply there. [`nsh/desktop`](./nsh-desktop.md#isavailable)'s `isAvailable` is the narrower check for its window and menu APIs, which macOS, Windows and Linux have. |
+| `idiom` | `idiom() -> Idiom` | The kind of device: `"terminal"` in a terminal (`--target tui`): drawn on a grid of character cells, with desktop behavior (`desktop` is `true`; `os` is still the machine's); elsewhere `"desktop"` exactly where `desktop` is `true`, else `"phone"`, `"pad"` (an iPad, an Android tablet, Mac Catalyst in the iPad idiom), `"mac"` (Mac Catalyst in UIKit's Mac idiom, a mobile idiom) or `"tv"` (Apple TV, Android TV). |
+| `desktop` | `is_desktop() -> bool` | Desktop behavior applies: macOS, Windows, Linux, browsers with a mouse and a wide window, and terminals. `desktop={{…}}` props, `select({ desktop })` and `idiom` `"desktop"` (outside a terminal) all follow it. Mac Catalyst runs the iOS backend, so it is mobile: `ios={{…}}` props apply there. [`nsh/desktop`](./nsh-desktop.md#isavailable)'s `isAvailable` is the narrower check for its window and menu APIs, which macOS, Windows and Linux have. |
 | `catalyst` | `is_catalyst() -> bool` | The app runs under Mac Catalyst, in the Mac or the iPad idiom (`os` is `"ios"`). |
 | `select(spec)` | `match os() { … }` | The value for this platform (see below). |
 
@@ -976,7 +1003,7 @@ interface PlatformSelectSpec<T> {
   linux?: T;
   web?: T;
   mobile?: T;   // platform.desktop false: iOS (Mac Catalyst included), Android, phone and tablet browsers
-  desktop?: T;  // platform.desktop true: macOS, Windows, Linux, desktop browsers
+  desktop?: T;  // platform.desktop true: macOS, Windows, Linux, desktop browsers, terminals
   native?: T;   // every platform but the web
   default?: T;
 }
@@ -1718,6 +1745,199 @@ and without a handler a pick is cancelled. See [Testing](../docs/testing-and-tra
 > `"picker"` and `resource` `""`. In Rust, `pick_images` answers no files and the refusal is logged. See
 > [Sandbox and capabilities](../docs/sandbox-and-capabilities.md).
 
+## Notifications
+
+`Notifications` shows system notifications and sets the app's icon badge, the Dock's on macOS. Ask for the permission
+when the user does something that needs it, then show:
+
+```tsx
+import { Notifications } from "nsh";
+
+Notifications.on("press", ({ id }) => openChat(id));
+
+async function notifyMe() {
+  if ((await Notifications.requestPermission()) !== "granted") return;
+  await Notifications.show({ id: "chat:42", title: "Ada", body: "Are you coming?" });
+  Notifications.setBadge(1);
+}
+```
+
+Rust code calls `request_notification_permission`, `show_notification`, `close_notification`, `set_badge` and
+`next_notification_press` of `nsh_core::prelude`.
+
+| Platform | Notifications | Badge |
+| --- | --- | --- |
+| macOS | The notification center, in a signed app bundle; `unavailable` in `nsh run`'s unbundled host | The Dock, without a permission |
+| iOS | The notification center | The home screen, with the permission |
+| Android | The system's, with `POST_NOTIFICATIONS` on Android 13 (`nsh package` declares it for apps granted `notifications`) | No count to set: launchers mark an app that has notifications showing, and the count goes with those shown after it |
+| Windows | A toast, shown unless the user turned the app's notifications off in Settings, which is `denied`. Windows has no prompt, so `requestPermission` asks nothing. A surface embedded in another app is `unavailable` | The count on the taskbar button, up to `99+`; not shown when the taskbar uses small buttons |
+| Linux | The desktop's notification daemon (`org.freedesktop.Notifications`): `granted` while one runs, with no prompt, `unavailable` otherwise | The Unity launcher API, on docks that read it (Plasma, Ubuntu's, Dash to Dock); elsewhere nothing shows |
+| Web | `Notification`, where the browser shows them from a page (not on Android) | The Badging API, in an installed app |
+| Terminal, GPUI | `unavailable` | None |
+
+### Notifications.show
+
+`show` resolves with whether the system took the notification, which it does not without the permission. A notification
+shows while the app is in front as it does behind it. Showing another with the same `id` replaces it, and
+`Notifications.close(id)` removes it.
+
+### Notifications.on
+
+`press` reports the `id` of the notification the user pressed. A press can start the app: it waits for the first
+listener, so listen when the app starts, and keep what the press opens in the `id`. On Android an embedding app's
+activity passes its intents to `NshView.handleNotificationIntent`, in `onCreate` and `onNewIntent`. On Apple platforms an
+embedding app that has a notification center delegate keeps it, and its delegate gets the presses. On Linux a press reaches
+only the running app: one left on screen after the app exits does nothing.
+
+### Notifications.permission
+
+`permission()` answers without asking, `requestPermission()` shows the system's prompt the first time. Both resolve with
+`"default"` (not asked yet), `"granted"`, `"denied"` (only the system's settings change it) or `"unavailable"`.
+
+## Speech
+
+The speech API turns what the user says into text (dictation): the app starts a session, the platform listens to the
+microphone, and the transcript arrives as it grows. macOS and iOS recognize with the system's Speech framework; the
+system asks the user for the microphone and for speech recognition once. On other platforms a session ends at once
+with the error `"unavailable"`, so check `Speech.available()` before showing a microphone button. Rust code calls
+`recognize_speech` of `nsh_core::prelude`; TSX imports `Speech` from `nsh`.
+
+```rust tabs
+use nsh_core::speech::{SpeechEvent, SpeechRequest};
+```
+
+```tsx tabs
+import { Speech, type SpeechSession } from "nsh";
+```
+
+```ts
+const Speech: {
+  available(): Promise<boolean>;
+  start(options?: SpeechOptions): SpeechSession;
+};
+
+interface SpeechOptions {
+  /** The language spoken, a BCP 47 tag ("en-US", "zh-CN"); the user's when left out. */
+  lang?: string;
+  /** Results while the user speaks (true, the default), or only the final one. */
+  interim?: boolean;
+}
+
+interface SpeechSession {
+  on(event: "start", listener: () => void): () => void;
+  on(event: "result", listener: (result: SpeechResult) => void): () => void;
+  on(event: "end", listener: (end: SpeechEnd) => void): () => void;
+  /** The whole transcript so far. */
+  readonly text: string;
+  readonly ended: boolean;
+  stop(): void;
+  abort(): void;
+}
+
+interface SpeechResult { text: string; isFinal: boolean }
+interface SpeechEnd { text: string; error?: SpeechErrorCode }
+
+type SpeechErrorCode =
+  | "not-allowed" | "no-speech" | "audio-capture" | "network"
+  | "language-not-supported" | "unavailable" | "failed";
+```
+
+| TSX | Rust |
+|---|---|
+| `await Speech.available()` | `speech_available().await -> bool` |
+| `Speech.start(options)` | `recognize_speech(request) -> SpeechRecognition` |
+| `session.on("result", ...)` | `recognition.next().await -> Option<SpeechEvent>` |
+| `session.stop()` / `abort()` | `recognition.stop()` / `abort()` (dropping it aborts) |
+
+### Speech.start
+
+Starts a session and returns it at once. A session reports, in this order: `start` when the microphone is on and the
+recognizer listens, `result` each time the transcript changes (`text` is always the whole transcript so far, so the
+app shows it as it is), and one `end`, after which nothing comes. `stop()` stops listening and lets the recognizer
+finish what it heard: a last result with `isFinal: true`, then `end`. `abort()` ends the session at once, without an
+error, and drops what was not reported. One session runs at a time: starting another aborts the one running.
+
+`end` carries the last transcript and, when the session failed, `error`, named as in the Web Speech API:
+
+| `error` | When |
+|---|---|
+| `"not-allowed"` | The user or the system does not allow the microphone or speech recognition. |
+| `"no-speech"` | Nothing was said. |
+| `"audio-capture"` | The microphone could not be used. |
+| `"network"` | The recognizer needs the network and could not reach it. |
+| `"language-not-supported"` | The recognizer does not know `lang`. |
+| `"unavailable"` | This platform recognizes no speech, or not now. |
+| `"failed"` | The recognizer failed for another reason. |
+
+`start` throws a `TypeError` for options of the wrong types and a `RangeError` for a `lang` that is no language tag.
+
+```tsx
+import { signal, Speech, type SpeechSession } from "nsh";
+
+const transcript = signal("");
+let session: SpeechSession | null = null;
+
+function toggle() {
+  if (session && !session.ended) {
+    session.stop();
+    return;
+  }
+  session = Speech.start({ lang: "en-US" });
+  session.on("result", ({ text }) => transcript.set(text));
+  session.on("end", ({ text, error }) => {
+    if (error) console.warn("dictation ended:", error);
+    else transcript.set(text);
+  });
+}
+```
+
+```rust
+use nsh_core::prelude::*;
+use nsh_core::speech::{SpeechEvent, SpeechRequest};
+
+async fn dictate() -> String {
+    let mut recognition = recognize_speech(SpeechRequest::default());
+    let mut text = String::new();
+    while let Some(event) = recognition.next().await {
+        match event {
+            SpeechEvent::Result { text: heard, .. } => text = heard,
+            SpeechEvent::End { .. } => break,
+            _ => {}
+        }
+    }
+    text
+}
+```
+
+### Speech.available
+
+Resolves `true` where a session can run: on macOS and iOS, and wherever the embedding app recognizes speech itself.
+
+### Info.plist
+
+On macOS and iOS the system shows why the app wants the microphone and speech recognition. `nsh package` and
+`nsh run` write `NSMicrophoneUsageDescription` and `NSSpeechRecognitionUsageDescription` into the app's Info.plist
+when the app may use speech (its `capabilities` grant `speech`, or it declares none).
+
+### Embedding apps
+
+An app that embeds NSH and recognizes speech its own way (its own engine or service) answers the sessions itself: in
+Rust, a `SpeechBackend` (`nsh_core::speech`) given to the engine (`EngineConfig::speech`) receives every session's
+`SpeechRequest` and a `SpeechSink` it reports to from any thread, and returns the `SpeechControl` the core stops and
+aborts the session with. The platform's recognizer is not used then.
+
+### Tests
+
+`nsh test` runs sessions on a fake recognizer in headless runs: a session starts at once, `app.hear(text)` reports
+`text` as the transcript so far, `app.endSpeech(error?)` ends it, and `app.speechRequests()` lists the sessions the
+app started. See [Testing](../docs/testing-and-trace.md).
+
+> [!NOTE]
+> When your app declares `capabilities` in `nsh.json`, speech must be granted with `"speech": true`. Without it
+> `Speech.start` throws an `Error` whose `code` is `"ERR_ACCESS_DENIED"`, `permission` `"speech"` and `resource` `""`.
+> In Rust, the session ends with `not-allowed` and the refusal is logged. See
+> [Sandbox and capabilities](../docs/sandbox-and-capabilities.md).
+
 ## Storage
 
 The storage API keeps the app's data on the device: strings by string key, still there the next time the app starts. Use it for settings, drafts, the last tab the user had open, a cache of what the server sent — any state that should outlive the app's process. Rust code uses `nsh_core::storage::Storage`, TSX imports `Storage` from `nsh`; both read and write the same entries, so an app with a Rust entry and a TSX entry sees one set of data.
@@ -2055,13 +2275,14 @@ const keymap: {
 interface KeyBindingOptions {
   when?: "always" | "notEditing";
   repeat?: boolean;
+  passThrough?: boolean;
 }
 ```
 
 | TS | Rust |
 |---|---|
 | `keymap.bind(keystroke, handler)` | `on_key(keystroke, handler)` |
-| `keymap.bind(keystroke, handler, { when, repeat })` | `on_key_with(keystroke, KeyOptions { when, repeat }, handler)`; `when` is `nsh_core::keymap::When` (`Auto`, `Always`, `NotEditing`) |
+| `keymap.bind(keystroke, handler, { when, repeat, passThrough })` | `on_key_with(keystroke, KeyOptions { when, repeat, pass_through }, handler)`; `when` is `nsh_core::keymap::When` (`Auto`, `Always`, `NotEditing`) |
 | `keymap.bind({ … })` | one `on_key` per keystroke |
 | `keymap.label(keystroke)` | `key_label(keystroke)` |
 
@@ -2213,7 +2434,7 @@ On iOS and Android, a key an input method is composing with (choosing a candidat
 
 ### Which binding runs
 
-A key that fires a binding is consumed: it is not typed, the system does not beep, and NSH's own keys do not see it (Escape going back, Tab moving the focus, the arrows scrolling). When several bindings have the same keystroke, the newest one that may fire runs, so a dialog can bind Escape over the screen's binding and the screen's comes back when the dialog's goes. Bindings are checked natively the moment the key is pressed; the handler runs right after, on the engine thread (Rust) or the JS thread (TSX).
+A key that fires a binding is consumed (a binding with `passThrough` lets it go on, below): it is not typed, the system does not beep, and NSH's own keys do not see it (Escape going back, Tab moving the focus, the arrows scrolling). When several bindings have the same keystroke, the newest one that may fire runs, so a dialog can bind Escape over the screen's binding and the screen's comes back when the dialog's goes. Bindings are checked natively the moment the key is pressed; the handler runs right after, on the engine thread (Rust) or the JS thread (TSX).
 
 Holding a key down fires its binding once, until the key is released; with `repeat: true` it fires again on every auto-repeat (to step through a list, say):
 
@@ -2223,6 +2444,16 @@ on_key_with("alt+down", KeyOptions { repeat: true, ..KeyOptions::default() }, mo
 
 ```tsx tabs
 keymap.bind("alt+down", nextItem, { repeat: true });
+```
+
+With `passThrough: true` the binding runs and the key goes on as if nothing were bound: Tab still moves the focus, a text input still types. A popup that closes when Tab leaves it binds Tab this way, and the focus moves to the next control:
+
+```rust tabs
+on_key_with("tab", KeyOptions { pass_through: true, ..KeyOptions::default() }, move |_| close());
+```
+
+```tsx tabs
+keymap.bind("tab", close, { passThrough: true });
 ```
 
 Menu shortcuts give way to a binding of the same keystroke: the application menu's ([`nsh/desktop`](./nsh-desktop)) on every desktop, and on macOS the built-in menus' too (Cmd+W, Cmd+C, ...). While you develop with `nsh run`, Cmd+R / Ctrl+R always reloads the app, even if it binds `mod+r`; a packaged app can bind it.
