@@ -18,7 +18,7 @@ pub struct NshEnvironment {
     pub safe_left: Option<f64>,
     /// Keyboard overlap in vp; zero when hidden.
     pub keyboard_height: Option<f64>,
-    /// Keyboard animation duration in seconds.
+    /// Keyboard animation duration in milliseconds.
     pub keyboard_duration: Option<f64>,
     /// Preferred text scale (0.25 through 8).
     pub font_scale: Option<f64>,
@@ -34,6 +34,8 @@ pub struct NshEnvironment {
     pub screen_reader: Option<bool>,
     /// Device category: `phone`, `pad`, `desktop` or `tv`.
     pub idiom: Option<String>,
+    /// Window lifecycle: `active`, `inactive` or `background`.
+    pub lifecycle: Option<String>,
     /// OHOS API level.
     pub api_level: Option<u32>,
 }
@@ -57,7 +59,8 @@ impl NshEnvironment {
             reduce_motion,
             screen_reader,
             idiom,
-            api_level
+            api_level,
+            lifecycle
         );
     }
     pub(crate) fn snapshot(env: Environment) -> Self {
@@ -92,6 +95,7 @@ impl NshEnvironment {
                 .into(),
             ),
             api_level: Some(env.os_version.0 as u32),
+            lifecycle: Some(env.lifecycle.name().into()),
         }
     }
     pub(crate) fn apply(self, mut env: Environment) -> napi_ohos::Result<Environment> {
@@ -120,7 +124,7 @@ impl NshEnvironment {
             self.keyboard_duration,
             &mut env.keyboard_duration,
             0.0,
-            10.0,
+            10_000.0,
         )?;
         number(self.font_scale, &mut env.font_scale, 0.25, 8.0)?;
         if let Some(value) = self.color_scheme {
@@ -154,6 +158,14 @@ impl NshEnvironment {
                 "desktop" => Idiom::Desktop,
                 "tv" => Idiom::Tv,
                 _ => return Err(napi_ohos::Error::from_reason("invalid idiom")),
+            };
+        }
+        if let Some(value) = self.lifecycle {
+            env.lifecycle = match value.as_str() {
+                "active" => nsh_engine::Lifecycle::Active,
+                "inactive" => nsh_engine::Lifecycle::Inactive,
+                "background" => nsh_engine::Lifecycle::Background,
+                _ => return Err(napi_ohos::Error::from_reason("invalid lifecycle")),
             };
         }
         if let Some(value) = self.api_level {

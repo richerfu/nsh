@@ -13,7 +13,7 @@ use crate::render::{
     composition::{
         draw::{PaintNode, Plan, Root},
         geometry::{Bounds, requires_scene},
-        worker::SceneShared,
+        raster::Shared as SceneShared,
     },
     geometry::Size,
     node::{Error, Node, Result},
@@ -291,7 +291,7 @@ fn snapshot(owner: &Rc<Node>, parent: Option<&Node>, depth: usize) -> Result<Pai
         opacity: owner.scene_opacity(),
         clip: owner.clips_children(),
         bounds,
-        style: Arc::new(style),
+        style: Arc::from(style),
         children,
     })
 }

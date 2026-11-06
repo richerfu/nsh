@@ -81,6 +81,7 @@ pub(crate) enum Message {
         version: (u64, u64),
     },
     Size(i32, i32),
+    Layout,
     Window(bool),
     Visible(bool),
     HostCall(nsh_engine::HostCall),
@@ -200,6 +201,7 @@ impl State {
         // a new token, so queued replies from the old client cannot replace it.
         if let Some(overlay) = &self.overlay {
             overlay.hide();
+            overlay.connection(false);
         }
     }
     #[cfg(feature = "dev")]
@@ -235,8 +237,18 @@ impl State {
             return Ok(());
         }
         match event {
-            DevEvent::Connected => log::info!("OHOS dev server connected"),
-            DevEvent::Disconnected => log::info!("OHOS dev server disconnected"),
+            DevEvent::Connected => {
+                log::info!("OHOS dev server connected");
+                if let Some(overlay) = &self.overlay {
+                    overlay.connection(false);
+                }
+            }
+            DevEvent::Disconnected => {
+                log::info!("OHOS dev server disconnected");
+                if let Some(overlay) = &self.overlay {
+                    overlay.connection(true);
+                }
+            }
             DevEvent::Testing
             | DevEvent::Step { .. }
             | DevEvent::TestSetup { .. }
@@ -351,7 +363,9 @@ impl State {
         }
         let granted = self.config()?.policy.granted.clone();
         app.owner = self.queue.clone();
-        app.bundle.policy.granted = granted;
+        if let nsh_engine::App::Js(bundle) = &mut app.app {
+            bundle.policy.granted = granted;
+        }
         self.phase = SurfacePhase::Staged(Box::new(app));
         self.errors.clear();
         self.start(env)
@@ -397,6 +411,59 @@ impl State {
         }
         Ok(Size::new(width, height))
     }
+    fn dispatch(state: &RefCell<Self>, env: Env, message: Message) -> Result<()> {
+        if matches!(message, Message::HostCall(_) | Message::OpenUrl(_)) {
+            let state = state.borrow();
+            if state.disposed.get()
+                || matches!(state.phase, SurfacePhase::Closing(_) | SurfacePhase::Closed)
+            {
+                return Ok(());
+            }
+        }
+        // Host code may synchronously send, change params or stop this surface.
+        // Keep only the function reference alive across the call into ArkTS.
+        match message {
+            Message::HostCall(mut call) => {
+                let handler = state.borrow().host_handlers.get(call.name()).cloned();
+                if let Some(handler) = handler {
+                    let name = call.name().to_owned();
+                    let data = call.take_data();
+                    let is_post = call.is_post();
+                    let call_slot = Arc::new(std::sync::Mutex::new(Some(call)));
+                    let reply = NshHostReply {
+                        call: call_slot.clone(),
+                        is_post,
+                    };
+                    let callback = handler.borrow_back(&env)?;
+                    if let Err(error) = callback.call((data, reply).into()) {
+                        log::error!("OHOS host handler {name}: {error}");
+                        if let Some(call) = call_slot.lock().unwrap().take() {
+                            call.reject(error.to_string());
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Message::OpenUrl(request) => {
+                let handler = state.borrow().open_url_handler.clone();
+                let handled = if let Some(handler) = handler {
+                    let callback = handler.borrow_back(&env)?;
+                    match callback.call(request.url().to_owned()) {
+                        Ok(handled) => handled,
+                        Err(error) => {
+                            log::error!("OHOS openUrl handler: {error}");
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+                request.answer(handled);
+                Ok(())
+            }
+            message => state.borrow_mut().receive(env, message),
+        }
+    }
     fn receive(&mut self, env: Env, message: Message) -> Result<()> {
         if matches!(message, Message::Dispose) {
             return self.close();
@@ -440,6 +507,12 @@ impl State {
                 }
                 Ok(())
             }
+            Message::Layout => {
+                if let Some(runtime) = self.phase.runtime() {
+                    runtime.layout_changed()?;
+                }
+                Ok(())
+            }
             Message::Size(width, height) => {
                 self.size = (width, height);
                 let size = self.logical_size()?;
@@ -471,42 +544,7 @@ impl State {
                 // like an iOS UIView. Only stop/dispose/Ability destruction ends it.
                 self.start(env)
             }
-            Message::HostCall(mut call) => {
-                if let Some(handler) = self.host_handlers.get(call.name()).cloned() {
-                    let name = call.name().to_owned();
-                    let data = call.take_data();
-                    let is_post = call.is_post();
-                    let call_slot = Arc::new(std::sync::Mutex::new(Some(call)));
-                    let reply = NshHostReply {
-                        call: call_slot.clone(),
-                        is_post,
-                    };
-                    let callback = handler.borrow_back(&env)?;
-                    if let Err(error) = callback.call((data, reply).into()) {
-                        log::error!("OHOS host handler {name}: {error}");
-                        if let Some(call) = call_slot.lock().unwrap().take() {
-                            call.reject(error.to_string());
-                        }
-                    }
-                }
-                Ok(())
-            }
-            Message::OpenUrl(request) => {
-                let handled = if let Some(handler) = self.open_url_handler.clone() {
-                    let callback = handler.borrow_back(&env)?;
-                    match callback.call(request.url().to_owned()) {
-                        Ok(handled) => handled,
-                        Err(error) => {
-                            log::error!("OHOS openUrl handler: {error}");
-                            false
-                        }
-                    }
-                } else {
-                    false
-                };
-                request.answer(handled);
-                Ok(())
-            }
+            Message::HostCall(_) | Message::OpenUrl(_) => unreachable!(),
             Message::Dispose => unreachable!(),
         }
     }
@@ -681,9 +719,9 @@ impl NshSurface {
                 wake.build_threadsafe_function::<Message>()
                     .callee_handled::<false>()
                     .build_callback(move |ctx| {
-                        let mut state = ui_state.borrow_mut();
-                        if let Err(error) = state.receive(ctx.env, ctx.value) {
-                            state.errors.report(error.to_string());
+                        if let Err(error) = State::dispatch(&ui_state, ctx.env, ctx.value) {
+                            let errors = ui_state.borrow().errors.clone();
+                            errors.report(error.to_string());
                         }
                         Ok(())
                     })?,
@@ -753,6 +791,7 @@ impl NshSurface {
                 },
             );
             let children = Rc::downgrade(&viewport);
+            let layout_queue = Arc::downgrade(&queue);
             viewport.borrow_mut().on_custom_layout(move |event| {
                 callback(|| {
                     event.set_layout_position(0, 0)?;
@@ -760,6 +799,9 @@ impl NshSurface {
                         for child in parent.borrow().children() {
                             event.layout_child(&child.borrow(), 0, 0)?;
                         }
+                    }
+                    if let Some(queue) = layout_queue.upgrade() {
+                        queue.call(Message::Layout, ThreadsafeFunctionCallMode::NonBlocking);
                     }
                     Ok(())
                 })
@@ -1159,6 +1201,32 @@ impl NshSurface {
         Ok(())
     }
 
+    /// Sets this app's storage directory for subsequent loads; omitted follows filesDir.
+    #[napi]
+    pub fn set_storage_directory(&self, path: Option<String>) -> Result<()> {
+        self.check()?;
+        let path = crate::app::options::directory(path)?;
+        self.state
+            .try_borrow_mut()
+            .map_err(reentry)?
+            .config_mut()?
+            .storage = path;
+        Ok(())
+    }
+
+    /// Sets disk cache options for subsequent loads; omitted restores the host's defaults.
+    #[napi]
+    pub fn set_cache_options(
+        &self,
+        options: Option<crate::app::options::NshCacheOptions>,
+    ) -> Result<()> {
+        self.check()?;
+        let mut state = self.state.try_borrow_mut().map_err(reentry)?;
+        let config = state.config_mut()?;
+        config.cache = options.unwrap_or_default().resolve(&config.host)?;
+        Ok(())
+    }
+
     /// Applies the embedding app's theme overrides (a shadcn/ui `cssVars` theme JSON string,
     /// or `null`/`undefined` to restore the app's own theme), taking effect immediately and
     /// for all subsequent loads on this surface.
@@ -1312,6 +1380,18 @@ impl NshSurface {
     }
 }
 impl NshSurface {
+    /// Loads a Rust root on the same engine, lifecycle and native surface as TSX.
+    /// Call from the window's UI thread; assets use this surface's host resources.
+    pub fn load_root(&self, env: Env, root: nsh_core::element::Root) -> Result<()> {
+        self.check()?;
+        let mut state = self.state.try_borrow_mut().map_err(reentry)?;
+        #[cfg(feature = "dev")]
+        state.disconnect_dev();
+        state.next_load()?;
+        let assets = state.config()?.assets.clone();
+        state.accept_app(env, App::rust(root, assets))
+    }
+
     fn host(&self) -> Result<Arc<crate::app::session::Services>> {
         if self.disposed.get() {
             return Err(Error::from_reason("surface is disposed"));

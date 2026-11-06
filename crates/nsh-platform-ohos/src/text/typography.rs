@@ -12,8 +12,8 @@ use std::{
 
 use nsh_core::{AttributedText, Color, Point, Points, Size, TextAlign, TextEngine, TextLayout};
 use ohos_drawing_binding::{
-    Canvas, FontCollection, FontSlant, FontStyle, FontWeight, FontWidth, TextDirection, TextStyle,
-    Typography, TypographyBuilder, TypographyStyle,
+    Canvas, FontSlant, FontStyle, FontWeight, FontWidth, TextDirection, TextStyle, Typography,
+    TypographyBuilder, TypographyStyle,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -50,6 +50,7 @@ pub(crate) struct NativeText {
     pub(crate) text: Arc<str>,
     pub(crate) links: Vec<(nsh_core::TextLink, Vec<[f32; 4]>)>,
     pub(crate) attachments: Vec<Option<Point<Points>>>,
+    pub(crate) selectable: bool,
     pub(crate) selection: Option<crate::text::selection::layout::Layout>,
     pub(crate) selection_color: Option<Color>,
     _budget: Option<Reservation>,
@@ -176,20 +177,16 @@ impl Prepared {
 }
 
 pub(crate) struct OhosTextEngine {
-    fonts: RefCell<FontCollection>,
+    fonts: Arc<Mutex<super::fonts::Fonts>>,
     scale: f32,
-    font_data: RefCell<Vec<Arc<[u8]>>>,
     budget: Arc<AtomicUsize>,
 }
 
 impl OhosTextEngine {
-    pub(crate) fn new(scale: f32) -> Self {
+    pub(crate) fn new(scale: f32, fonts: Arc<Mutex<super::fonts::Fonts>>) -> Self {
         Self {
-            // The legacy collection supports only one paragraph builder.
-            // A shared collection is reusable within this engine thread.
-            fonts: RefCell::new(FontCollection::shared()),
+            fonts,
             scale,
-            font_data: RefCell::default(),
             budget: Arc::default(),
         }
     }
@@ -259,7 +256,8 @@ impl TextEngine for OhosTextEngine {
             .map_or_else(Vec::new, |raster| raster.native.attachments.clone())
     }
     fn register_font(&self, data: &[u8]) -> Result<(), String> {
-        let face = ttf_parser::Face::parse(data, 0).map_err(|e| e.to_string())?;
+        let data = nsh_core::font_data(data)?;
+        let face = ttf_parser::Face::parse(&data, 0).map_err(|e| e.to_string())?;
         let family = face
             .names()
             .into_iter()
@@ -272,14 +270,16 @@ impl TextEngine for OhosTextEngine {
             .find_map(|name| name.to_string())
             .filter(|name| !name.is_empty() && !name.contains('\0'))
             .ok_or("font has no valid family name")?;
-        let mut bytes: Arc<[u8]> = Arc::from(data);
-        self.fonts
-            .borrow_mut()
+        let mut bytes: Arc<[u8]> = Arc::from(data.as_ref());
+        let mut fonts = self.fonts.lock().expect("font collection");
+        fonts
+            .collection
             .register_font_buffer(&family, Arc::get_mut(&mut bytes).expect("new font buffer"))
             .map_err(|e| e.to_string())?;
         // Retain the buffer for the font collection's lifetime, even on SDKs
         // where registration copies it internally.
-        self.font_data.borrow_mut().push(bytes);
+        fonts.data.push(bytes);
+        fonts.generation += 1;
         Ok(())
     }
 
@@ -313,7 +313,8 @@ impl TextEngine for OhosTextEngine {
                 log::warn!("OHOS text ellipsis: {error}");
             }
         }
-        let mut builder = TypographyBuilder::new(&mut style, &mut self.fonts.borrow_mut());
+        let mut fonts = self.fonts.lock().expect("font collection");
+        let mut builder = TypographyBuilder::new(&mut style, &mut fonts.collection);
         // Core spans use UTF-16 offsets, including supplementary characters.
         let single_plain_span = text.spans.len() == 1 && text.attachments.is_empty();
         let is_ascii = text.text.is_ascii();
@@ -402,9 +403,7 @@ impl TextEngine for OhosTextEngine {
             }
             if let Some(family) = span.style.font_family {
                 let family = family.name();
-                if !family.contains('\0') {
-                    style.set_font_families(&[&family]);
-                }
+                style.set_font_families(&super::fonts::families(&family));
             }
             if span.style.line_height.0 > 0.0
                 && span.style.font_size.0 > 0.0
@@ -451,12 +450,12 @@ impl TextEngine for OhosTextEngine {
             paragraph: RefCell::new(Arc::new(Mutex::new(Paragraph {
                 native: builder.build(),
                 width: None,
-                _fonts: self.font_data.borrow().clone(),
+                _fonts: fonts.data.clone(),
             }))),
             source: text.clone(),
             single_line_ltr: !rtl && matches!(text.align, TextAlign::Auto | TextAlign::Left),
             has_attachments: !text.attachments.is_empty(),
-            selectable: (text.selectable == Some(true)).then(|| shared_text.clone()),
+            selectable: (text.selectable != Some(false)).then(|| shared_text.clone()),
             text: shared_text,
             no_wrap: text.no_wrap,
             links: text.links.clone(),
@@ -514,6 +513,7 @@ impl TextEngine for OhosTextEngine {
             text: prepared.text.clone(),
             links: Vec::new(),
             attachments: Vec::new(),
+            selectable: prepared.source.selectable == Some(true),
             selection: None,
             selection_color: prepared.selection_color,
             _budget: None,
@@ -710,7 +710,7 @@ impl TextEngine for OhosTextEngine {
                 Ok(commands) => {
                     *raster.drawing.get_mut().expect("new text drawing") = Some(TextDrawing {
                         commands,
-                        _fonts: self.font_data.borrow().clone(),
+                        _fonts: self.fonts.lock().expect("font collection").data.clone(),
                     });
                 }
                 Err(error) => log::warn!("OHOS text recording: {error}"),

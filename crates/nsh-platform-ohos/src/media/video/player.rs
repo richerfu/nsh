@@ -121,7 +121,7 @@ impl Worker {
             window: None,
             playback: None,
             generation: 0,
-            ui_ready: owner.host.has_ui_context(),
+            ui_ready: owner.host.check().is_ok(),
             failed: false,
             notice_send,
             notices,

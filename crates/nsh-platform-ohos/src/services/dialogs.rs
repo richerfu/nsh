@@ -43,6 +43,7 @@ pub(crate) struct Dialogs {
     context: Rc<UiContext>,
     alerts: VecDeque<Alert>,
     overlay: Option<crate::app::session::Overlay>,
+    tokens: Option<std::sync::Arc<nsh_core::element::Tokens>>,
 }
 impl Dialogs {
     pub(crate) fn new(context: Rc<UiContext>) -> Self {
@@ -50,7 +51,19 @@ impl Dialogs {
             context,
             alerts: VecDeque::new(),
             overlay: None,
+            tokens: None,
         }
+    }
+    pub(crate) fn tokens(&mut self, tokens: std::sync::Arc<nsh_core::element::Tokens>) {
+        self.tokens = Some(tokens);
+    }
+    fn color(&self, name: &str, dark: bool, fallback: u32) -> u32 {
+        self.tokens
+            .as_ref()
+            .and_then(|tokens| tokens.color(name))
+            .map_or(fallback, |value| {
+                crate::text::typography::argb(if dark { value.dark } else { value.light }.into())
+            })
     }
     pub(crate) fn visible(&self) -> bool {
         !self.alerts.is_empty()
@@ -81,7 +94,11 @@ impl Dialogs {
             .resolve(self.context.platform.get().color_scheme)
             == nsh_engine::ColorScheme::Dark;
         let width = (self.context.platform.get().window.width.0 - 32.0).clamp(120.0, 360.0);
-        let fg = if dark { 0xffeeeeee } else { 0xff202020 };
+        let fg = self.color(
+            "popover-foreground",
+            dark,
+            if dark { 0xffeeeeee } else { 0xff202020 },
+        );
         let mut height = 16.0;
         let make_text = |text: &str, size: f32, h: f32, color: u32| -> Result<NativeNode> {
             let node = Text::new()?.into_node();
@@ -132,9 +149,9 @@ impl Dialogs {
         ordered.sort_by_key(|(_, button)| button.style == DialogButtonStyle::Cancel);
         for (index, button) in ordered {
             let color = if button.style == DialogButtonStyle::Destructive {
-                0xffd03030
+                self.color("destructive", dark, 0xffd03030)
             } else {
-                0xff2878e8
+                self.color("primary", dark, 0xff2878e8)
             };
             let node = make_text(&button.text, 18.0, 48.0, color)?;
             node.borrow()
@@ -158,7 +175,11 @@ impl Dialogs {
         root.borrow()
             .height(height.min((self.context.platform.get().window.height.0 * 0.8).max(96.0)))?;
         root.borrow_mut().add_child(column)?;
-        dialog.background_color(if dark { 0xff202020 } else { 0xfffafafa })?;
+        dialog.background_color(self.color(
+            "popover",
+            dark,
+            if dark { 0xff202020 } else { 0xfffafafa },
+        ))?;
         dialog.content_node(&root)?;
         let route = self.context.dispatcher.clone();
         let id = request.id;

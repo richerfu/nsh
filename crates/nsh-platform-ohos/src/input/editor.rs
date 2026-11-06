@@ -67,7 +67,7 @@ impl Input {
             || !self
                 .owner
                 .upgrade()
-                .is_some_and(|owner| owner.host.has_ui_context())
+                .is_some_and(|owner| owner.host.check().is_ok())
         {
             return Ok(None);
         }
@@ -188,7 +188,7 @@ impl Input {
         let Some(owner) = self.owner.upgrade().filter(|_| !self.closed.get()) else {
             return;
         };
-        if !owner.host.has_ui_context() {
+        if owner.host.check().is_err() {
             return;
         }
         let Some(target_id) = self.target_id() else {
@@ -246,7 +246,7 @@ impl Input {
             font_family: config
                 .style
                 .font_family
-                .map(|family| family.name().to_string()),
+                .map(|family| crate::text::fonts::families(&family.name()).join(",")),
             italic: config.style.italic,
             color: argb(config.style.color),
             placeholder_color: argb(config.placeholder_color.unwrap_or(config.style.color)),

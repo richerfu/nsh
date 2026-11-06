@@ -11,3 +11,5 @@ pub(crate) mod shader;
 pub(crate) mod shadow;
 pub(crate) mod shadow_geometry;
 pub(crate) mod transition;
+
+pub(crate) mod frame_clock;

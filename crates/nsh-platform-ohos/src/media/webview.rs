@@ -122,7 +122,7 @@ impl WebView {
         owner.native.borrow_mut().insert_child(native.clone(), 0)?;
         let mut target = None;
         let mut route = None;
-        if owner.host.has_ui_context() {
+        if owner.host.check().is_ok() {
             let attachment = NativeAttachment::new(&native)?;
             let id = attachment.id();
             ROUTES.with(|routes| {
@@ -141,7 +141,7 @@ impl WebView {
             target = Some(attachment);
         }
         Ok(Self {
-            ready: Cell::new(owner.host.has_ui_context()),
+            ready: Cell::new(owner.host.check().is_ok()),
             node,
             native,
             target: RefCell::new(target),
@@ -214,36 +214,43 @@ impl WebView {
                 target_id,
                 kind: "reload".into(),
                 script: None,
+                ..Default::default()
             },
             Command::GoBack => WebCommand {
                 target_id,
                 kind: "go-back".into(),
                 script: None,
+                ..Default::default()
             },
             Command::GoForward => WebCommand {
                 target_id,
                 kind: "go-forward".into(),
                 script: None,
+                ..Default::default()
             },
             Command::StopLoading => WebCommand {
                 target_id,
                 kind: "stop-loading".into(),
                 script: None,
+                ..Default::default()
             },
             Command::Focus => WebCommand {
                 target_id,
                 kind: "focus".into(),
                 script: None,
+                ..Default::default()
             },
             Command::Blur => WebCommand {
                 target_id,
                 kind: "evaluate".into(),
                 script: Some("document.activeElement?.blur();".into()),
+                ..Default::default()
             },
             Command::InjectJavaScript(script) => WebCommand {
                 target_id,
                 kind: "evaluate".into(),
                 script: Some(script),
+                ..Default::default()
             },
             Command::PostMessage(data) => {
                 let literal = serde_json::to_string(&data).expect("string literal");
@@ -253,9 +260,43 @@ impl WebView {
                     script: Some(format!(
                         "window.dispatchEvent(new MessageEvent('message',{{data:{literal}}}));document.dispatchEvent(new MessageEvent('message',{{data:{literal}}}));"
                     )),
+                    ..Default::default()
                 }
             }
-            _ => return Ok(()),
+            Command::SendInput(input) => {
+                use nsh_core::{WebInput, WebKey};
+                let mut command = WebCommand {
+                    target_id,
+                    ..Default::default()
+                };
+                match input {
+                    WebInput::Click { x, y } => {
+                        command.kind = "input-click".into();
+                        command.x = Some(f64::from(x.0));
+                        command.y = Some(f64::from(y.0));
+                    }
+                    WebInput::Text(text) => {
+                        command.kind = "input-text".into();
+                        command.script = Some(text);
+                    }
+                    WebInput::Key(key) => {
+                        command.kind = "input-key".into();
+                        command.script = Some(
+                            match key {
+                                WebKey::Enter => "Enter",
+                                WebKey::Tab => "Tab",
+                                WebKey::Escape => "Escape",
+                                WebKey::Backspace => "Backspace",
+                                _ => return Err(Error::Unsupported("WebView input key")),
+                            }
+                            .into(),
+                        );
+                    }
+                    _ => return Err(Error::Unsupported("WebView input")),
+                }
+                command
+            }
+            _ => return Err(Error::Unsupported("WebView command")),
         };
         node.web_command(web_command);
         Ok(())
@@ -367,6 +408,12 @@ impl WebView {
             user_agent: props.user_agent.as_deref().map(str::to_owned),
             injected_javascript: props.injected_js.as_deref().map(str::to_owned),
             document_start_script,
+            download_directory: node
+                .host
+                .data_directory()
+                .join("downloads")
+                .display()
+                .to_string(),
         });
         Ok(())
     }
@@ -479,6 +526,21 @@ pub(crate) fn on_navigate(target_id: u32, url: &str) -> napi_ohos::Result<bool> 
     })
 }
 
+pub(crate) fn download_allowed(target_id: u32, url: &str) -> napi_ohos::Result<bool> {
+    NativeAttachment::dispatch(target_id, || {
+        let Some(route) = ROUTES.with(|routes| routes.borrow().get(&target_id).cloned()) else {
+            return false;
+        };
+        let Some(node) = route.node.upgrade() else {
+            return false;
+        };
+        node.interaction.mask().contains(EventKind::Download)
+            && (route.access.allows_webview(url)
+                || (route.access.allows_webviews()
+                    && (url.starts_with("data:") || url.starts_with("blob:"))))
+    })
+}
+
 pub(crate) fn on_event(event: WebEvent) -> napi_ohos::Result<bool> {
     NativeAttachment::dispatch(event.target_id, || {
         let Some(route) = ROUTES.with(|routes| routes.borrow().get(&event.target_id).cloned())
@@ -526,6 +588,26 @@ pub(crate) fn on_event(event: WebEvent) -> napi_ohos::Result<bool> {
                     },
                     EventPayload::None,
                 );
+            }
+            "download" => {
+                if let Some(download) = event.download {
+                    node.control.dispatch_event(
+                        node.id,
+                        EventKind::Download,
+                        EventPayload::Map(vec![
+                            ("state", PayloadValue::Str(download.state)),
+                            ("id", PayloadValue::Str(download.id)),
+                            ("url", PayloadValue::Str(event.url)),
+                            ("filename", PayloadValue::Str(download.filename)),
+                            ("path", PayloadValue::Str(download.path)),
+                            ("bytes", PayloadValue::Number(download.bytes)),
+                            (
+                                "message",
+                                PayloadValue::Str(event.message.unwrap_or_default()),
+                            ),
+                        ]),
+                    );
+                }
             }
             "error" => {
                 node.control.dispatch_event(

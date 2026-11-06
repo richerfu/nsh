@@ -507,7 +507,7 @@ impl NativeImage {
                 descriptor.set_animation_duration(total_ms);
                 descriptor.set_animation_iteration(-1);
                 #[cfg(feature = "api-23")]
-                if crate::get_capabilities().api23 {
+                {
                     let _ = descriptor.set_animation_frame_durations(&mut frame_durations);
                     let _ = descriptor.set_animation_auto_play(1);
                 }

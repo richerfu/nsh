@@ -80,7 +80,7 @@ impl Wrapper {
             || !self
                 .owner
                 .upgrade()
-                .is_some_and(|owner| owner.host.has_ui_context())
+                .is_some_and(|owner| owner.host.check().is_ok())
         {
             return Ok(None);
         }
@@ -122,24 +122,19 @@ impl Wrapper {
                 return Err(error);
             }
         };
-        crate::interop::texture_input::TextureInput::install(owner, &outer, &owner.native, false);
         let route = ViewRoute::new(target.id(), Rc::downgrade(owner), &owner.native);
         let weak = Rc::downgrade(owner);
         outer.borrow_mut().on_custom_draw(move |event| {
             if let Some(owner) = weak.upgrade()
-                && let Some(wrapper) = owner.wrapper.borrow().as_ref()
+                && owner.scene_active()
                 && let Some(raw) = event
                     .draw_context_in_draw()
                     .and_then(|context| context.canvas())
             {
                 // SAFETY: ArkUI owns this canvas until this draw callback returns.
                 let canvas = unsafe { ohos_drawing_binding::Canvas::from_raw_borrowed(raw) };
-                if owner.scene_active() {
-                    if let Some(scene) = owner.scene.borrow().as_ref() {
-                        scene.draw(owner.id, &canvas);
-                    }
-                } else if let Some(composite) = wrapper.composite.borrow().as_ref() {
-                    composite.draw(&canvas);
+                if let Some(scene) = owner.scene.borrow().as_ref() {
+                    scene.draw(owner.id, &canvas);
                 }
             }
         });
@@ -169,6 +164,11 @@ impl Wrapper {
                     {
                         result?;
                     }
+                    if let Some(wrapper) = owner.wrapper.borrow().as_ref()
+                        && let Some(composite) = wrapper.composite.borrow().as_ref()
+                    {
+                        composite.measure(event)?;
+                    }
                 }
                 Ok(())
             })
@@ -195,6 +195,12 @@ impl Wrapper {
                 {
                     result?;
                 }
+                if let Some(owner) = weak.upgrade()
+                    && let Some(wrapper) = owner.wrapper.borrow().as_ref()
+                    && let Some(composite) = wrapper.composite.borrow().as_ref()
+                {
+                    composite.layout(event)?;
+                }
                 Ok(())
             })
         });
@@ -213,7 +219,7 @@ impl Wrapper {
     }
     /// Sends the ArkTS view its settings; whether they changed.
     fn update(&self, owner: &Node) -> Result<bool> {
-        if self.closed.get() || !owner.host.has_ui_context() {
+        if self.closed.get() || owner.host.check().is_err() {
             return Ok(false);
         }
         self.ensure_context(owner)?;
@@ -229,6 +235,16 @@ impl Wrapper {
             .is_some_and(|previous| previous.texture_surface != texture_surface)
         {
             self.replace_target(owner)?;
+        }
+        if let Some(route) = self.route.borrow().as_ref() {
+            route.texture(
+                texture_surface.is_some()
+                    || self
+                        .settings
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|previous| previous.texture_surface.is_some()),
+            );
         }
         let Some(target_id) = self.target.borrow().as_ref().map(NativeAttachment::id) else {
             return Ok(false);
@@ -262,9 +278,9 @@ impl Wrapper {
             role: role(spec.role).to_owned(),
             checked: spec.state.checked.map(|value| value == Checked::True),
             selected: spec.state.selected,
-            api23: crate::get_capabilities().api23,
-            api26: crate::get_capabilities().api26,
-            actions: if crate::get_capabilities().api26 {
+            api23: cfg!(feature = "api-23"),
+            api26: cfg!(feature = "api-26"),
+            actions: if cfg!(feature = "api-26") {
                 spec.actions
                     .iter()
                     .take(16)
@@ -334,7 +350,7 @@ impl Node {
             return Ok(());
         }
         let spec = self.accessibility_state.spec.borrow();
-        if crate::get_capabilities().api26 && spec.actions.len() > 16 {
+        if cfg!(feature = "api-26") && spec.actions.len() > 16 {
             log::warn!("OHOS accessibility: showing the first 16 custom actions");
         }
         let non_blur_filter = self.style.borrow().effects.as_ref().is_some_and(|effects| {
@@ -343,11 +359,15 @@ impl Node {
                 .iter()
                 .any(|filter| !matches!(filter, nsh_core::Filter::Blur(_)))
         });
-        let needed = self.kind == nsh_core::ViewKind::Modal
+        // Establish the root's layout host before it has scroll descendants.
+        // Adding it around an already laid-out tree resets native scroll offsets.
+        let needed = self.id == nsh_core::ROOT_ID
+            || self.kind == nsh_core::ViewKind::Modal
             || self.scene_active() && self.has_native_paint()
             || self.selectable()
             || owns_semantics(&spec)
-            || non_blur_filter;
+            || non_blur_filter
+            || !self.shader_layers.borrow().is_empty();
         drop(spec);
         if needed && self.wrapper.borrow().is_none() {
             self.enable_layout();
@@ -392,7 +412,9 @@ impl Node {
             #[cfg(feature = "api-23")]
             self.accessibility_provider.clear();
         }
-        let needs_texture = self.scene_active() && self.has_native_paint() || non_blur_filter;
+        let needs_texture = self.scene_active() && self.has_native_paint()
+            || non_blur_filter
+            || !self.shader_layers.borrow().is_empty();
         if !needs_texture
             && let Some(wrapper) = self.wrapper.borrow().as_ref()
             && wrapper.composite.borrow_mut().take().is_some()
@@ -405,6 +427,11 @@ impl Node {
                 ohos_arkui_binding::types::attribute::ArkUINodeAttributeType::Visibility,
                 0,
             )?;
+            // Drop ArkUI's retained recording of the last composite bitmap.
+            wrapper
+                .outer
+                .borrow()
+                .mark_dirty(NodeDirtyFlag::NeedRender)?;
         }
         if needs_texture
             && let Some(wrapper) = self.wrapper.borrow().as_ref()
@@ -488,8 +515,9 @@ impl Node {
             // may have changed.
             let frame = self.frame.get();
             let size = Some((frame.width, frame.height));
+            let resized = wrapper.measured.replace(size) != size;
             let modal = self.modal.borrow().is_some();
-            if changed || composite || modal || wrapper.measured.replace(size) != size {
+            if changed || composite || modal || resized {
                 wrapper
                     .outer
                     .borrow()
@@ -513,6 +541,7 @@ impl Node {
             .map_or_else(|| self.native.clone(), |wrapper| wrapper.outer.clone())
     }
     pub(crate) fn composite_ready(&self, generation: u32) -> Result<()> {
+        let mut initialized = false;
         if let Some(scroll) = self.scroll.borrow().as_ref()
             && let Some(plane) = scroll.overlay.borrow().as_ref()
         {
@@ -525,14 +554,20 @@ impl Node {
                 .as_ref()
                 .filter(|composite| composite.generation == generation)
         {
-            composite.ready();
+            initialized = composite.ready();
+            if composite.needs_shader_frame() {
+                self.animator.request_frame();
+            }
             wrapper
                 .outer
                 .borrow()
                 .mark_dirty(NodeDirtyFlag::NeedRender)?;
         }
-        self.update_wrapper()?;
-        self.invalidate_scene();
+        if initialized {
+            self.restore_style()?;
+            self.update_wrapper()?;
+            self.invalidate_scene();
+        }
         Ok(())
     }
 }
@@ -557,7 +592,7 @@ fn role(role: R) -> &'static str {
 
 fn owns_semantics(spec: &nsh_core::Accessibility) -> bool {
     spec.state.checked.is_some()
-        || crate::get_capabilities().api26
+        || cfg!(feature = "api-26")
             && spec.actions.iter().any(|action| {
                 !matches!(
                     action.name.as_ref(),

@@ -108,9 +108,11 @@ impl<'a, F: Fn(Key) -> Option<&'a Image>> Renderer<'a, F> {
         destination.concat(&pixel_matrix(node.transform, self.scale));
         let effects = node.style.effects.as_ref();
         let filters = effects.map_or(&[][..], |effects| effects.filters.as_slice());
+        let masks = effects.map_or(&[][..], |effects| effects.mask_images.as_slice());
         let backdrop = effects.map_or(&[][..], |effects| effects.backdrop_filters.as_slice());
         // These are precisely the properties that establish a backdrop root.
-        let grouped = node.opacity < 1.0
+        let grouped = !masks.is_empty()
+            || node.opacity < 1.0
             || !filters.is_empty()
             || !backdrop.is_empty()
             || node.style.blend_mode != BlendMode::Normal;
@@ -151,6 +153,31 @@ impl<'a, F: Fn(Key) -> Option<&'a Image>> Renderer<'a, F> {
             let image = Image::copy(layer.bitmap().unwrap(), left, top)
                 .filtered(filters, self.scale)
                 .map_err(str::to_owned)?;
+            let image = if masks.is_empty() {
+                image
+            } else {
+                let canvas = Canvas::with_bitmap(image.bitmap);
+                let mut blend = Brush::new();
+                blend.set_blend_mode(ohos_drawing_binding::BlendMode::DstIn);
+                // All mask layers compose together before their alpha masks
+                // the filtered group; no pixels persist between scene frames.
+                canvas.save_layer(None, Some(&blend));
+                canvas.translate(-image.x, -image.y);
+                canvas.scale(self.scale, self.scale);
+                for mask in masks.iter().rev() {
+                    let brush = crate::render::decor::gradient(mask, node.size);
+                    canvas.attach_brush(&brush);
+                    canvas.draw_rect(&ohos_drawing_binding::Rect::new(
+                        0.0,
+                        0.0,
+                        node.size.width,
+                        node.size.height,
+                    ));
+                    canvas.detach_brush();
+                }
+                canvas.restore();
+                Image::copy(canvas.bitmap().unwrap(), image.x, image.y)
+            };
             self.draw_group(&image, destination, node.opacity, node.style.blend_mode)?;
             self.pixels -= pixels;
         } else {

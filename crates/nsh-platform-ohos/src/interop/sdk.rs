@@ -160,14 +160,17 @@ pub(crate) struct WebSettings {
     pub user_agent: Option<String>,
     pub injected_javascript: Option<String>,
     pub document_start_script: String,
+    pub download_directory: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 #[napi(object)]
 pub(crate) struct WebCommand {
     pub target_id: u32,
     pub kind: String,
     pub script: Option<String>,
+    pub x: Option<f64>,
+    pub y: Option<f64>,
 }
 
 #[napi(object)]
@@ -181,12 +184,23 @@ pub(crate) struct WebEvent {
     pub can_go_forward: bool,
     pub message: Option<String>,
     pub code: Option<i32>,
+    pub download: Option<WebDownload>,
+}
+
+#[napi(object)]
+pub(crate) struct WebDownload {
+    pub state: String,
+    pub id: String,
+    pub filename: String,
+    pub path: String,
+    pub bytes: f64,
 }
 
 // Only weak routes live here. Nodes, native targets and engines retain their own lifetime.
 struct ViewRegistration {
     owner: Weak<Node>,
     inner: std::rc::Weak<std::cell::RefCell<ohos_arkui_binding::common::node::ArkUINode>>,
+    export: std::rc::Rc<super::texture_export::Export>,
 }
 thread_local! {
     static VIEWS: RefCell<FxHashMap<u32, ViewRegistration>> = RefCell::default();
@@ -196,23 +210,34 @@ thread_local! {
 pub(crate) struct ViewRoute {
     id: u32,
     owner: Weak<Node>,
+    export: std::rc::Rc<super::texture_export::Export>,
 }
 impl ViewRoute {
     pub(crate) fn new(id: u32, owner: Weak<Node>, inner: &NativeNode) -> Self {
+        let export = std::rc::Rc::new(super::texture_export::Export::default());
         VIEWS.with(|views| {
             views.borrow_mut().insert(
                 id,
                 ViewRegistration {
                     owner: owner.clone(),
                     inner: std::rc::Rc::downgrade(inner),
+                    export: export.clone(),
                 },
             )
         });
-        Self { id, owner }
+        Self { id, owner, export }
+    }
+    pub(crate) fn texture(&self, enabled: bool) {
+        // A route is replaced at each export boundary. Subsequent style updates
+        // may precede its deferred ArkTS attachment; they must not disarm repair.
+        if enabled {
+            self.export.enabled.set(true);
+        }
     }
 }
 impl Drop for ViewRoute {
     fn drop(&mut self) {
+        self.export.restore();
         VIEWS.with(|views| {
             let mut views = views.borrow_mut();
             if views
@@ -290,18 +315,35 @@ pub(crate) fn nsh_attach_native_subtree(
     #[napi(ts_arg_type = "FrameNode")] content: Object<'_>,
     #[napi(ts_arg_type = "NodeContent")] slot: Object<'_>,
 ) -> Result<()> {
-    let (_owner, inner) = VIEWS
+    let (owner, inner, export) = VIEWS
         .with(|views| {
-            views
-                .borrow()
-                .get(&target_id)
-                .and_then(|route| route.owner.upgrade().zip(route.inner.upgrade()))
+            views.borrow().get(&target_id).and_then(|route| {
+                route
+                    .owner
+                    .upgrade()
+                    .zip(route.inner.upgrade())
+                    .map(|(owner, inner)| (owner, inner, route.export.clone()))
+            })
         })
         .ok_or_else(|| Error::from_reason("Native subtree route is no longer live"))?;
     ohos_arkui_binding::common::node_registry::register(&inner.borrow(), inner.clone())
         .and_then(|()| inner.borrow().add_event_receiver())
         .map_err(|error| Error::from_reason(error.to_string()))?;
-    NativeAttachment::attach_subtree(&env, target_id, &content, &slot)
+    export
+        .prepare(&owner, &inner)
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+    if let Err(error) = NativeAttachment::attach_subtree(&env, target_id, &content, &slot) {
+        export.restore();
+        return Err(error);
+    }
+    export
+        .after_attach(&inner)
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+    // Reparenting into a texture export changes the render target. ArkUI's
+    // retained custom draw recordings must be rebuilt on that target too.
+    owner
+        .invalidate_subtree_paint()
+        .map_err(|error| Error::from_reason(error.to_string()))
 }
 
 #[napi]
@@ -389,4 +431,9 @@ pub(crate) fn nsh_web_navigate(target_id: u32, url: String) -> Result<bool> {
 #[napi]
 pub(crate) fn nsh_web_event(event: WebEvent) -> Result<bool> {
     crate::media::webview::on_event(event)
+}
+
+#[napi]
+pub(crate) fn nsh_web_download_allowed(target_id: u32, url: String) -> napi_ohos::Result<bool> {
+    crate::media::webview::download_allowed(target_id, &url)
 }

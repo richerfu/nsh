@@ -24,15 +24,16 @@ fn egl_error(error: egl::Error) -> Error {
     }
 }
 
-struct Context {
+pub(super) struct Context {
     egl: egl::Instance<egl::Static>,
     display: egl::Display,
+    config: egl::Config,
     context: egl::Context,
     surface: egl::Surface,
     // EGL contexts must remain on their creating thread, even if glow is Send.
     _thread: PhantomData<Rc<()>>,
 }
-struct Current<'a> {
+pub(super) struct Current<'a> {
     context: &'a Context,
     previous: (
         Option<egl::Display>,
@@ -92,7 +93,7 @@ impl Context {
                 display,
                 &[
                     egl::SURFACE_TYPE,
-                    egl::PBUFFER_BIT,
+                    egl::PBUFFER_BIT | egl::WINDOW_BIT,
                     egl::RENDERABLE_TYPE,
                     egl::OPENGL_ES2_BIT,
                     egl::RED_SIZE,
@@ -113,7 +114,7 @@ impl Context {
                 display,
                 config,
                 None,
-                &[egl::CONTEXT_CLIENT_VERSION, 2, egl::NONE],
+                &[egl::CONTEXT_CLIENT_VERSION, 3, egl::NONE],
             )
             .map_err(egl_error)?;
         let surface = match egl.create_pbuffer_surface(
@@ -136,12 +137,13 @@ impl Context {
         Ok(Self {
             egl,
             display,
+            config,
             context,
             surface,
             _thread: PhantomData,
         })
     }
-    fn enter(&self) -> Result<Current<'_>, Error> {
+    pub(super) fn enter(&self) -> Result<Current<'_>, Error> {
         let previous_api = self.egl.query_api();
         self.egl.bind_api(egl::OPENGL_ES_API).map_err(egl_error)?;
         let mut client_api = ClientApi {
@@ -183,12 +185,37 @@ impl Drop for Context {
 }
 
 /// A thread-bound offscreen context shared by NativeImage readers on one worker.
+#[derive(Clone)]
 pub(crate) struct TextureContext {
-    context: Rc<Context>,
-    gl: Rc<glow::Context>,
+    pub(super) context: Rc<Context>,
+    pub(super) gl: Rc<glow::Context>,
     max_texture_size: u32,
 }
 impl TextureContext {
+    pub(super) fn window(
+        &self,
+        native: ohos_native_window_binding::NativeWindow,
+    ) -> Result<Window, Error> {
+        let current = self.context.enter()?;
+        // SAFETY: both handles belong to OHOS's default display; Window owns
+        // the retained native window until after its EGL surface is destroyed.
+        let surface = unsafe {
+            self.context.egl.create_window_surface(
+                self.context.display,
+                self.context.config,
+                native.raw().cast(),
+                None,
+            )
+        }
+        .map_err(egl_error)?;
+        drop(current);
+        Ok(Window {
+            context: self.context.clone(),
+            surface,
+            native,
+            size: std::cell::Cell::new((0, 0)),
+        })
+    }
     /// Creates an offscreen GLES context on the calling rendering worker.
     pub(super) fn new() -> Result<Self, Error> {
         let context = Rc::new(Context::new()?);
@@ -215,6 +242,56 @@ impl TextureContext {
             gl: Rc::new(gl),
             max_texture_size,
         })
+    }
+}
+
+/// Worker-owned output queue. Entering it preserves the caller's EGL binding.
+pub(super) struct Window {
+    context: Rc<Context>,
+    surface: egl::Surface,
+    native: ohos_native_window_binding::NativeWindow,
+    size: std::cell::Cell<(u32, u32)>,
+}
+impl Window {
+    pub(super) fn raw(&self) -> usize {
+        self.native.raw() as usize
+    }
+    pub(super) fn enter(&self, width: u32, height: u32) -> Result<Current<'_>, Error> {
+        if self.size.get() != (width, height) {
+            self.native
+                .set_buffer_geometry(width as i32, height as i32)
+                .map_err(|_| failed("window geometry"))?;
+            self.size.set((width, height));
+        }
+        let current = self.context.enter()?;
+        self.context
+            .egl
+            .make_current(
+                self.context.display,
+                Some(self.surface),
+                Some(self.surface),
+                Some(self.context.context),
+            )
+            .map_err(egl_error)?;
+        self.context
+            .egl
+            .swap_interval(self.context.display, 0)
+            .map_err(egl_error)?;
+        Ok(current)
+    }
+    pub(super) fn present(&self) -> Result<(), Error> {
+        self.context
+            .egl
+            .swap_buffers(self.context.display, self.surface)
+            .map_err(egl_error)
+    }
+}
+impl Drop for Window {
+    fn drop(&mut self) {
+        let _ = self
+            .context
+            .egl
+            .destroy_surface(self.context.display, self.surface);
     }
 }
 struct Objects {
@@ -320,7 +397,7 @@ impl TextureReader {
             for (kind, source) in [
                 (
                     glow::VERTEX_SHADER,
-                    "attribute vec2 position; uniform mat4 transform; varying vec2 uv; void main() { gl_Position = vec4(position, 0.0, 1.0); uv = (transform * vec4(position * 0.5 + 0.5, 0.0, 1.0)).xy; }",
+                    "attribute vec2 position; uniform mat4 transform; varying vec2 uv; void main() { gl_Position = vec4(position, 0.0, 1.0); uv = (transform * vec4(position.x * 0.5 + 0.5, 0.5 - position.y * 0.5, 0.0, 1.0)).xy; }",
                 ),
                 (
                     glow::FRAGMENT_SHADER,
@@ -416,24 +493,28 @@ impl TextureReader {
         }
         Ok(layout)
     }
-    /// Consume one pending frame and resolve its layout into linear RGBA.
-    /// The system waits for the acquire fence on this rendering worker.
-    pub(super) fn read(&mut self) -> Result<Option<RgbaFrame>, Error> {
+    /// Resolve a producer buffer to a top-left RGBA texture, entirely on GPU.
+    pub(super) fn update_texture(&mut self) -> Result<bool, Error> {
         let _current = self.context.enter()?;
         let (width, height) = self.size;
-        let layout = self.layout(width, height)?;
+        self.layout(width, height)?;
         let surface = self.surface.as_mut().unwrap();
         if !surface.update().map_err(native_error)? {
-            return Ok(None);
+            return Ok(false);
         }
         let transform = surface.transform().map_err(native_error)?;
-        let mut pixels = layout.allocate()?;
         // SAFETY: the context and every GL object are live on this thread;
         // storage and the readback slice have exactly width*height*4 bytes.
         unsafe {
             let gl = &self.gl;
             gl.bind_texture(glow::TEXTURE_2D, Some(self.target));
             if self.allocated != (width, height) {
+                for parameter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, parameter, glow::LINEAR as i32);
+                }
+                for parameter in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, parameter, glow::CLAMP_TO_EDGE as i32);
+                }
                 gl.tex_image_2d(
                     glow::TEXTURE_2D,
                     0,
@@ -473,6 +554,33 @@ impl TextureReader {
             gl.enable_vertex_attrib_array(0);
             gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 0, 0);
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            let code = gl.get_error();
+            if code != glow::NO_ERROR {
+                return Err(Error {
+                    operation: "GLES texture resolve",
+                    code: code as i32,
+                });
+            }
+        }
+        self.allocated = (width, height);
+        Ok(true)
+    }
+    pub(super) fn texture(&self) -> Option<(glow::Texture, u32, u32)> {
+        (self.allocated != (0, 0)).then_some((self.target, self.allocated.0, self.allocated.1))
+    }
+    /// CPU consumers (CSS composition) read only after the GPU resolve.
+    pub(super) fn read(&mut self) -> Result<Option<RgbaFrame>, Error> {
+        if !self.update_texture()? {
+            return Ok(None);
+        }
+        let _current = self.context.enter()?;
+        let (width, height) = self.allocated;
+        let mut pixels = self.layout(width, height)?.allocate()?;
+        // SAFETY: the framebuffer and exact-size RGBA storage belong to this
+        // current context; the resolved texture is attached by update_texture.
+        unsafe {
+            let gl = &self.gl;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.framebuffer));
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
             gl.read_pixels(
                 0,
@@ -490,13 +598,6 @@ impl TextureReader {
                     code: code as i32,
                 });
             }
-        }
-        self.allocated = (width, height);
-        // GLES readback starts with the bottom row; consumers use top-left RGBA.
-        let stride = layout.row_bytes;
-        for y in 0..height as usize / 2 {
-            let (top, bottom) = pixels.split_at_mut((height as usize - 1 - y) * stride);
-            top[y * stride..(y + 1) * stride].swap_with_slice(&mut bottom[..stride]);
         }
         Ok(Some(RgbaFrame {
             width,
@@ -554,7 +655,6 @@ pub(crate) struct RgbaFrame {
 mod layout {
     use super::{Error, failed};
     pub(super) struct Layout {
-        pub(super) row_bytes: usize,
         byte_len: usize,
     }
     pub(super) fn validate_size(width: u32, height: u32) -> Result<Layout, Error> {
@@ -571,10 +671,7 @@ mod layout {
             .checked_mul(height as usize)
             .filter(|n| *n <= isize::MAX as usize)
             .ok_or(failed("RGBA bytes"))?;
-        Ok(Layout {
-            row_bytes,
-            byte_len,
-        })
+        Ok(Layout { byte_len })
     }
     impl Layout {
         pub(super) fn allocate(&self) -> Result<Vec<u8>, Error> {

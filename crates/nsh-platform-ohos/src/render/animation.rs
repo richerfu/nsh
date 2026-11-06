@@ -31,6 +31,8 @@ pub(crate) struct Animator {
     control: EngineControl,
     dispatcher: std::sync::Weak<crate::app::runtime::Dispatcher>,
     clock: Instant,
+    frame_clock: RefCell<super::frame_clock::FrameClock>,
+    frame_time: std::cell::Cell<f64>,
 }
 
 impl Animator {
@@ -50,6 +52,8 @@ impl Animator {
             control,
             dispatcher,
             clock: Instant::now(),
+            frame_clock: RefCell::default(),
+            frame_time: std::cell::Cell::new(0.0),
         })
     }
     pub(crate) fn request_frame(&self) {
@@ -156,17 +160,21 @@ impl Animator {
     pub(crate) fn value(&self, node: u32) -> f32 {
         self.state.borrow().graph.value(node).unwrap_or_default()
     }
-    pub(crate) fn tick(&self) -> Result<bool> {
+    pub(crate) fn frame_time(&self) -> f64 {
+        self.frame_time.get()
+    }
+    pub(crate) fn tick(&self, timestamp: Option<u64>) -> Result<bool> {
+        let now = self.frame_clock.borrow_mut().sample(timestamp, self.now());
+        self.frame_time.set(now);
         let (was_animating, mut animating) = {
             let mut state = self.state.borrow_mut();
             let State { graph, finished } = &mut *state;
             let was = graph.is_animating();
             if was || self.dirty.get() {
-                graph.tick(self.clock.elapsed().as_secs_f64(), finished);
+                graph.tick(now / 1000.0, finished);
             }
             (was, graph.is_animating())
         };
-        let now = self.now();
         let selection_root = self.selection.borrow().upgrade();
         if let Some(root) = selection_root {
             let mut touches = root.touches.borrow_mut();

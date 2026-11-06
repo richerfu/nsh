@@ -1,6 +1,7 @@
 import "./src/main/ets/NshHost";
 
 export {
+  NshCacheOptions,
   NshCapabilities,
   NshEnvironment,
   NshHostReply,
@@ -14,3 +15,5 @@ export {
   initLogging,
   onBackPressIntercept,
 } from "libnsh_platform_ohos.so";
+
+export { onNotificationWant } from "./src/main/ets/NativeNotifications";

@@ -1,4 +1,5 @@
 import { BuilderNode } from "@ohos.arkui.node";
+import { fileIo as fs } from "@kit.CoreFileKit";
 import webview from "@ohos.web.webview";
 import { NshRuntimeContext } from "./NativeEditors";
 
@@ -13,12 +14,15 @@ export interface WebSettings {
   userAgent?: string | null;
   injectedJavascript?: string | null;
   documentStartScript: string;
+  downloadDirectory: string;
 }
 
 export interface WebCommand {
   targetId: number;
   kind: string;
   script?: string | null;
+  x?: number | null;
+  y?: number | null;
 }
 
 let webEngineInitialized = false;
@@ -95,6 +99,11 @@ class WebEntry {
   private controllerReady: boolean = false;
   private appliedLoadGeneration: number = 0;
   private pendingCommands: WebCommand[] = [];
+  private inputCommands: Promise<void> = Promise.resolve();
+  private downloads: Map<string, webview.WebDownloadItem> = new Map();
+  private readonly downloadDelegate: webview.WebDownloadDelegate =
+    new webview.WebDownloadDelegate();
+  private inputTimestamp: number = 0;
   private loading: boolean = false;
   private epoch: number = 0;
   private sdkBusy: boolean = false;
@@ -158,6 +167,45 @@ class WebEntry {
       if (!this.context.webControllerAttached(this.settings.targetId, this.nativeTag)) {
         throw new Error("Native WebView controller attachment was rejected");
       }
+      this.downloadDelegate.onBeforeDownload((item: webview.WebDownloadItem) => {
+        if (
+          this.closed ||
+          !this.context.webDownloadAllowed(this.settings.targetId, item.getUrl())
+        ) {
+          item.cancel();
+          return;
+        }
+        try {
+          const id = item.getGuid();
+          const filename =
+            item.getSuggestedFileName().replace(/[\\/\x00-\x1f]/g, "_") || "download";
+          if (!id || id.includes("/") || id.includes("\\") || id === "." || id === "..") {
+            throw new Error("Invalid ArkWeb download ID");
+          }
+          const directory = `${this.settings.downloadDirectory}/${id}`;
+          fs.mkdirSync(directory, true);
+          this.downloads.set(id, item);
+          item.start(
+            `${directory}/${filename === "." || filename === ".." ? "download" : filename}`,
+          );
+          this.download(item, "started");
+        } catch (error) {
+          this.download(item, "failed", String(error));
+          item.cancel();
+        }
+      });
+      this.downloadDelegate.onDownloadFinish((item: webview.WebDownloadItem) => {
+        this.download(item, "finished");
+        this.downloads.delete(item.getGuid());
+      });
+      this.downloadDelegate.onDownloadFailed((item: webview.WebDownloadItem) => {
+        this.download(item, "failed", String(item.getLastErrorCode()));
+        this.downloads.delete(item.getGuid());
+        try {
+          fs.unlinkSync(item.getFullPath());
+        } catch {}
+      });
+      this.controller.setDownloadDelegate(this.downloadDelegate);
       this.controllerReady = true;
       this.applySource();
       const queued = this.pendingCommands.splice(0);
@@ -278,6 +326,91 @@ class WebEntry {
     });
   }
 
+  private download(item: webview.WebDownloadItem, state: string, message?: string): void {
+    if (this.closed || !this.context.isActive()) {
+      return;
+    }
+    this.context.webEvent({
+      targetId: this.settings.targetId,
+      phase: "download",
+      url: item.getUrl(),
+      title: "",
+      loading: false,
+      canGoBack: false,
+      canGoForward: false,
+      message,
+      download: {
+        state,
+        id: item.getGuid(),
+        filename: item.getSuggestedFileName(),
+        path: item.getFullPath(),
+        bytes: item.getReceivedBytes(),
+      },
+    });
+  }
+  private click(x: number, y: number): void {
+    this.context
+      .getUIContext()
+      .getFocusController()
+      .requestFocus(`nsh-web-${this.settings.targetId}`);
+    const time = Math.max(Date.now() * 1000000, this.inputTimestamp + 2000000);
+    this.inputTimestamp = time;
+    x = this.context.getUIContext().vp2px(x);
+    y = this.context.getUIContext().vp2px(y);
+    for (const type of [TouchType.Down, TouchType.Up]) {
+      const touch: TouchObject = {
+        type,
+        id: 0,
+        displayX: x,
+        displayY: y,
+        windowX: x,
+        windowY: y,
+        screenX: x,
+        screenY: y,
+        x,
+        y,
+      };
+      const event: TouchEvent = {
+        type,
+        touches: type === TouchType.Up ? [] : [touch],
+        changedTouches: [touch],
+        timestamp: time + (type === TouchType.Up ? 1000000 : 0),
+        source: SourceType.TouchScreen,
+        sourceTool: SourceTool.Finger,
+        pressure: 1,
+        tiltX: 0,
+        tiltY: 0,
+        target: {
+          area: { position: { x: 0, y: 0 }, globalPosition: { x: 0, y: 0 }, width: 0, height: 0 },
+        },
+        stopPropagation: (): void => {},
+        preventDefault: (): void => {},
+        getHistoricalPoints: (): HistoricalPoint[] => [],
+      };
+      if (!this.node.postTouchEvent(event)) {
+        throw new Error("ArkWeb rejected the native touch event");
+      }
+    }
+  }
+  private key(name: string): void {
+    const code =
+      name === "Enter" ? 2054 : name === "Tab" ? 2049 : name === "Backspace" ? 2055 : 2070;
+    for (const type of [KeyType.Down, KeyType.Up]) {
+      const event: KeyEvent = {
+        type,
+        keyCode: code,
+        keyText: name,
+        keySource: KeySource.Keyboard,
+        deviceId: -1,
+        metaKey: 0,
+        timestamp: Date.now(),
+        intentionCode: -1,
+        stopPropagation: (): void => {},
+      };
+      this.context.getUIContext().dispatchKeyEvent(`nsh-web-${this.settings.targetId}`, event);
+    }
+  }
+
   command(command: WebCommand): void {
     if (this.closed || !this.context.isActive()) {
       return;
@@ -287,7 +420,31 @@ class WebEntry {
       return;
     }
     try {
-      if (command.kind === "reload") {
+      if (command.kind.startsWith("input-")) {
+        // Serialize the asynchronous ArkWeb editor operation with native keys.
+        // execCommand enters the browser editor (selection, undo and trusted
+        // input); assigning a DOM value or dispatching a JS event would not.
+        this.inputCommands = this.inputCommands
+          .then(async (): Promise<void> => {
+            if (this.closed || !this.context.isActive()) {
+              return;
+            }
+            if (command.kind === "input-click") {
+              this.click(command.x ?? 0, command.y ?? 0);
+            } else if (command.kind === "input-text") {
+              const text = JSON.stringify(command.script ?? "");
+              const inserted = await this.controller.runJavaScript(
+                `document.execCommand("insertText", false, ${text})`,
+              );
+              if (inserted !== "true") {
+                throw new Error("ArkWeb has no focused editable element for text input");
+              }
+            } else if (command.kind === "input-key") {
+              this.key(command.script ?? "Escape");
+            }
+          })
+          .catch((error: Error) => this.emit("error", String(error)));
+      } else if (command.kind === "reload") {
         this.controller.refresh();
       } else if (command.kind === "go-back") {
         if (this.controller.accessBackward()) {
@@ -336,6 +493,13 @@ class WebEntry {
       return;
     }
     this.closed = true;
+    for (const item of this.downloads.values()) {
+      try {
+        item.cancel();
+        fs.unlinkSync(item.getFullPath());
+      } catch {}
+    }
+    this.downloads.clear();
     this.epoch++;
     this.pendingCommands = [];
     try {

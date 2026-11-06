@@ -5,12 +5,9 @@
 //! Rust TLS keeps the same bounded redirects and streaming behavior as the
 //! desktop transport. Each request reads the system proxy through the network
 //! connection binding, including bypass rules. Cookie-store integration is separate.
-//! Adapted from `nsh-cli`'s stack for `nsh trace` (`crates/nsh-cli/src/net.rs`);
-//! sharing it would mean a new public item in a crate both depend on. The
-//! differences: no events at all after `cancel` (the engine would ignore
-//! them anyway), `redirected` compares normalized URLs, and only connecting
-//! and the response head have deadlines, so long-lived bodies (event
-//! streams, large downloads) are not cut off.
+//! OHOS owns worker admission and per-request native proxy lookup. Requests
+//! stream in both directions; cancellation suppresses subsequent events, and
+//! only connection and response-head waits have deadlines, preserving streams.
 //!
 //! HTTP error statuses are responses, not failures. A request thread
 //! blocked in a read or write is not interrupted by `cancel` or `pause`: it

@@ -8,7 +8,8 @@ pub(crate) fn blur_sigma(radius: f32, scale: f32) -> f32 {
 pub(crate) fn requires_scene(style: &ViewStyle) -> bool {
     style.blend_mode == nsh_core::BlendMode::PlusDarker
         || style.effects.as_ref().is_some_and(|effects| {
-            effects.backdrop_filters.len() > 1
+            !effects.mask_images.is_empty()
+                || effects.backdrop_filters.len() > 1
                 || effects
                     .backdrop_filters
                     .iter()

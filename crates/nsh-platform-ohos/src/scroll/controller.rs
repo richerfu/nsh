@@ -747,6 +747,14 @@ impl Scroller {
 
         if let Some(owner) = self.owner.upgrade() {
             owner.invalidate_scene();
+            let selection = owner
+                .selected_text
+                .borrow()
+                .as_ref()
+                .and_then(Weak::upgrade);
+            if let Some(selection) = selection {
+                selection.selection_refresh()?;
+            }
             owner.control.scroll(
                 owner.id,
                 Point::new(Points(reported.0), Points(reported.1)),
@@ -1004,8 +1012,14 @@ impl Scroller {
                     .offset
                     .and_then(|id| owner.as_ref().map(|o| o.animator.value(id)))
                     .unwrap_or(0.0);
-                let shift = ((if horizontal { offset.0 } else { offset.1 }) + extra - cell.start.0)
-                    .clamp(0.0, (cell.end.0 - cell.start.0).max(0.0));
+                let shift = nsh_core::scroll::sticky_shift(
+                    nsh_core::geometry::Points(
+                        (if horizontal { offset.0 } else { offset.1 }) + extra,
+                    ),
+                    cell.start,
+                    cell.end,
+                )
+                .0;
                 node.pin(
                     if horizontal { shift } else { 0.0 },
                     if horizontal { 0.0 } else { shift },

@@ -18,7 +18,7 @@ mod services;
 mod text;
 
 pub use app::{
-    NshCapabilities, NshEnvironment, NshOptions, NshPackage, NshPackageInfo, NshSurface, NshTrust,
-    get_capabilities, init_logging,
+    NshCacheOptions, NshCapabilities, NshEnvironment, NshOptions, NshPackage, NshPackageInfo,
+    NshSurface, NshTrust, get_capabilities, init_logging,
 };
 pub use interop::NshNativeProperty;

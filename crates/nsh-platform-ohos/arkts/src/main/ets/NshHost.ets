@@ -1,7 +1,6 @@
 import {
   AbilityConstant,
   AbilityLifecycleCallback,
-  ApplicationStateChangeCallback,
   Configuration,
   EnvironmentCallback,
   UIAbility,
@@ -14,6 +13,9 @@ import { photoAccessHelper } from "@kit.MediaLibraryKit";
 import { FrameNode } from "@ohos.arkui.node";
 import { UIContext } from "@ohos.arkui.UIContext";
 import deviceInfo from "@ohos.deviceInfo";
+import display from "@ohos.display";
+import i18n from "@ohos.i18n";
+import pointer from "@ohos.multimodalInput.pointer";
 import {
   EditorEventPayload,
   EditorReceipt,
@@ -22,6 +24,9 @@ import {
   WebEventPayload,
 } from "./NativeEditors";
 import { Batch, NshPlugin } from "./NshPlugin";
+import { NativeTabBar, TabBarContext } from "./NativeTabBar";
+
+import { NativeSystem } from "./NativeSystem";
 
 interface AvoidRectPayload {
   left: number;
@@ -39,9 +44,14 @@ interface AvoidAreaPayload {
 }
 
 interface HostInitPayload {
+  speechAvailable: boolean;
   sdkApiVersion: number;
   deviceType: string;
   cacheDir: string;
+  filesDir: string;
+  pixelRatio: number;
+  rtl: boolean;
+  lifecycle: string;
   colorMode: number;
   fontSizeScale: number;
   language: string;
@@ -65,22 +75,24 @@ interface HostCommandPayload {
 
 interface NshNativeModule {
   nshRegisterSessionBinder(sdkApiVersion: number, binder: (uiContext: UIContext) => number): void;
-  nshFindSession(windowName: string): number;
   nshCreateSession(
     init: HostInitPayload,
-    windowName: string,
     platformWindowId: number,
     resourceManager: object,
     applyBatch: (batch: Batch) => void,
     onCommand: (command: HostCommandPayload) => void,
+    tabBar: (context: TabBarContext) => object,
   ): number;
   nshCloseSession(sessionId: number): void;
-  nshSetForeground(sessionId: number, foreground: boolean): void;
+  nshServiceEvent(sessionId: number, key: number, event: object): void;
+  nshSetLifecycle(sessionId: number, lifecycle: string): void;
+  nshUpdateKeyboard(sessionId: number, duration: number): void;
   nshUpdateConfig(
     sessionId: number,
     colorMode: number,
     fontSizeScale: number,
     language: string,
+    rtl: boolean,
     deviceType?: string,
   ): void;
   nshUpdateAccessibility(sessionId: number, screenReader?: boolean, reduceMotion?: boolean): void;
@@ -100,8 +112,9 @@ interface NshNativeModule {
   nshViewAction(action: MenuActionPayload): boolean;
   nshWebControllerAttached(targetId: number, nativeTag: string): boolean;
   nshWebNavigate(targetId: number, url: string): boolean;
+  nshWebDownloadAllowed(targetId: number, url: string): boolean;
   nshWebEvent(event: WebEventPayload): boolean;
-  onBackPressIntercept(uiContext?: UIContext): boolean;
+  onBackPressIntercept(uiContext: UIContext): boolean;
 }
 
 let cachedNativeModule: NshNativeModule | undefined = undefined;
@@ -256,6 +269,9 @@ class ComponentRuntimeContext implements NshRuntimeContext {
     }
   }
 
+  webDownloadAllowed(targetId: number, url: string): boolean {
+    return this.isActive() && this.mod.nshWebDownloadAllowed(targetId, url);
+  }
   webNavigate(targetId: number, url: string): boolean {
     if (!this.active) {
       return true;
@@ -291,20 +307,6 @@ class HostEnvironmentListener extends EnvironmentCallback {
   onMemoryLevel(_level: AbilityConstant.MemoryLevel): void {}
 }
 
-class HostStateChangeListener extends ApplicationStateChangeCallback {
-  private readonly owner: HostSession;
-  constructor(owner: HostSession) {
-    super();
-    this.owner = owner;
-  }
-  onApplicationForeground(): void {
-    this.owner.onForegroundChanged(true);
-  }
-  onApplicationBackground(): void {
-    this.owner.onForegroundChanged(false);
-  }
-}
-
 class HostLifecycleListener extends AbilityLifecycleCallback {
   private readonly owner: HostSession;
   constructor(owner: HostSession) {
@@ -313,11 +315,7 @@ class HostLifecycleListener extends AbilityLifecycleCallback {
   }
   onAbilityCreate(_ability: UIAbility): void {}
   onWindowStageCreate(_ability: UIAbility, _windowStage: window.WindowStage): void {}
-  onWindowStageActive(ability: UIAbility, windowStage: window.WindowStage): void {
-    if (this.owner.matchesWindowStage(ability.context, windowStage)) {
-      this.owner.onForegroundChanged(true);
-    }
-  }
+  onWindowStageActive(_ability: UIAbility, _windowStage: window.WindowStage): void {}
   onWindowStageInactive(_ability: UIAbility, _windowStage: window.WindowStage): void {}
   onWindowStageDestroy(ability: UIAbility, windowStage: window.WindowStage): void {
     if (this.owner.matchesWindowStage(ability.context, windowStage)) {
@@ -329,20 +327,14 @@ class HostLifecycleListener extends AbilityLifecycleCallback {
       this.owner.close();
     }
   }
-  onAbilityForeground(ability: UIAbility): void {
-    if (this.owner.matchesAbility(ability.context)) {
-      this.owner.onForegroundChanged(true);
-    }
-  }
-  onAbilityBackground(ability: UIAbility): void {
-    if (this.owner.matchesAbility(ability.context)) {
-      this.owner.onForegroundChanged(false);
-    }
-  }
+  onAbilityForeground(_ability: UIAbility): void {}
+  onAbilityBackground(_ability: UIAbility): void {}
   onAbilityContinue(_ability: UIAbility): void {}
 }
 
 class HostSession {
+  private static readonly windows: Map<string, HostSession> = new Map();
+  private readonly windowName: string;
   readonly sessionId: number;
   private readonly mod: NshNativeModule;
   private readonly abilityContext: common.UIAbilityContext;
@@ -351,11 +343,16 @@ class HostSession {
   private readonly mainWindow: window.Window;
   private readonly windowId: number;
   private readonly runtimeContext: ComponentRuntimeContext;
+  private readonly system: NativeSystem;
   private readonly plugin: NshPlugin = new NshPlugin();
   private closed: boolean = false;
+  private savedPointerVisible?: boolean;
+  private savedBars?: window.SystemBarProperties;
+  private savedStatusVisible: boolean = true;
+  private savedNavigationVisible: boolean = true;
+  private barsWork: Promise<void> = Promise.resolve();
   private envCallbackId?: number;
   private lifecycleCallbackId?: number;
-  private stateListener?: HostStateChangeListener;
   private screenReaderHandler?: (enabled: boolean) => void;
   private reduceMotionHandler?: (enabled: boolean) => void;
 
@@ -363,18 +360,21 @@ class HostSession {
     if (this.closed) {
       return;
     }
-    if (
-      event === window.WindowStageEventType.SHOWN ||
-      event === window.WindowStageEventType.ACTIVE ||
-      event === window.WindowStageEventType.RESUMED
-    ) {
-      this.onForegroundChanged(true);
-    } else if (
-      event === window.WindowStageEventType.INACTIVE ||
-      event === window.WindowStageEventType.PAUSED ||
-      event === window.WindowStageEventType.HIDDEN
-    ) {
-      this.onForegroundChanged(false);
+    switch (event) {
+      case window.WindowStageEventType.ACTIVE:
+      case window.WindowStageEventType.RESUMED:
+        this.onLifecycleChanged("active");
+        break;
+      case window.WindowStageEventType.SHOWN:
+        this.onLifecycleChanged(this.mainWindow.isFocused() ? "active" : "inactive");
+        break;
+      case window.WindowStageEventType.INACTIVE:
+      case window.WindowStageEventType.PAUSED:
+        this.onLifecycleChanged("inactive");
+        break;
+      case window.WindowStageEventType.HIDDEN:
+        this.onLifecycleChanged("background");
+        break;
     }
   };
 
@@ -384,6 +384,13 @@ class HostSession {
 
   private readonly onWindowSizeChange = (_size: window.Size): void => {
     this.syncWindowMetrics();
+  };
+
+  private readonly onKeyboardWillChange = (info: window.KeyboardInfo): void => {
+    const duration = info.animated === false ? 0 : info.config?.duration;
+    if (!this.closed && duration !== undefined) {
+      this.mod.nshUpdateKeyboard(this.sessionId, duration);
+    }
   };
 
   private readonly onKeyboardHeightChange = (_height: number): void => {
@@ -397,6 +404,7 @@ class HostSession {
     mainWindow: window.Window,
     windowName: string,
   ) {
+    this.windowName = windowName;
     this.mod = mod;
     this.abilityContext = abilityContext;
     this.windowStage = abilityContext.windowStage;
@@ -426,18 +434,33 @@ class HostSession {
     }
 
     const config = abilityContext.config;
+    const language = config?.language || i18n.System.getSystemLanguage();
+    let pixelRatio = uiContext.vp2px(1);
+    const displayId = mainWindow.getWindowProperties().displayId;
+    if (displayId !== undefined) {
+      pixelRatio = display.getDisplayByIdSync(displayId).densityPixels;
+    }
+    const lifecycle = mainWindow.isWindowShowing()
+      ? mainWindow.isFocused()
+        ? "active"
+        : "inactive"
+      : "background";
     this.sessionId = mod.nshCreateSession(
       {
+        speechAvailable: canIUse("SystemCapability.AI.SpeechRecognizer"),
         sdkApiVersion: deviceInfo.sdkApiVersion,
         deviceType: deviceInfo.deviceType ?? "phone",
-        cacheDir: abilityContext.cacheDir ?? "",
+        cacheDir: abilityContext.cacheDir,
+        filesDir: abilityContext.filesDir,
         colorMode: config?.colorMode ?? -1,
         fontSizeScale: config?.fontSizeScale ?? 1.0,
-        language: config?.language ?? "",
+        language,
+        rtl: i18n.isRTL(language),
+        pixelRatio,
+        lifecycle,
         screenReader,
         reduceMotion,
       },
-      windowName,
       windowId,
       abilityContext.resourceManager,
       (batch: Batch): void => {
@@ -448,8 +471,12 @@ class HostSession {
       (command: HostCommandPayload): void => {
         this.handleHostCommand(command);
       },
+      (context: TabBarContext): object => new NativeTabBar(uiContext, context),
     );
 
+    this.system = new NativeSystem(uiContext, abilityContext, (key: number, event: object): void =>
+      this.mod.nshServiceEvent(this.sessionId, key, event),
+    );
     this.bindWindowListeners();
     this.subscribeLifecycleListeners();
     this.subscribeAccessibility();
@@ -465,9 +492,9 @@ class HostSession {
     if (!windowName) {
       throw new Error("OHOS UIContext does not have an associated window name");
     }
-    const existing = mod.nshFindSession(windowName);
-    if (existing > 0) {
-      return existing;
+    const existing = HostSession.windows.get(windowName);
+    if (existing !== undefined) {
+      return existing.sessionId;
     }
     const abilityContext = uiContext.getHostContext() as common.UIAbilityContext | undefined;
     if (
@@ -493,6 +520,7 @@ class HostSession {
       throw new Error(`OHOS window '${windowName}' could not be resolved from UIContext`);
     }
     const session = new HostSession(mod, uiContext, abilityContext, mainWindow, windowName);
+    HostSession.windows.set(windowName, session);
     return session.sessionId;
   }
 
@@ -507,13 +535,15 @@ class HostSession {
     );
   }
 
-  onForegroundChanged(foreground: boolean): void {
+  onLifecycleChanged(lifecycle: string): void {
     if (this.closed) {
       return;
     }
     try {
-      this.mod.nshSetForeground(this.sessionId, foreground);
-    } catch {}
+      this.mod.nshSetLifecycle(this.sessionId, lifecycle);
+    } catch (error) {
+      this.mod.nshReportHostError(this.sessionId, `OHOS lifecycle update: ${String(error)}`);
+    }
   }
 
   onConfigurationUpdated(newConfig: Configuration): void {
@@ -526,6 +556,7 @@ class HostSession {
         newConfig.colorMode ?? -1,
         newConfig.fontSizeScale ?? 1.0,
         newConfig.language ?? "",
+        i18n.isRTL(newConfig.language || i18n.System.getSystemLanguage()),
         deviceInfo.deviceType,
       );
     } catch {}
@@ -536,6 +567,10 @@ class HostSession {
       return;
     }
     this.closed = true;
+    HostSession.windows.delete(this.windowName);
+    this.system.close();
+    this.updateCursor("auto");
+    this.updateSystemBars();
 
     if (this.windowStage !== undefined) {
       try {
@@ -551,6 +586,8 @@ class HostSession {
     } catch {}
     try {
       this.mainWindow.off("keyboardHeightChange", this.onKeyboardHeightChange);
+      this.mainWindow.off("keyboardWillShow", this.onKeyboardWillChange);
+      this.mainWindow.off("keyboardWillHide", this.onKeyboardWillChange);
     } catch {}
 
     if (this.appContext !== undefined) {
@@ -565,12 +602,6 @@ class HostSession {
           this.appContext.off("abilityLifecycle", this.lifecycleCallbackId);
         } catch {}
         this.lifecycleCallbackId = undefined;
-      }
-      if (this.stateListener !== undefined) {
-        try {
-          this.appContext.off("applicationStateChange", this.stateListener);
-        } catch {}
-        this.stateListener = undefined;
       }
     }
 
@@ -612,6 +643,8 @@ class HostSession {
     } catch {}
     try {
       this.mainWindow.on("keyboardHeightChange", this.onKeyboardHeightChange);
+      this.mainWindow.on("keyboardWillShow", this.onKeyboardWillChange);
+      this.mainWindow.on("keyboardWillHide", this.onKeyboardWillChange);
     } catch {}
   }
 
@@ -625,11 +658,6 @@ class HostSession {
     } catch {}
     try {
       this.lifecycleCallbackId = appCtx.on("abilityLifecycle", new HostLifecycleListener(this));
-    } catch {}
-    try {
-      const listener = new HostStateChangeListener(this);
-      appCtx.on("applicationStateChange", listener);
-      this.stateListener = listener;
     } catch {}
   }
 
@@ -678,53 +706,165 @@ class HostSession {
 
   private bundleName(): string {
     return (
-      this.abilityContext.abilityInfo?.bundleName ??
-      this.appContext?.applicationInfo?.name ??
-      ""
+      this.abilityContext.abilityInfo?.bundleName ?? this.appContext?.applicationInfo?.name ?? ""
     );
   }
 
-  private handleHostCommand(command: HostCommandPayload): void {
-    if (command.kind === "close") {
-      this.close();
+  private updateSystemBars(command?: HostCommandPayload): void {
+    // Keep restoration ordered after outstanding writes, including when a
+    // surface stops while a window API promise is still pending.
+    this.barsWork = this.barsWork
+      .then(async (): Promise<void> => {
+        if (command === undefined) {
+          const saved = this.savedBars;
+          if (saved === undefined) {
+            return;
+          }
+          this.savedBars = undefined;
+          await this.mainWindow.setWindowSystemBarProperties(saved);
+          await this.mainWindow.setSpecificSystemBarEnabled("status", this.savedStatusVisible);
+          await this.mainWindow.setSpecificSystemBarEnabled(
+            "navigationIndicator",
+            this.savedNavigationVisible,
+          );
+          return;
+        }
+        if (this.savedBars === undefined) {
+          this.savedBars = this.mainWindow.getWindowSystemBarProperties();
+          this.savedStatusVisible = safeAvoidArea(
+            this.mainWindow,
+            window.AvoidAreaType.TYPE_SYSTEM,
+          ).visible;
+          this.savedNavigationVisible = safeAvoidArea(
+            this.mainWindow,
+            window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR,
+          ).visible;
+        }
+        if (command.kind === "video-fullscreen") {
+          await this.mainWindow.setSpecificSystemBarEnabled(
+            "status",
+            command.enabled ? false : this.savedStatusVisible,
+          );
+          await this.mainWindow.setSpecificSystemBarEnabled(
+            "navigationIndicator",
+            command.enabled ? false : this.savedNavigationVisible,
+          );
+        } else {
+          await this.mainWindow.setSpecificSystemBarEnabled(
+            "status",
+            command.enabled ?? true,
+            command.animated ?? false,
+          );
+          await this.mainWindow.setWindowSystemBarProperties({
+            statusBarContentColor: command.lightContent ? "#FFFFFFFF" : "#FF000000",
+          });
+        }
+      })
+      .catch((error: Error): void => {
+        if (!this.closed) {
+          this.mod.nshReportHostError(this.sessionId, `OHOS system bar update: ${String(error)}`);
+        }
+      });
+  }
+
+  private updateCursor(name: string): void {
+    const controller = this.runtimeContext.getUIContext().getCursorController();
+    if (name === "none") {
+      if (this.savedPointerVisible === undefined) {
+        this.savedPointerVisible = pointer.isPointerVisibleSync();
+      }
+      pointer.setPointerVisibleSync(false);
       return;
     }
+    if (this.savedPointerVisible !== undefined) {
+      pointer.setPointerVisibleSync(this.savedPointerVisible);
+      this.savedPointerVisible = undefined;
+    }
+    let style: pointer.PointerStyle;
+    switch (name) {
+      case "default":
+        style = pointer.PointerStyle.DEFAULT;
+        break;
+      case "pointer":
+        style = pointer.PointerStyle.HAND_POINTING;
+        break;
+      case "text":
+        style = pointer.PointerStyle.TEXT_CURSOR;
+        break;
+      case "wait":
+        style = pointer.PointerStyle.LOADING;
+        break;
+      case "progress":
+        style = pointer.PointerStyle.RUNNING;
+        break;
+      case "help":
+        style = pointer.PointerStyle.HELP;
+        break;
+      case "crosshair":
+        style = pointer.PointerStyle.CROSS;
+        break;
+      case "move":
+        style = pointer.PointerStyle.MOVE;
+        break;
+      case "grab":
+        style = pointer.PointerStyle.HAND_OPEN;
+        break;
+      case "grabbing":
+        style = pointer.PointerStyle.HAND_GRABBING;
+        break;
+      case "not-allowed":
+        style = pointer.PointerStyle.CURSOR_FORBID;
+        break;
+      case "zoom-in":
+        style = pointer.PointerStyle.ZOOM_IN;
+        break;
+      case "zoom-out":
+        style = pointer.PointerStyle.ZOOM_OUT;
+        break;
+      case "col-resize":
+        style = pointer.PointerStyle.WEST_EAST;
+        break;
+      case "row-resize":
+        style = pointer.PointerStyle.NORTH_SOUTH;
+        break;
+      case "nwse-resize":
+        style = pointer.PointerStyle.NORTH_WEST_SOUTH_EAST;
+        break;
+      case "nesw-resize":
+        style = pointer.PointerStyle.NORTH_EAST_SOUTH_WEST;
+        break;
+      default:
+        controller.restoreDefault();
+        return;
+    }
+    controller.setCursor(style);
+  }
+
+  private handleHostCommand(command: HostCommandPayload): void {
     if (this.closed) {
       return;
     }
 
-    if (command.kind === "video-fullscreen") {
-      const enabled = command.enabled ?? false;
-      for (const bar of ["status", "navigationIndicator"] as window.SpecificSystemBar[]) {
-        this.mainWindow
-          .setSpecificSystemBarEnabled(bar, !enabled)
-          .catch((error: Error): void => {
-            this.mod.nshReportHostError(
-              this.sessionId,
-              `OHOS video fullscreen bar update failed: ${String(error)}`,
-            );
-          });
-      }
+    if (command.kind === "system") {
+      this.system
+        .execute(command.openId ?? 0, command.text ?? "{}")
+        .catch((error: Error) => console.error(`NSH system: ${error}`));
       return;
     }
-
-    if (command.kind === "status-bar") {
-      const enabled = command.enabled ?? true;
-      const animated = command.animated ?? false;
-      const lightContent = command.lightContent ?? false;
-      this.mainWindow
-        .setSpecificSystemBarEnabled("status", enabled, animated)
-        .then((): Promise<void> => {
-          return this.mainWindow.setWindowSystemBarProperties({
-            statusBarContentColor: lightContent ? "#FFFFFFFF" : "#FF000000",
-          });
-        })
-        .catch((error: Error): void => {
-          this.mod.nshReportHostError(
-            this.sessionId,
-            `OHOS status bar update failed: ${String(error)}`,
-          );
-        });
+    if (command.kind === "system-cancel") {
+      this.system.cancel(command.openId ?? 0);
+      return;
+    }
+    if (command.kind === "cursor") {
+      this.updateCursor(command.text ?? "auto");
+      return;
+    }
+    if (command.kind === "restore-bars") {
+      this.updateSystemBars();
+      return;
+    }
+    if (command.kind === "video-fullscreen" || command.kind === "status-bar") {
+      this.updateSystemBars(command);
       return;
     }
 

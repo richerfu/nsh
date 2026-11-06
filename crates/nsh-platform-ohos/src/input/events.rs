@@ -49,6 +49,12 @@ pub(crate) struct Interaction {
 }
 
 impl Interaction {
+    pub(crate) fn selectable_view(&self) -> bool {
+        self.props.borrow().selectable_view
+    }
+    pub(crate) fn continues_text(&self) -> bool {
+        self.props.borrow().continues_text
+    }
     pub(crate) fn test_id(&self) -> Option<String> {
         self.props.borrow().test_id.as_deref().map(str::to_owned)
     }
@@ -135,6 +141,8 @@ impl Interaction {
                         if let Some(owner) = weak.upgrade()
                             && !owner.interaction.long_fired.replace(false)
                         {
+                            // OnClick's component payload is physical pixels on
+                            // device; touch input below already uses the node's vp.
                             owner.press(
                                 EventKind::Press,
                                 event.component_f32(0).unwrap_or_default() / owner.scale,
@@ -197,7 +205,8 @@ impl Interaction {
         let hover = !blocked
             && (events.contains(EventKind::MouseEnter)
                 || events.contains(EventKind::MouseLeave)
-                || self.tracked.get() & state::HOVERED != 0);
+                || self.tracked.get() & state::HOVERED != 0
+                || owner.style.borrow().cursor != nsh_core::Cursor::Auto);
         if self.hover_registered.replace(hover) != hover {
             if hover {
                 let weak = Rc::downgrade(owner);
@@ -210,6 +219,7 @@ impl Interaction {
                                 && let Some(input) = event.input_event()
                             {
                                 let hovered = input.is_hovered();
+                                owner.cursor.update(&owner, hovered)?;
                                 owner.interaction.state(&owner, state::HOVERED, hovered)?;
                                 owner.emit(
                                     if hovered {
@@ -322,7 +332,10 @@ impl Interaction {
                             return;
                         }
                         owner.interaction.long_fired.set(true);
-                        let (x, y) = event.input.map_or((0.0, 0.0), |input| (input.x, input.y));
+                        // Gesture input snapshots are physical pixels even on VP nodes.
+                        let (x, y) = event.input.map_or((0.0, 0.0), |input| {
+                            (input.x / owner.scale, input.y / owner.scale)
+                        });
                         owner.press(EventKind::LongPress, x, y);
                         callback(|| {
                             owner.selection_begin(x, y)?;
@@ -340,6 +353,7 @@ impl Interaction {
         Ok(())
     }
     pub(crate) fn props(&self, owner: &Rc<Node>, props: ViewProps) -> Result<()> {
+        let selection_changed = self.props.borrow().selectable_view != props.selectable_view;
         owner.wrapper_semantics_reset();
         {
             let native = owner.native.borrow();
@@ -379,7 +393,11 @@ impl Interaction {
         self.state(owner, state::DISABLED, disabled)?;
         self.apply_label(owner)?;
         self.apply_opacity(owner)?;
-        self.pointer(owner, self.inherited_block.get())
+        self.pointer(owner, self.inherited_block.get())?;
+        if selection_changed {
+            owner.selection_configure()?;
+        }
+        Ok(())
     }
     pub(crate) fn label(&self, owner: &Node, label: Option<Arc<str>>) -> Result<()> {
         self.props.borrow_mut().accessibility.label = label;
@@ -415,7 +433,7 @@ impl Interaction {
     pub(crate) fn pointer(&self, owner: &Rc<Node>, inherited: bool) -> Result<()> {
         self.inherited_block.set(inherited);
         let pointer = self.props.borrow().pointer_events;
-        let mode = if inherited {
+        let mode = if inherited || owner.export_repair.get() != 0 {
             HitTestMode::None
         } else {
             match pointer {
@@ -640,6 +658,9 @@ impl Interaction {
             .control
             .set_states(owner.id, self.states.get() & tracked);
         self.events(owner, self.events.get())
+    }
+    pub(crate) fn hovered(&self) -> bool {
+        self.states.get() & state::HOVERED != 0
     }
     pub(crate) fn state(&self, owner: &Node, bit: u16, enabled: bool) -> Result<()> {
         let old = self.states.get();

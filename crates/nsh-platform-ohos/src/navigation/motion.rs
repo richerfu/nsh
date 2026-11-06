@@ -7,20 +7,23 @@ pub(crate) struct Motion {
     pub(crate) to: f32,
 }
 impl Motion {
-    pub(crate) fn new(start: f64, from: f32, to: f32, animated: bool) -> Self {
+    pub(crate) fn new(
+        start: f64,
+        from: f32,
+        to: f32,
+        duration: Option<std::time::Duration>,
+    ) -> Self {
         Self {
             start,
             from,
             to,
-            duration: if animated {
-                nsh_core::navigation::SLIDE.as_secs_f64() * 1000.0 * (from - to).abs() as f64
-            } else {
-                0.0
-            },
+            duration: duration.map_or(0.0, |duration| {
+                duration.as_secs_f64() * 1000.0 * (from - to).abs() as f64
+            }),
         }
     }
-    pub(crate) fn step(&self, now: f64, reduced: bool) -> (f32, bool, f32) {
-        let t = if self.duration <= 0.0 || reduced {
+    pub(crate) fn step(&self, now: f64) -> (f32, bool, f32) {
+        let t = if self.duration <= 0.0 {
             1.0
         } else {
             ((now - self.start) / self.duration).clamp(0.0, 1.0) as f32
@@ -47,22 +50,23 @@ mod tests {
     use super::*;
     #[test]
     fn cancelling_a_partial_swipe_preserves_position_and_finishes_at_rest() {
-        let cancel = Motion::new(100.0, 0.4, 0.0, true);
-        assert_eq!(cancel.step(100.0, false), (0.4, false, 0.0));
-        let middle = cancel.step(160.0, false);
+        let cancel = Motion::new(100.0, 0.4, 0.0, Some(nsh_core::navigation::SLIDE));
+        assert_eq!(cancel.step(100.0), (0.4, false, 0.0));
+        let middle = cancel.step(160.0);
         assert!(middle.0 > 0.0 && middle.0 < 0.4 && !middle.1);
-        assert_eq!(cancel.step(220.0, false), (0.0, true, 0.0));
+        assert_eq!(cancel.step(220.0), (0.0, true, 0.0));
     }
     #[test]
-    fn reduced_motion_and_no_animation_settle_the_current_destination() {
-        assert_eq!(
-            Motion::new(0.0, 0.2, 1.0, true).step(1.0, true),
-            (1.0, true, 1.0)
-        );
-        assert_eq!(
-            Motion::new(0.0, 1.0, 0.0, false).step(0.0, false),
-            (0.0, true, 0.0)
-        );
+    fn fade_and_reduced_motion_use_core_durations() {
+        for reduced in [false, true] {
+            let motion =
+                nsh_core::navigation::screen_motion(nsh_core::ScreenAnimation::Fade, reduced)
+                    .map(|m| m.0);
+            let fade = Motion::new(0.0, 0.0, 1.0, motion);
+            assert!(!fade.step(100.0).1);
+            assert_eq!(fade.step(200.0), (1.0, true, 1.0));
+        }
+        assert_eq!(Motion::new(0.0, 1.0, 0.0, None).step(0.0), (0.0, true, 0.0));
     }
     #[test]
     fn completion_accounts_for_fling_direction_and_invalid_geometry() {

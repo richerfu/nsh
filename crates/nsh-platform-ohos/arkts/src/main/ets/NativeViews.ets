@@ -67,6 +67,7 @@ interface MenuLease {
   generation: number;
   opening: Promise<void>;
   retired: boolean;
+  disappeared: boolean;
 }
 function captureWidth(settings: Settings): number {
   return (
@@ -134,6 +135,7 @@ class ViewModifier implements AttributeModifier<StackAttribute> {
       .height(s.height)
       .hueRotate(s.hue)
       .clip(false)
+      .tabStop(s.menu != null)
       .hitTestBehavior(HitTestMode.Transparent)
       .accessibilityText(s.label)
       .accessibilityDescription(
@@ -146,7 +148,7 @@ class ViewModifier implements AttributeModifier<StackAttribute> {
       .accessibilitySelected(s.selected);
     node.accessibilityRole(role(s.role));
     node.accessibilityChecked(s.checked === null ? undefined : s.checked);
-    node.enabled(!s.disabled).onClick(s.clickable ? (): void => {} : undefined);
+    node.enabled(!s.disabled).onClick(s.clickable || s.menu != null ? (): void => {} : undefined);
     if (s.api23 && typeof (node as StateAttribute).accessibilityStateDescription === "function") {
       (node as StateAttribute).accessibilityStateDescription(s.value);
     }
@@ -174,9 +176,10 @@ struct ViewMenuContent {
       ForEach(
         this.menu.items,
         (item: NativeMenuItem) => {
-          MenuItem({ content: item.label }).onClick((): void => {
-            this.entry.action(item.name, "menu", this.menu.generation);
-          });
+          MenuItem({ content: item.label })
+            .onClick((): void => {
+              this.entry.action(item.name, "menu", this.menu.generation);
+            });
         },
         (item: NativeMenuItem): string => item.name,
       )
@@ -342,14 +345,20 @@ class ViewEntry {
         this.sourceNode?.build(wrapBuilder(sourceContent), params, {
           nestingBuilderSupported: true,
         });
-        if (this.closed) { throw new Error("Native wrapper creation was cancelled"); }
+        if (this.closed) {
+          throw new Error("Native wrapper creation was cancelled");
+        }
         this.textureNode.build(wrapBuilder(textureContent), params, {
           nestingBuilderSupported: true,
         });
       }
-      if (this.closed) { throw new Error("Native wrapper creation was cancelled"); }
+      if (this.closed) {
+        throw new Error("Native wrapper creation was cancelled");
+      }
       this.node.build(wrapBuilder(viewContent), params, { nestingBuilderSupported: true });
-      if (this.closed || !this.context.isActive()) { throw new Error("Native wrapper creation was cancelled"); }
+      if (this.closed || !this.context.isActive()) {
+        throw new Error("Native wrapper creation was cancelled");
+      }
       stage = "attach";
       const accepted = this.context.attachNativeSubtree(
         this.settings.targetId,
@@ -365,7 +374,10 @@ class ViewEntry {
       throw new Error(`Native wrapper ${this.settings.targetId} ${stage} failed: ${String(error)}`);
     } finally {
       this.sdkBusy = false;
-      if (this.disposePending) { this.disposePending = false; this.disposeBuilders(); }
+      if (this.disposePending) {
+        this.disposePending = false;
+        this.disposeBuilders();
+      }
     }
   }
   update(settings: Settings): void {
@@ -375,12 +387,18 @@ class ViewEntry {
     this.state.settings = settings;
     const params: ViewParameters = { entry: this, settings: settings };
     this.sdkBusy = true;
-    try { this.node.update(params); }
-    finally {
+    try {
+      this.node.update(params);
+    } finally {
       this.sdkBusy = false;
-      if (this.disposePending) { this.disposePending = false; this.disposeBuilders(); }
+      if (this.disposePending) {
+        this.disposePending = false;
+        this.disposeBuilders();
+      }
     }
-    if (!this.closed) { this.syncMenu(); }
+    if (!this.closed) {
+      this.syncMenu();
+    }
   }
   private syncMenu(): void {
     try {
@@ -417,6 +435,12 @@ class ViewEntry {
     if (!frame) {
       return;
     }
+    // C custom nodes have a disabled focus type. Their native Stack wrapper
+    // owns selection focus, so keys bubble only inside this surface and the
+    // menu restores that focus without taking it back from a host control.
+    ui.getFocusController().requestFocus(
+      this.settings.testId ?? `nsh-view-${this.settings.targetId}`,
+    );
     const content = new ComponentContent<MenuParameters>(
       ui,
       wrapBuilder(menuContent),
@@ -428,12 +452,14 @@ class ViewEntry {
       generation: menu.generation,
       opening: Promise.resolve(),
       retired: false,
+      disappeared: false,
     };
     this.menuLease = lease;
     lease.opening = ui
       .getPromptAction()
-      .openMenu(content, { id: frame.getUniqueId() }, this.menuOptions());
+      .openMenu(content, { id: frame.getUniqueId() }, this.menuOptions(lease));
     lease.opening.catch((error: Error): void => {
+      lease.disappeared = true;
       console.error(`[NSH] native menu open failed: ${String(error)}`);
       if (this.menuLease === lease) {
         this.menuLease = undefined;
@@ -450,7 +476,8 @@ class ViewEntry {
     this.menus.retire(
       lease,
       lease.opening,
-      (): Promise<void> => this.ui.getPromptAction().closeMenu(lease.content),
+      (): Promise<void> =>
+        lease.disappeared ? Promise.resolve() : this.ui.getPromptAction().closeMenu(lease.content),
       (): void => lease.content.dispose(),
     );
   }
@@ -506,13 +533,14 @@ class ViewEntry {
       this.pointerPosting.finish(coordinates);
     }
   }
-  menuOptions(): MenuOptions {
+  menuOptions(lease: MenuLease): MenuOptions {
     const menu = this.settings.menu;
     return {
       placement: Placement.TopLeft,
       offset: { x: menu?.x ?? 0, y: -(menu?.y ?? 0) },
       showInSubWindow: false,
       onDisappear: (): void => {
+        lease.disappeared = true;
         // Every popup retains its own generation, including during replacement.
         const generation = menu?.generation;
         if (generation !== undefined) {
@@ -537,7 +565,9 @@ class ViewEntry {
     });
   }
   dispose(cleanup: NshRuntimeContext = this.context): void {
-    if (this.closed && !this.retirementFailure) { return; }
+    if (this.closed && !this.retirementFailure) {
+      return;
+    }
     this.closed = true;
     this.retirementFailure = undefined;
     try {
@@ -561,7 +591,10 @@ class ViewEntry {
     }
   }
   private disposeBuilders(): void {
-    if (this.sdkBusy) { this.disposePending = true; return; }
+    if (this.sdkBusy) {
+      this.disposePending = true;
+      return;
+    }
     try {
       this.pointerPosting.owners.forEach((stream, pointer: number): void => {
         if (stream.owner !== String(this.settings.targetId)) {
@@ -592,34 +625,51 @@ export class NativeViews {
   private menus: NativeMenuCleanup = new NativeMenuCleanup();
   private pointerPosting: PointerPosting = new PointerPosting();
   remove(ids: number[], context: NshRuntimeContext): void {
-    for (const id of ids) { this.entries.get(id)?.dispose(context); this.entries.delete(id); }
+    for (const id of ids) {
+      this.entries.get(id)?.dispose(context);
+      this.entries.delete(id);
+    }
   }
   update(states: Settings[], context: NshRuntimeContext): void {
     for (const state of states) {
-      if (!context.isActive()) { throw new Error("NSH SDK session is inactive"); }
-      if (state.api26 && deviceInfo.sdkApiVersion < 26 || state.api23 && deviceInfo.sdkApiVersion < 23) {
+      if (!context.isActive()) {
+        throw new Error("NSH SDK session is inactive");
+      }
+      if (
+        (state.api26 && deviceInfo.sdkApiVersion < 26) ||
+        (state.api23 && deviceInfo.sdkApiVersion < 23)
+      ) {
         throw new Error("NSH semantic feature requires a newer API level");
       }
       let entry = this.entries.get(state.targetId);
       if (entry && entry.settings.textureSurface !== state.textureSurface) {
         throw new Error("Texture replacement requires a fresh native target");
       }
-      if (entry) { entry.update(state); }
-      else {
+      if (entry) {
+        entry.update(state);
+      } else {
         entry = new ViewEntry(state, context, this.menus, this.pointerPosting);
         this.entries.set(state.targetId, entry);
         entry.create();
       }
     }
   }
-  async settled(): Promise<void> { await this.menus.settled(); }
+  async settled(): Promise<void> {
+    await this.menus.settled();
+  }
   dispose(context: NshRuntimeContext): void {
     let failure: Error | undefined;
     for (const id of Array.from(this.entries.keys())) {
       const entry = this.entries.get(id)!;
-      try { entry.dispose(context); this.entries.delete(id); }
-      catch (error) { failure ??= new Error(String(error)); }
+      try {
+        entry.dispose(context);
+        this.entries.delete(id);
+      } catch (error) {
+        failure ??= new Error(String(error));
+      }
     }
-    if (failure) { throw failure; }
+    if (failure) {
+      throw failure;
+    }
   }
 }

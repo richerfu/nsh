@@ -11,8 +11,11 @@ pub(crate) struct Image {
 }
 impl Image {
     pub(crate) fn new(frame: super::readback::RgbaFrame) -> Self {
-        let mut bitmap = Bitmap::new(frame.width, frame.height, BitmapFormat::default());
-        bitmap.pixels_mut().copy_from_slice(&frame.pixels);
+        Self::from_pixels(frame.width, frame.height, &frame.pixels)
+    }
+    pub(crate) fn from_pixels(width: u32, height: u32, pixels: &[u8]) -> Self {
+        let mut bitmap = Bitmap::new(width, height, BitmapFormat::default());
+        bitmap.pixels_mut().copy_from_slice(pixels);
         Self {
             bitmap,
             x: 0.0,
@@ -41,6 +44,40 @@ impl Image {
         let mut copy = Bitmap::new(bitmap.width(), bitmap.height(), BitmapFormat::default());
         copy.pixels_mut().copy_from_slice(bitmap.pixels());
         Self { bitmap: copy, x, y }
+    }
+    /// Put a native snapshot on the destination's physical pixel grid. Dialogs
+    /// and embedded surfaces can have different sizes and screen origins.
+    pub(crate) fn aligned(&self, width: u32, height: u32, offset: (i32, i32)) -> Self {
+        let mut bitmap = Bitmap::new(width, height, BitmapFormat::default());
+        bitmap.pixels_mut().fill(0);
+        let src_x = (-offset.0).max(0) as u32;
+        let src_y = (-offset.1).max(0) as u32;
+        let dst_x = offset.0.max(0) as u32;
+        let dst_y = offset.1.max(0) as u32;
+        let columns = self
+            .bitmap
+            .width()
+            .saturating_sub(src_x)
+            .min(width.saturating_sub(dst_x));
+        let rows = self
+            .bitmap
+            .height()
+            .saturating_sub(src_y)
+            .min(height.saturating_sub(dst_y));
+        if columns > 0 {
+            for row in 0..rows {
+                let source = ((src_y + row) * self.bitmap.width() + src_x) as usize * 4;
+                let target = ((dst_y + row) * width + dst_x) as usize * 4;
+                let bytes = columns as usize * 4;
+                bitmap.pixels_mut()[target..target + bytes]
+                    .copy_from_slice(&self.bitmap.pixels()[source..source + bytes]);
+            }
+        }
+        Self {
+            bitmap,
+            x: 0.0,
+            y: 0.0,
+        }
     }
     fn apply(self, effect: Effect, scale: f32, tile: TileMode) -> Result<Self, &'static str> {
         let (mut left, mut top, mut right, mut bottom) = (

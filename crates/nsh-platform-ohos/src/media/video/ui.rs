@@ -563,7 +563,7 @@ impl Ui {
             owner.animator.track(&owner);
         }
     }
-    fn apply_visibility(&self) -> Result<()> {
+    pub(super) fn apply_visibility(&self) -> Result<()> {
         self.row
             .borrow()
             .set_i32_attribute(A::Visibility, i32::from(!self.visibility.get().visible))?;

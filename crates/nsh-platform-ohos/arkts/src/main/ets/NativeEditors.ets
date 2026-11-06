@@ -65,6 +65,13 @@ export interface MenuActionPayload {
   kind?: string;
   generation?: number;
 }
+export interface WebDownloadPayload {
+  state: string;
+  id: string;
+  filename: string;
+  path: string;
+  bytes: number;
+}
 export interface WebEventPayload {
   targetId: number;
   phase: string;
@@ -75,6 +82,7 @@ export interface WebEventPayload {
   canGoForward: boolean;
   message?: string;
   code?: number;
+  download?: WebDownloadPayload;
 }
 export interface NshRuntimeContext {
   isActive(): boolean;
@@ -86,6 +94,7 @@ export interface NshRuntimeContext {
   viewAction(action: MenuActionPayload): boolean;
   webControllerAttached(targetId: number, nativeTag: string): boolean;
   webNavigate(targetId: number, url: string): boolean;
+  webDownloadAllowed(targetId: number, url: string): boolean;
   webEvent(event: WebEventPayload): boolean;
 }
 const inputTypes: Map<string, InputType> = new Map([
@@ -266,8 +275,14 @@ function editorContent(entry: EditorEntry) {
       .onTextSelectionChange((start: number, end: number) =>
         entry.emit("selection", "", start, end),
       )
-      .onWillInsert((value: InsertValue): boolean => { entry.editKey(value.insertValue); return true; })
-      .onWillDelete((): boolean => { entry.editKey("Backspace"); return true; })
+      .onWillInsert((value: InsertValue): boolean => {
+        entry.editKey(value.insertValue);
+        return true;
+      })
+      .onWillDelete((): boolean => {
+        entry.editKey("Backspace");
+        return true;
+      })
       .onAppear(() => entry.appeared());
   } else {
     TextInput({ text: entry.text, placeholder: entry.settings.placeholder, controller: entry.line })
@@ -280,8 +295,14 @@ function editorContent(entry: EditorEntry) {
       .onTextSelectionChange((start: number, end: number) =>
         entry.emit("selection", "", start, end),
       )
-      .onWillInsert((value: InsertValue): boolean => { entry.editKey(value.insertValue); return true; })
-      .onWillDelete((): boolean => { entry.editKey("Backspace"); return true; })
+      .onWillInsert((value: InsertValue): boolean => {
+        entry.editKey(value.insertValue);
+        return true;
+      })
+      .onWillDelete((): boolean => {
+        entry.editKey("Backspace");
+        return true;
+      })
       .onAppear(() => entry.appeared());
   }
 }
@@ -330,12 +351,16 @@ class EditorEntry {
     this.sdkBusy = true;
     try {
       this.node.build(wrapBuilder(editorContent), this);
-      if (this.closed || !this.context.isActive()) { throw new Error("Editor creation was cancelled"); }
+      if (this.closed || !this.context.isActive()) {
+        throw new Error("Editor creation was cancelled");
+      }
       const accepted = this.context.attachNativeNode(
         this.settings.targetId,
         this.node.getFrameNode(),
       );
-      if (!accepted || this.closed) { throw new Error("Native editor target is no longer live"); }
+      if (!accepted || this.closed) {
+        throw new Error("Native editor target is no longer live");
+      }
       this.attached = true;
     } catch (error) {
       this.dispose();
@@ -343,19 +368,26 @@ class EditorEntry {
     } finally {
       this.updating = false;
       this.sdkBusy = false;
-      if (this.disposePending) { this.disposePending = false; this.release(); }
+      if (this.disposePending) {
+        this.disposePending = false;
+        this.release();
+      }
       this.autoFocus();
     }
   }
   update(settings: EditorSettings): void {
-    if (this.closed) { throw new Error("Native editor is retired"); }
+    if (this.closed) {
+      throw new Error("Native editor is retired");
+    }
     if (
       settings.targetId !== this.settings.targetId ||
       settings.multiline !== this.settings.multiline
     ) {
       throw new Error("Editor replacement requires a new generation");
     }
-    if (settings.count === this.count) { this.text = settings.text; }
+    if (settings.count === this.count) {
+      this.text = settings.text;
+    }
     this.settings = settings;
     this.refresh();
   }
@@ -367,7 +399,10 @@ class EditorEntry {
     } finally {
       this.updating = false;
       this.sdkBusy = false;
-      if (this.disposePending) { this.disposePending = false; this.release(); }
+      if (this.disposePending) {
+        this.disposePending = false;
+        this.release();
+      }
       this.autoFocus();
     }
     this.scheduleSize();
@@ -434,9 +469,10 @@ class EditorEntry {
     if (this.closed || !this.context.isActive()) {
       return;
     }
-    const rect = this.settings.multiline && !this.settings.secure
-      ? this.area.getTextContentRect()
-      : this.line.getTextContentRect();
+    const rect =
+      this.settings.multiline && !this.settings.secure
+        ? this.area.getTextContentRect()
+        : this.line.getTextContentRect();
     if (rect.width !== this.contentWidth || rect.height !== this.contentHeight) {
       this.contentWidth = rect.width;
       this.contentHeight = rect.height;
@@ -444,14 +480,21 @@ class EditorEntry {
     }
   }
   emit(kind: string, text = "", start = 0, end = 0, width = 0, height = 0): void {
-    if (!this.attached || this.closed || !this.context.isActive() || (this.updating && kind !== "focus" && kind !== "blur")) {
+    if (
+      !this.attached ||
+      this.closed ||
+      !this.context.isActive() ||
+      (this.updating && kind !== "focus" && kind !== "blur")
+    ) {
       return;
     }
     const response = this.context.editorEvent(
       this.settings.targetId,
       new EditorEvent(this, kind, text, start, end, width, height),
     );
-    if (response.accepted) { this.count = response.count; }
+    if (response.accepted) {
+      this.count = response.count;
+    }
   }
   appeared(): void {
     this.scheduleSize();
@@ -459,18 +502,26 @@ class EditorEntry {
     this.autoFocus();
   }
   private autoFocus(): void {
-    if (this.sdkBusy || !this.attached || this.closed || !this.context.isActive()) { return; }
+    if (this.sdkBusy || !this.attached || this.closed || !this.context.isActive()) {
+      return;
+    }
     if (this.appearedPending && !this.focusedOnce && this.settings.autoFocus) {
       this.focusedOnce = true;
       try {
-        this.context.getUIContext().getFocusController().requestFocus(`nsh-editor-${this.settings.targetId}`);
+        this.context
+          .getUIContext()
+          .getFocusController()
+          .requestFocus(`nsh-editor-${this.settings.targetId}`);
       } catch {}
     }
   }
   command(command: EditorCommand): void {
     if (command.kind === "focus") {
       try {
-        this.context.getUIContext().getFocusController().requestFocus(`nsh-editor-${this.settings.targetId}`);
+        this.context
+          .getUIContext()
+          .getFocusController()
+          .requestFocus(`nsh-editor-${this.settings.targetId}`);
       } catch {}
     } else if (command.kind === "blur") {
       try {
@@ -493,11 +544,19 @@ class EditorEntry {
     }
   }
   private release(): void {
-    try { this.node.dispose(); this.disposed = true; quarantinedEditors.delete(this); }
-    catch (error) { quarantinedEditors.add(this); throw new Error(String(error)); }
+    try {
+      this.node.dispose();
+      this.disposed = true;
+      quarantinedEditors.delete(this);
+    } catch (error) {
+      quarantinedEditors.add(this);
+      throw new Error(String(error));
+    }
   }
   dispose(cleanup: NshRuntimeContext = this.context): void {
-    if (this.disposed) { return; }
+    if (this.disposed) {
+      return;
+    }
     this.closed = true;
     try {
       if (!this.retired) {
@@ -506,7 +565,11 @@ class EditorEntry {
         }
         this.retired = true;
       }
-      if (this.sdkBusy) { this.disposePending = true; } else { this.release(); }
+      if (this.sdkBusy) {
+        this.disposePending = true;
+      } else {
+        this.release();
+      }
     } catch (error) {
       quarantinedEditors.add(this);
       throw new Error(`Native editor retirement failed: ${String(error)}`);
@@ -517,29 +580,43 @@ class EditorEntry {
 export class NativeEditors {
   private entries: Map<number, EditorEntry> = new Map();
   remove(ids: number[], context: NshRuntimeContext): void {
-    for (const id of ids) { this.entries.get(id)?.dispose(context); this.entries.delete(id); }
+    for (const id of ids) {
+      this.entries.get(id)?.dispose(context);
+      this.entries.delete(id);
+    }
   }
   update(states: EditorSettings[], commands: EditorCommand[], context: NshRuntimeContext): void {
     for (const state of states) {
-      if (!context.isActive()) { throw new Error("NSH SDK session is inactive"); }
+      if (!context.isActive()) {
+        throw new Error("NSH SDK session is inactive");
+      }
       let entry = this.entries.get(state.targetId);
-      if (entry) { entry.update(state); }
-      else {
+      if (entry) {
+        entry.update(state);
+      } else {
         entry = new EditorEntry(state, context);
         // Publish before SDK build: onAppear/onClosing may reenter synchronously.
         this.entries.set(state.targetId, entry);
         entry.create();
       }
     }
-    for (const command of commands) { this.entries.get(command.targetId)?.command(command); }
+    for (const command of commands) {
+      this.entries.get(command.targetId)?.command(command);
+    }
   }
   dispose(context: NshRuntimeContext): void {
     let failure: Error | undefined;
     for (const id of Array.from(this.entries.keys())) {
       const entry = this.entries.get(id)!;
-      try { entry.dispose(context); this.entries.delete(id); }
-      catch (error) { failure ??= new Error(String(error)); }
+      try {
+        entry.dispose(context);
+        this.entries.delete(id);
+      } catch (error) {
+        failure ??= new Error(String(error));
+      }
     }
-    if (failure) { throw failure; }
+    if (failure) {
+      throw failure;
+    }
   }
 }

@@ -39,10 +39,15 @@ pub(crate) struct Screen {
     progress: Cell<f32>,
     peer: RefCell<Weak<Node>>,
     motion: RefCell<Option<Motion>>,
+    shader: RefCell<Option<Rc<crate::render::shader::navigation::Navigation>>>,
     immediate_removal: Cell<bool>,
     insets: Cell<Option<EdgeInsets>>,
 }
 impl Screen {
+    pub(crate) fn header(&self) -> &NativeNode {
+        &self.header
+    }
+
     pub(crate) fn new(owner: Weak<Node>) -> Result<Rc<Self>> {
         let header = Stack::new()?.into_node();
         let title = Text::new()?.into_node();
@@ -84,6 +89,7 @@ impl Screen {
             progress: Cell::new(0.0),
             peer: RefCell::default(),
             motion: RefCell::default(),
+            shader: RefCell::default(),
             immediate_removal: Cell::new(false),
             insets: Cell::new(None),
         });
@@ -102,7 +108,13 @@ impl Screen {
         self.has_back.get()
     }
     pub(crate) fn paint_visible(&self) -> bool {
-        self.is_top() || self.revealed.get() || self.motion.borrow().is_some()
+        if self.shader.borrow().as_ref().is_some_and(|n| n.backwards) {
+            return false;
+        }
+        self.is_top()
+            || self.revealed.get()
+            || self.motion.borrow().is_some()
+            || self.shader.borrow().is_some()
     }
     pub(crate) fn large_title_offset(&self) -> f32 {
         let c = self.config.borrow();
@@ -220,6 +232,20 @@ impl Screen {
             .mark_dirty(NodeDirtyFlag::NeedLayout)?;
         Ok(())
     }
+    pub(crate) fn restore_visibility(&self) -> Result<()> {
+        let c = self.config.borrow();
+        self.header
+            .borrow()
+            .set_i32_attribute(A::Visibility, i32::from(!c.header_visible))?;
+        self.title
+            .borrow()
+            .set_i32_attribute(A::Visibility, i32::from(c.title_view.is_some()))?;
+        self.back.borrow().set_i32_attribute(
+            A::Visibility,
+            i32::from(!self.has_back.get() || !c.back_visible),
+        )?;
+        Ok(())
+    }
     pub(crate) fn request_back(&self) -> Result<()> {
         let Some(owner) = self.owner.upgrade() else {
             return Ok(());
@@ -287,6 +313,13 @@ impl Screen {
         let Some(owner) = self.owner.upgrade() else {
             return Ok(());
         };
+        if self.shader.borrow().is_some() {
+            owner.navigation_presentation(1.0, 0.0)?;
+            if let Some(peer) = self.peer.borrow().upgrade() {
+                peer.navigation_presentation(1.0, 0.0)?;
+            }
+            return Ok(());
+        }
         let p = self.progress.get();
         let fade = self.config.borrow().animation == ScreenAnimation::Fade
             || owner.platform.get().reduce_motion;
@@ -310,13 +343,27 @@ impl Screen {
         let Some(owner) = self.owner.upgrade() else {
             return Ok(());
         };
-        let animated = self.config.borrow().animation != ScreenAnimation::None
-            && !owner.platform.get().reduce_motion;
+        if let Some(navigation) =
+            owner
+                .shaders
+                .begin_navigation(&owner, self.peer.borrow().upgrade(), to == 1.0)?
+        {
+            self.motion.borrow_mut().take();
+            *self.shader.borrow_mut() = Some(navigation);
+            self.show()?;
+            self.paint()?;
+            owner.animator.track(&owner);
+            return Ok(());
+        }
+        let motion = nsh_core::navigation::screen_motion(
+            self.config.borrow().animation,
+            owner.platform.get().reduce_motion,
+        );
         *self.motion.borrow_mut() = Some(Motion::new(
             owner.animator.now(),
             self.progress.get(),
             to,
-            animated,
+            motion.map(|motion| motion.0),
         ));
         self.show()?;
         self.paint()?;
@@ -324,7 +371,11 @@ impl Screen {
         Ok(())
     }
     fn push(&self) -> Result<()> {
-        if self.config.borrow().animation != ScreenAnimation::None && self.reveal()? {
+        let shader = self
+            .owner
+            .upgrade()
+            .is_some_and(|owner| owner.navigation_shader.borrow().is_some());
+        if (shader || self.config.borrow().animation != ScreenAnimation::None) && self.reveal()? {
             self.progress.set(1.0);
             self.animate(0.0)?;
         }
@@ -342,10 +393,14 @@ impl Screen {
             .borrow()
             .as_ref()
             .is_some_and(|motion| motion.to == 1.0)
+            || self.shader.borrow().as_ref().is_some_and(|n| n.backwards)
         {
             return Ok(true);
         }
-        if self.config.borrow().animation == ScreenAnimation::None || !self.reveal()? {
+        if (self.config.borrow().animation == ScreenAnimation::None
+            && owner.navigation_shader.borrow().is_none())
+            || !self.reveal()?
+        {
             self.show()?;
             return Ok(false);
         }
@@ -374,6 +429,7 @@ impl Screen {
         Ok(())
     }
     fn settle(&self) -> Result<()> {
+        let shader = self.shader.borrow_mut().take();
         self.motion.borrow_mut().take();
         self.progress.set(0.0);
         if let Some(owner) = self.owner.upgrade() {
@@ -411,16 +467,30 @@ impl Screen {
                 peer.invalidate_scene();
             }
         }
-        self.show()
+        self.show()?;
+        // Establish final native visibility before switching the root out of
+        // export, so its attachment repair includes every newly hidden screen.
+        if shader.is_some()
+            && let Some(owner) = self.owner.upgrade()
+        {
+            owner.shaders.end_navigation(owner.id)?;
+        }
+        Ok(())
     }
     pub(crate) fn frame(&self, now: f64) -> Result<(bool, bool)> {
-        let state = self.motion.borrow().as_ref().map(|motion| {
-            let reduced = self
-                .owner
-                .upgrade()
-                .is_some_and(|owner| owner.platform.get().reduce_motion);
-            motion.step(now, reduced)
-        });
+        let shader = self
+            .shader
+            .borrow()
+            .as_ref()
+            .map(|n| (n.running(), n.backwards));
+        if let Some((running, backwards)) = shader {
+            if running {
+                return Ok((true, false));
+            }
+            self.settle()?;
+            return Ok((false, backwards));
+        }
+        let state = self.motion.borrow().as_ref().map(|motion| motion.step(now));
         let Some((progress, done, to)) = state else {
             return Ok((false, false));
         };
@@ -440,6 +510,7 @@ impl Screen {
             && self.has_back.get()
             && c.gesture_enabled
             && self.motion.borrow().is_none()
+            && self.shader.borrow().is_none()
             && !owner.platform.get().screen_reader
             && if owner.platform.get().rtl {
                 x >= owner.frame.get().width - 24.0

@@ -17,13 +17,14 @@ pub(crate) struct Step {
     pub(crate) extra: Extra,
     pub(crate) active: bool,
     pub(crate) removed: bool,
+    pub(crate) restyled: bool,
 }
 
 impl Live {
-    pub(crate) fn finish(&mut self, style: &mut ViewStyle) -> Step {
+    pub(crate) fn finish(&mut self, style: &mut Box<ViewStyle>) -> Step {
         let frame = self.inner.frame_target().map(Rect::from);
         if let Some(target) = self.target_style.take() {
-            *style = *target;
+            *style = target;
         }
         let removed = self.inner.dying();
         self.inner = transition::Live::default();
@@ -33,6 +34,7 @@ impl Live {
             extra: Extra::NONE,
             active: false,
             removed,
+            restyled: true,
         }
     }
 
@@ -61,24 +63,24 @@ impl Live {
 
     pub(crate) fn style(
         &mut self,
-        out: &mut ViewStyle,
+        out: &mut Box<ViewStyle>,
         old: ViewStyle,
         reduce: bool,
         initialized: bool,
     ) {
         if reduce {
-            let _ = self.finish(&mut ViewStyle::default());
+            let _ = self.finish(&mut Box::default());
             return;
         }
-        let mut boxed = Box::new(out.clone());
+        let mut boxed = out.clone();
         let prev = if initialized {
             old
         } else {
             ViewStyle::default()
         };
         if let Some(restyle) = transition::restyle(&prev, &mut boxed, false) {
-            self.target_style = Some(Box::new(out.clone()));
-            *out = *boxed;
+            self.target_style = Some(out.clone());
+            *out = boxed;
             self.inner.restyle(restyle);
         } else {
             self.target_style = None;
@@ -102,17 +104,18 @@ impl Live {
         self.inner.revive();
     }
 
-    pub(crate) fn step(&mut self, now: f64, current_frame: Rect, style: &mut ViewStyle) -> Step {
+    pub(crate) fn step(
+        &mut self,
+        now: f64,
+        current_frame: Rect,
+        style: &mut Box<ViewStyle>,
+    ) -> Step {
         let prev_bounds = Bounds::<Points>::from(current_frame);
         let mut bounds = prev_bounds;
         let had_frame = self.inner.frame_target().is_some();
-        let mut boxed_style = Box::new(style.clone());
-        let s = self.inner.step(now, &mut bounds, &mut boxed_style);
-        if s.restyled {
-            *style = *boxed_style;
-            if self.inner.idle() {
-                self.target_style = None;
-            }
+        let s = self.inner.step(now, &mut bounds, style);
+        if s.restyled && self.inner.idle() {
+            self.target_style = None;
         }
         let frame_done = had_frame && self.inner.frame_target().is_none();
         Step {
@@ -121,6 +124,7 @@ impl Live {
             extra: self.inner.extra().unwrap_or(Extra::NONE),
             active: !s.finished && !self.inner.idle(),
             removed: s.removed,
+            restyled: s.restyled,
         }
     }
 }

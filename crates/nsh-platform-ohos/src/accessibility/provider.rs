@@ -54,8 +54,7 @@ impl State {
         let was_providing = self.suppressed.get();
         let spec = owner.accessibility_state.spec.borrow();
         let semantic_leaf = owner.children.borrow().is_empty() || spec.accessible == Some(true);
-        let eligible = crate::get_capabilities().api23
-            && !owner.wrapper_owns_semantics()
+        let eligible = !owner.wrapper_owns_semantics()
             && semantic_leaf
             && !spec.hidden
             && spec.accessible != Some(false)
