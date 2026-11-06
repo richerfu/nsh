@@ -350,7 +350,7 @@ pub(crate) fn build(release: bool, dev: bool, mut features: Vec<String>) -> anyh
 
     let declarations = out.join("index.d.ts");
     write_type_defs(&typedef_file, &declarations)?;
-    stage_arkts_deps(&root, &declarations)?;
+    stage_arkts_deps(&root, &out, &declarations)?;
     fs::write(
         out.join("build-metadata.json"),
         serde_json::to_vec_pretty(&json!({
@@ -482,8 +482,8 @@ fn write_type_defs(typedef_file: &Path, declarations: &Path) -> anyhow::Result<(
     Ok(())
 }
 
-fn stage_arkts_deps(root: &Path, declarations: &Path) -> anyhow::Result<()> {
-    let dest_root = root.join("target/ohos/arkts-deps");
+fn stage_arkts_deps(root: &Path, sdk: &Path, declarations: &Path) -> anyhow::Result<()> {
+    let dest_root = sdk.join("arkts-deps");
     if dest_root.exists() {
         fs::remove_dir_all(&dest_root)?;
     }

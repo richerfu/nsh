@@ -15,6 +15,8 @@ This is a minimal OHOS `UIAbility` app that embeds `examples/embedded/App.tsx` u
    NSH_PROFILE=release examples/embed-ohos/build.sh
    ```
 
+   The build script selects the library, declarations and ArkTS package from `target/ohos/$NSH_PROFILE/`.
+
 3. Open `examples/embed-ohos` in DevEco Studio, configure signing for `com.example.nsh`, and run on an `arm64-v8a` device or emulator:
 
    ```sh
@@ -25,17 +27,18 @@ This is a minimal OHOS `UIAbility` app that embeds `examples/embedded/App.tsx` u
 The example also registers a native component (`embed.badge`) used by `examples/embedded/App.tsx`:
 
 ```ts
-surface.registerComponent('embed.badge', (id: number) => createHostBadge(this.getUIContext(), surface, id));
+surface.registerComponent('embed.badge', (id: number) => new HostBadge(this.getUIContext(), id, surface));
 ```
 
-And talks to the app over the [`nsh/host`](../../website/modules/nsh-host.md) channel without a view:
+The surface is created in `aboutToAppear`, where the component's `UIContext` is available. It talks to the app over the `host` channel exported by `nsh`:
 
 ```ts
-surface.setParams({ host: 'OHOS (ArkTS)', initialCount: 10 });
-surface.handle('host.OrderTicket.submit', (data, reply) => {
-  reply.resolve({ orderId: 'ORD-1', status: 'filled' });
+surface.setParams({ user: 'OHOS' });
+surface.handle('time', (_data, reply) => {
+  surface.send('message', { text: 'Time requested from the native host' });
+  reply.resolve({ time: new Date().toLocaleTimeString() });
 });
-surface.send('host.OrderTicket.symbol', { symbol: 'NVDA' });
+surface.send('message', { text: 'Hello from the native toolbar' });
 ```
 
 And switches the app's theme at runtime with `setThemeOverrides`:
@@ -55,7 +58,7 @@ surface.setThemeOverrides(JSON.stringify({
 To verify and run a signed `.nsh` package downloaded at runtime:
 
 ```ts
-import { NshTrust } from 'libnsh_platform_ohos.so';
+import { NshTrust } from '@nsh/ohos';
 
 const trust = await NshTrust.open(`${context.filesDir}/nsh-trust`, ['<base64 root.pub>']);
 const pkg = await trust.openPackage(downloadedFilePath);

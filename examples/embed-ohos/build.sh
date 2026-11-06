@@ -10,6 +10,14 @@ SDK="$ROOT/target/ohos/$PROFILE"
 export DEVECO_SDK_HOME="$DEVECO_CONTENTS/sdk"
 export PATH="$DEVECO_CONTENTS/tools/node/bin:$PATH"
 
+# The example's DevEco module path is fixed; select the complete package from
+# the same SDK profile as its library and declarations before invoking ohpm.
+ARKTS="$ROOT/target/ohos/arkts-deps"
+test -f "$SDK/arkts-deps/nsh/oh-package.json5"
+mkdir -p "$ARKTS"
+rm -rf "$ARKTS/nsh"
+cp -R "$SDK/arkts-deps/nsh" "$ARKTS/nsh"
+
 mkdir -p "$APP/entry/libs/arm64-v8a"
 cp "$SDK/arm64-v8a/libnsh_platform_ohos.so" "$APP/entry/libs/arm64-v8a/"
 cp "$SDK/index.d.ts" "$APP/entry/src/main/cpp/types/libnsh_platform_ohos/Index.d.ts"
@@ -17,7 +25,7 @@ cp "$OHOS_NDK_HOME/native/llvm/lib/aarch64-linux-ohos/libc++_shared.so" "$APP/en
 
 BUILD_FLAGS=()
 if [[ "${NSH_SPLIT:-1}" == 1 ]]; then BUILD_FLAGS+=(--split); fi
-"${NSH_CLI:-$ROOT/target/debug/nsh}" build "$ROOT/${NSH_EXAMPLE:-examples/gallery}" \
+"${NSH_CLI:-$ROOT/target/debug/nsh}" build "$ROOT/${NSH_EXAMPLE:-examples/embedded}" \
   -o "$APP/entry/src/main/resources/rawfile" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"}
 
 cd "$APP"
