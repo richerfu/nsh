@@ -8,6 +8,9 @@ Nothing was changed by the audit. Each item below is executable: scope, evidence
 acceptance criteria and the check that proves it. Line numbers are for the audit baseline and drift as
 the code changes; the symbols named beside them are the stable reference.
 
+Revised after the render/mount pass: P1-11–P1-13, P2-14 (draw callbacks), P2-15–P2-18 and
+P3-8–P3-10.
+
 Items marked **device-verify** need a run on an OHOS device (the reference device is ALN-AL00,
 API 26). Everything else was read in the code or reproduced on this machine.
 
@@ -35,6 +38,9 @@ API 26). Everything else was read in the code or reproduced on this machine.
 | P1-8 | P1 | Failed system commands leave promises unsettled; duplicate openUrl result | S |
 | P1-9 | P1 | `os.platform()` / `process.platform` report `"linux"` on OHOS | S |
 | P1-10 | P1 | `sample_backdrop` is always transparent | M |
+| P1-11 | P1 | Layout-animation scoping is ignored; only the first animation per batch is used | S |
+| P1-12 | P1 | Text color transitions are not implemented | S |
+| P1-13 | P1 | Blur/shadow unit conversions disagree with ArkUI's docs (device-verify) | S |
 | P2-1 | P2 | Navigation header, alerts and video chrome are hand-drawn and inaccessible | L |
 | P2-2 | P2 | Rust ↔ ArkTS system commands are stringly typed, without stable codes | M |
 | P2-3 | P2 | Picker copying and host glue run on the UI thread; state is duplicated | M |
@@ -49,6 +55,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 | P2-12 | P2 | Shader layer races: `from`, `active`, progress | M |
 | P2-13 | P2 | EGL config requests ES2 while creating an ES3 context (device-verify) | S |
 | P2-14 | P2 | Panics can cross the main TSFN callbacks; GL error-path leaks | S |
+| P2-15 | P2 | NodeId-keyed state never shrinks; per-frame full scans | M |
+| P2-16 | P2 | `Stack`, `Image` and `Input` children are not clipped | S |
+| P2-17 | P2 | Inset box-shadows with zero blur are dropped | S |
+| P2-18 | P2 | Compositor walks the tree every UI frame; scenes rebuild every batch | M |
 | P3-1 | P3 | Animated image frame durations need `api-23` | S |
 | P3-2 | P3 | Signed-package/resource limits disagree; packages are consumed too early | S |
 | P3-3 | P3 | Notification listeners accumulate; `exitApp` is a no-op | S |
@@ -56,6 +66,9 @@ API 26). Everything else was read in the code or reproduced on this machine.
 | P3-5 | P3 | `process.run` has no OHOS sandbox gate (device-verify) | S |
 | P3-6 | P3 | Host-side tests cover none of the compositor/mounter state machines | M |
 | P3-7 | P3 | Stale validation numbers in the OHOS docs | S |
+| P3-8 | P3 | `pagePosition` ignores transforms and pins (device-verify) | S |
+| P3-9 | P3 | Stricter fatal mount policy than the other backends | S |
+| P3-10 | P3 | Mount parity leftovers: `InputAccessory`, `scroll_to`, large titles | M |
 
 ---
 
@@ -375,6 +388,81 @@ API 26). Everything else was read in the code or reproduced on this machine.
   - [ ] A backdrop shader samples what is behind the view (device fixture) or fails visibly.
 - **Verify:** device fixture with a photo behind a `backdrop-filter`-style shader.
 
+### P1-11 — Layout-animation scoping is ignored
+
+- **Area:** `crates/nsh-platform-ohos/src/render/mount.rs`.
+- **Status:** Confirmed by code and the core contract.
+- **Problem:** the batch pre-pass captures a layout animation only while none was seen
+  (`mount.rs:675-677`, `layout.is_none()`); every later `MountItem::LayoutAnimation` is a no-op
+  (`mount.rs:919`), and that single animation is used for every `Insert` (`mount.rs:886`), `Frame`
+  (`mount.rs:913-917`) and removal (`mount.rs:726-745,894-912`). The core leads **each run of
+  frames** with the layout animation it takes, an empty one for the rest
+  (`nsh-core/src/core/layout_scope.rs:61-125`), and `docs/dev/animation.md:81-84` states that
+  platforms animate a frame with the last `LayoutAnimation` before it. macOS and Windows update
+  their current animation per item (`nsh-platform-macos/src/mount.rs:488`,
+  `nsh-platform-windows/src/mount.rs:360`). A batch with two scoped animations (two
+  `ElementRef::animate_layout` regions, or a scoped reveal plus a `View::follow` placement) uses
+  the first scope for both, so one region either does not animate or animates with the wrong
+  transition.
+- **Change:** track the current animation while applying items: a `LayoutAnimation` sets it, and
+  each following `Insert`/`Frame` uses it. Keep the batch-level animation for removals (the core
+  decides those per batch, not per scope) and say so in the code. If the pre-pass needs the first
+  animation for retirement, keep that separate from the per-item current scope.
+- **Acceptance:**
+  - [ ] A batch with two different scoped transitions animates each run with its own.
+  - [ ] `Tabs`' indicator (`View::follow`, a spring) moves with its spring when another scoped
+    animation is in the same commit.
+  - [ ] An unscoped run in the same batch (the core's empty animation) moves at once.
+- **Verify:** extract the scope-selection into a pure helper with a unit test; device test with a
+  scoped reveal + `Tabs` in one commit.
+
+### P1-12 — Text color transitions are not implemented
+
+- **Area:** `render/mount.rs`, `render/transition.rs`, `render/node/paint.rs`.
+- **Status:** Confirmed.
+- **Problem:** `MountItem::Text` discards the attributed text (`mount.rs:925-944` destructures
+  `text: _`) and installs the final typeset drawing; the local `Live` wrapper has no
+  `text_color`/`recolor` (`render/transition.rs:23-129`). Desktop backends apply
+  `nsh_core::transition::recolor` and `Live::text_color` every frame
+  (`nsh-platform-macos/src/transition.rs:199-211`, `nsh-platform-windows/src/transition.rs:191-203`),
+  and `docs/dev/animation.md:95-107` says mobile backends follow the same rule. On OHOS a
+  `transition: { color }` on text jumps to the final color; only the animation graph's `color`
+  binding works via the tint.
+- **Change:** call `nsh_core::transition::recolor(old, new, style, reduce_motion)` when a text
+  layout replaces another whose single run color differs; keep the result in `Live`, and draw the
+  whole laid-out text in the in-between color over its runs (as an animated `color` is drawn),
+  without re-typesetting.
+- **Acceptance:**
+  - [ ] `transition: { color }` on `Text` interpolates on OHOS.
+  - [ ] Reduced motion jumps at once; an animated `color` prop keeps working.
+- **Verify:** device fixture; the core already unit-tests `recolor`/`Live::text_color`.
+
+### P1-13 — Blur and shadow units disagree with ArkUI's documented units
+
+- **Area:** `render/decor.rs`, `render/node/style.rs`, `media/image.rs`.
+- **Status:** Confirmed against the binding docs; the on-device effect needs a screenshot.
+- **Problem:** the SDK documents `NODE_BLUR` in **vp** (blur radius), `NODE_BACKDROP_BLUR` in
+  **px**, and `NODE_CUSTOM_SHADOW` radius in **vp** with x/y offsets in **px**
+  (`ohos-arkui-sys`'s `NODE_BLUR`, `NODE_CUSTOM_SHADOW`, `NODE_BACKDROP_BLUR` docs). The code:
+  - `decor.rs:130-138`: foreground `Blur = blur * scale` (vp field given px) and
+    `BackdropBlur = backdrop_blur * scale` (px field, correct);
+  - `node/style.rs:257-265`: custom shadow radius `blur * scale * 0.5` (vp field given px),
+    offsets `* scale` (px, correct);
+  - `media/image.rs:694-700`: `Blur = blur_sigma(radius, scale) = radius * scale * 0.5`.
+  At density 3 the two `NODE_BLUR` call sites differ by 2× from each other (3× vs 1.5×), so at
+  least one is wrong; foreground blur and the custom-shadow radius are inflated by density if the
+  docs hold.
+- **Change:** one conversion per attribute, named and documented from the SDK units, in
+  `render/geometry.rs` (e.g. `blur_vp(points)` for `NODE_BLUR`/shadow radius, `blur_px(points,
+  scale)` for backdrop, offsets in px). Use them at all call sites and note the attribute's unit
+  beside each.
+- **Acceptance:**
+  - [ ] A 12 pt foreground blur, backdrop blur, box-shadow and image blur look the same at density
+    1 and 3.
+  - [ ] No call site multiplies a vp attribute by the pixel ratio.
+- **Verify:** device fixture with side-by-side references at density 1/2/3; screenshot both
+  appearances.
+
 ---
 
 ## P2 — design, consistency and robustness
@@ -485,10 +573,15 @@ API 26). Everything else was read in the code or reproduced on this machine.
 - **Status:** Confirmed.
 - **Problem:** `Mounter::resize` updates the root frame but not `UiContext.platform`
   (`mount.rs:1381-1394`), which `Dialogs::show` reads for its width and max height
-  (`dialogs.rs:96,176`). `Services.pixel_ratio` is immutable (`session.rs:160,545-553`) and
-  `nshUpdateConfig` carries no density.
-- **Change:** update the platform window in `Mounter::resize`; add density to the configuration
-  update (and recompute scale/typography/insets on change).
+  (`dialogs.rs:96,176`). `UiContext.platform` is otherwise written only by
+  `Mounter::environment` (`mount.rs:149-162`), reached from `layout_changed` only when
+  `window_areas()` is `Some` (`app/runtime.rs:911-926`), so a host that never reports avoid areas
+  also keeps stale safe-area and modal sheet insets (`navigation/modal.rs:359-445`).
+  `Services.pixel_ratio` is immutable (`session.rs:160,545-553`) and `nshUpdateConfig` carries no
+  density.
+- **Change:** update the platform window in `Mounter::resize` (and derive insets from the last
+  known areas); add density to the configuration update (and recompute scale/typography/insets on
+  change).
 - **Acceptance:**
   - [ ] Rotate/resize, then open an alert: it is sized for the new window.
   - [ ] Change display density / fold state: `platform.pixelRatio`, text and layouts follow.
@@ -601,15 +694,99 @@ API 26). Everything else was read in the code or reproduced on this machine.
 - **Problem:** the two main TSFN callbacks (`surface.rs:721-727`, `runtime.rs:724-732`) call
   `State::dispatch`/`receive` directly; those contain `.unwrap()`/`.expect()` on locks and state,
   while ArkUI/executor/host callbacks are wrapped in `catch_unwind`. A panic unwinds through an
-  `extern "C"` callback and aborts. `Target::new` returns on an incomplete framebuffer without
+  `extern "C"` callback and aborts. The same gap exists on custom **draw** callbacks: measure and
+  layout are wrapped in `callback()` (`render/node/layout.rs:23-40`), but
+  `render/node/paint.rs:27-31`, `render/shadow.rs:78-93` and the wrapper draw in
+  `interop/view.rs:127-140` call into drawing directly, and `Node::draw` reaches locked font/canvas
+  state. `Target::new` returns on an incomplete framebuffer without
   deleting the texture/framebuffer (`gles.rs:69-113`); `TextureReader::drop` `mem::forget`s its GL
   owners when the context cannot be entered (`readback.rs:624-629`) without telemetry.
-- **Change:** wrap both TSFN callbacks in `catch_unwind` and report the panic as an app error; fix
-  the `Target::new` error-path deletion; log/quarantine counting for the `mem::forget` paths.
+- **Change:** wrap both TSFN callbacks and the draw callbacks in `catch_unwind` and report the panic
+  as an app error; fix the `Target::new` error-path deletion; log/quarantine counting for the
+  `mem::forget` paths.
 - **Acceptance:**
   - [ ] An induced panic in a UI message is logged and the surface closes, not the process.
   - [ ] No GL objects leak across 100 target recreations in a fault-injected build.
 - **Verify:** host unit test for the guard; device fault injection only.
+
+### P2-15 — NodeId-keyed state never shrinks and is scanned every frame
+
+- **Area:** `render/mount.rs`, `render/animation.rs`.
+- **Status:** Confirmed; the other backends use maps and remove entries.
+- **Problem:** `Mounter.slots` is a dense `Vec<Option<Rc<Node>>>` grown to `id + 1` on every
+  `Create` (`mount.rs:84,805-807`); deletion only clears the slot (`mount.rs:603-615`) and the
+  vector is never truncated. The `Animator` keeps four more dense by-id vectors (`bindings`,
+  `motion`, `scrolls`, `sticky` — `animation.rs:25-30`), clears entries without shrinking them, and
+  every frame iterates all of `scrolls`/`motion` (`animation.rs:188-214`) while `write()` iterates
+  every binding and sticky slot (`animation.rs:220-249`). `Mounter::environment`, `cancel_input`
+  and `native_context` also scan `slots` (`mount.rs:151,191,224`). IDs advance by 2 per JS element
+  (`nsh-js/src/dom.rs:830-834`), so a long session that creates and destroys 100k elements leaves
+  ~200k slots (~tens of MB) and pays an O(max id) scan on every active frame and on those
+  maintenance paths. macOS/Windows use `FxHashMap` and remove on Delete.
+- **Change:** key the mounter and animator state by a map or a slab with free-list reuse (the core
+  guarantees monotonic IDs today, but nothing should rely on the maximum), and compact the animator
+  sets when they empty. At minimum, truncate trailing `None` slots and skip empty vectors.
+- **Acceptance:**
+  - [ ] After 100k create/delete cycles, an idle frame touches only active entries (counted).
+  - [ ] Resident memory returns near the baseline after the deletions.
+- **Verify:** host microbenchmark on the animator; device long-session trace with memory sampling.
+
+### P2-16 — `Stack`, `Image` and `Input` children are not clipped
+
+- **Area:** `render/node/style.rs`.
+- **Status:** Confirmed.
+- **Problem:** `clips_children()` clips only `overflow_hidden`, `Scroll` and non-full-screen modals
+  (`style.rs:22-28`). macOS, Windows and Linux also clip `Image`, `Stack` and `Input`
+  (`nsh-platform-macos/src/view.rs:211-217`, `nsh-platform-windows/src/view.rs:260-266`,
+  `nsh-platform-linux/src/view.rs:187-193`). During a push the entering screen is translated to
+  `x = width` and the one below to `-0.3 * width` (`navigation/stack.rs:324-339`); a sheet-sized
+  stack can therefore paint its sliding page outside its bounds, and image/input children are not
+  clipped to their rounded boxes.
+- **Change:** match the other backends' kind list in `clips_children()`, keeping the modal sheet
+  rule.
+- **Acceptance:**
+  - [ ] A constrained-size `NavStack` shows no page outside its bounds during push/pop.
+  - [ ] Children of `Image`/`Input` clip to the rounded bounds.
+- **Verify:** device screenshots of a sheet-sized stack mid-transition, and an image with an
+  overflowing child.
+
+### P2-17 — Inset box-shadows with zero blur are dropped
+
+- **Area:** `render/decor.rs`.
+- **Status:** Confirmed.
+- **Problem:** `visible_layer` requires `(!inset || layer.blur.0 > 0.0)` (`decor.rs:235-238`), so a
+  visible inset shadow with no blur — CSS `box-shadow: inset 0 0 0 Npx color`, the common focus
+  ring — is never drawn. `BoxShadow::is_visible` only checks the color
+  (`nsh-core/src/effects.rs:31-33`) and the style enables custom drawing for it
+  (`node/style.rs:397-405`).
+- **Change:** draw inset shadows regardless of blur (the painter handles the offset/spread); keep
+  the existing fast path for empty layers.
+- **Acceptance:**
+  - [ ] An inset 0-blur ring shows in light and dark.
+- **Verify:** device screenshot of a focus ring.
+
+### P2-18 — Compositor walks the tree every UI frame; scenes rebuild every batch
+
+- **Area:** `render/mount.rs`, `render/composition/scene.rs`, `render/arkui.rs`,
+  `interop/view.rs`, `render/shader/mod.rs`.
+- **Status:** Confirmed; performance-only but on a hot path.
+- **Problem:** every mount batch calls `scene.invalidate()` unconditionally (`mount.rs:665-667`),
+  and `Scene::build` re-snapshots the whole tree (including `capture_bounds`) and re-plans the
+  worker (`composition/scene.rs:133-183`); every `flush_arkui` walks all composite owners and
+  calls `update_wrapper → Composite::update → capture_bounds()` (`render/arkui.rs:115-121`,
+  `interop/view.rs:493-506`, `composition/worker.rs:891-943`). `Shaders::frame` calls `in_sight`
+  for every shader view on every UI frame, with native geometry queries per node and ancestor
+  (`shader/mod.rs:208-252,290-322`). There is no dirty tracking, so a screen shader on the root
+  walks the whole tree each batch and each shader view is re-tested each frame during any
+  animation.
+- **Change:** invalidate the scene per changed node; recompute a composite's capture bounds only
+  when its layout or style changed (the mounter knows); cache `in_sight` per scroll/layout
+  generation and skip unchanged views. Add counters/trace to prove the bound.
+- **Acceptance:**
+  - [ ] During scroll and animation, per-frame native queries scale with visible shaders, not all
+    nodes.
+  - [ ] A batch that changes one node does not re-plan every scene root.
+- **Verify:** device trace on a shader/mask-heavy page; before/after counters in `nsh::perf`.
 
 ---
 
@@ -670,6 +847,65 @@ API 26). Everything else was read in the code or reproduced on this machine.
 - **Change:** update the host-test count (83 at this baseline) and the shader validation notes;
   move the "follow-up" table entries to this fix list once fixed.
 
+### P3-8 — `pagePosition` ignores transforms and pins
+
+- **Area:** `render/node/pointer.rs`, `render/node/transform.rs`.
+- **Status:** Device-verify.
+- **Problem:** hit testing composes the view's `input_transform` (transform origin, transition
+  transform, sticky pin, navigation presentation) in `transform.rs:14-68,99-253`, but
+  `pointer_positions` derives `pagePosition` from `layout_position_in_window` plus local
+  coordinates (`pointer.rs:128-156`), and that native helper reports the layout position without
+  translation/scale/rotation. Events from a transformed, animated or sticky-pinned node can
+  therefore report a page position that disagrees with the point the engine hit.
+- **Change:** derive `pagePosition` from the same composed matrix used for hit testing (or document
+  that it is the layout position), and add a device check during transitions and on pinned sticky
+  content.
+- **Acceptance:**
+  - [ ] `pagePosition` matches the visual point under a translated/rotated view and a pinned sticky
+    header.
+- **Verify:** device test logging `pagePosition` against screenshots.
+
+### P3-9 — Stricter fatal mount policy than the other backends
+
+- **Area:** `render/mount.rs`.
+- **Status:** Confirmed divergence; currently unreachable with monotonic core IDs.
+- **Problem:** a duplicate `Create` and an `Insert` whose child is unknown become fatal
+  `Error::Tree` (`mount.rs:805-814,829-832`), and a `Tree` error closes the running app
+  (`app/runtime.rs:395-405`). macOS and Windows skip/replace instead
+  (`nsh-platform-macos/src/mount.rs:223-236,247-250`, `nsh-platform-windows/src/mount.rs:112-124,136-137`).
+  `MountItem::Frame` is not ignored for `ROOT_ID`, while the other mounters return for it
+  (`macos:299-303`, `windows:185-189`).
+- **Change:** match the other mounters: warn and skip/replace recoverable staleness, keep a fatal
+  error only for an unrecoverable native failure, and ignore a root `Frame`.
+- **Acceptance:**
+  - [ ] A stale/duplicate op is logged and the app keeps running.
+  - [ ] A root `Frame` does not fight the viewport size.
+- **Verify:** host test with a synthetic batch; device fault injection only.
+
+### P3-10 — Mount parity leftovers
+
+- **Area:** `render/mount.rs`, `render/node/lifecycle.rs`, `render/node/layout.rs`,
+  `navigation/stack.rs`.
+- **Status:** Confirmed.
+- **Problem / change:**
+  - **`InputAccessory`** is treated as an ordinary child (`mount.rs:824-893`; `Node::new` ignores
+    the kind and its layout callbacks, `node/lifecycle.rs:140-156`), and nothing reads
+    `InputConfig.accessory`/`accessory_id`. `nsh/ios`'s `InputAccessoryView` is iOS-only, so decide
+    between attaching it above the keyboard (as macOS/Windows do) and not creating a stray view;
+    document the choice.
+  - **`Mounter::scroll_to`** ignores `x`, `y` and `animated` (`mount.rs:234-241`); the only sender
+    passes zeros today (`app/runtime.rs:342-346`). Implement it or assert the zero contract.
+  - **Large titles** are approximated by shifting children down by `52 + top_overlap` and shrinking
+    the viewport (`node/layout.rs:58-77`, `navigation/stack.rs:119-129`), so content never scrolls
+    under the header and the native frames used for hit testing differ from the frames core
+    reports. Implement a collapsing large title (native frames following core's `onLayout`) or
+    document that OHOS draws a fixed large-title bar.
+- **Acceptance:**
+  - [ ] The keyboard accessory appears above the keyboard or is documented unsupported.
+  - [ ] `scrollTo` either scrolls or rejects a non-zero request.
+  - [ ] A large title collapses under scroll, or the limitation is documented.
+- **Verify:** device fixture for each; screenshot the large title mid-scroll.
+
 ---
 
 ## Device-verification checklist
@@ -690,11 +926,21 @@ Run these on ALN-AL00 (API 26) and, where possible, an API 20 device:
 - [ ] Failed dispatch and duplicate openUrl (P1-8).
 - [ ] `os.platform()` value (P1-9).
 - [ ] Backdrop shader (P1-10).
+- [ ] Two layout-animation scopes in one batch; `Tabs` indicator (P1-11).
+- [ ] Text `transition: { color }` (P1-12).
+- [ ] Foreground blur, backdrop blur, shadow and image blur at density 1/2/3 (P1-13).
 - [ ] Screen reader walkthrough of header/alert/video (P2-1).
 - [ ] 20 app reloads on one surface: no XComponent/EGL growth (P2-6).
 - [ ] Rotation + density change (P2-7).
 - [ ] EGL init on API 20/23/26 (P2-13).
 - [ ] Large/tall shader target (P2-11).
+- [ ] 100k create/delete cycles: no memory growth, bounded per-frame scan (P2-15).
+- [ ] Sheet-sized `NavStack` mid-push: no page painted outside (P2-16).
+- [ ] Inset 0-blur focus ring (P2-17).
+- [ ] Scroll on a mask/shader-heavy page: compositor work scales with visible nodes (P2-18).
+- [ ] `pagePosition` under a transformed and a pinned view (P3-8).
+- [ ] Stale/duplicate mount ops keep the app running (P3-9).
+- [ ] Keyboard accessory and large title (P3-10).
 
 ## Suggested PR split
 
@@ -725,6 +971,14 @@ One change per PR, with the tests named above:
 22. `ohos: Track window size and density in the environment` (P2-7).
 23. `ohos: Serve app UI sets; reserve nsh/* component names` (P2-8).
 24. `docs: Correct the OHOS server and capability documentation` (P2-9, P2-10, P3-7).
+25. `ohos: Follow each layout-animation scope` (P1-11).
+26. `ohos: Transition text colors` (P1-12).
+27. `ohos: Use ArkUI's blur and shadow units` (P1-13).
+28. `ohos: Reclaim NodeId-keyed state` (P2-15).
+29. `ohos: Clip Stack, Image and Input children` (P2-16).
+30. `ohos: Draw inset shadows without blur` (P2-17).
+31. `ohos: Rebuild scenes and composites only when dirty` (P2-18).
+32. `ohos: Match the other backends' mount tolerance` (P3-8, P3-9, P3-10).
 
 ## What was checked and is sound
 
@@ -732,7 +986,13 @@ One change per PR, with the tests named above:
   the GLSL ES translation is the core's and needs no OHOS-specific copy.
 - Every `MountItem` and core `Command` variant is matched by the mounter; `TreeOrder` and
   `ProjectStates` are intentionally not requested; stale `TrackStates` and `Insert.before` for a
-  sibling not yet inserted are tolerated (deferred updates; insert-last fallback).
+  sibling not yet inserted are tolerated (deferred updates; insert-last fallback). Its semantics
+  differ for repeated `LayoutAnimation` items and text recolor (P1-11, P1-12), and its clipping and
+  fatal-error policy differ from the other mounters (P2-16, P3-9).
+- The render/mount pass confirmed the px/vp split for layout, position, transforms and hit testing,
+  `ResponseRegion`/hitSlop mapping, the `HitTestMode` mapping, the monotonic frame clock, and the
+  navigation/transform ordering. The exceptions are the blur/shadow units (P1-13) and the
+  `pagePosition` derivation (P3-8).
 - Core motion is reused where it exists: navigation push/pop and insets, hit areas, layout
   transitions/keyframes, the animation graph, scroll config/sticky/reports, the selection model,
   SVG, shader compilation and the image disk cache.
