@@ -4,6 +4,29 @@ Performance is the project's first priority; the rules are in `AGENTS.md`. Chang
 after `nsh test --trace` timings and item counts (`nsh trace` before it, in the records below). Current baselines
 (Apple Silicon except where noted):
 
+OHOS shader navigation (ALN-AL00, API 26, release embedding host, 1260×2506 pixels, local SVG/text/color pages,
+2026-11-05): the initial readback/bitmap implementation took a median 121.8 ms per worker turn. An intermediate
+CPU-copy optimization reduced this to 15.9 ms, plus 12.5 ms for PixelMap presentation; it did not meet the 8.33 ms
+budget for 120 frames/s. That path was replaced with GLES textures and direct XComponent presentation, and the
+shared engine's experimental mapped-copy specialization was removed.
+
+The first GPU implementation using XComponent Texture was also limited: a system trace measured native VSync
+at a median 8.28 ms, but per-output buffer submissions at about 16.5 ms. On the busiest output queue, RequestBuffer
+waited a median 10.18 ms (p95 14.19 ms). Native VSync scheduling alone did not remove that buffer-consumption
+bottleneck. Switching to XComponent Surface bypassed the Texture consumer's UI drawing path. A subsequent
+uninstrumented 6-second wipe, sampled during its steady phase, produced 370 actual screen-composition timestamps
+in 3.055956 seconds: 120.75 fps, median interval 8.286 ms, p95 8.347 ms, maximum 8.362 ms. The panel's measured
+VSync period is approximately 8.28 ms. This result is for the full-resolution SVG/text/color fixture, not every
+shader or CSS-filter combination. Raw timestamps: `.nsh/device-validation-20261105/surface-composer-fps.txt`.
+An Animated-driven pixelation effect measured 374 composition timestamps over 3.089057 seconds, also
+120.75 fps, median 8.284 ms and p95 8.345 ms (`uniform-composer-fps.txt` in the same artifact directory).
+The earlier diagnostic traces are `/tmp/nsh-shader-vsync.trace` and `/tmp/nsh-shader-surface.trace`.
+
+The same fixture's headless `nsh test --trace` push/pop check kept 190 ops / 191 mount items / 60 nodes at
+startup, 56 / 60 / 78 on push, 1 / 2 / 78 on pop and 18 / 15 / 60 on retirement. One before/after run measured
+13.56 → 8.50 ms, 1.99 → 0.43 ms, 173 → 33 µs and 259 → 120 µs respectively. Those noisy headless samples
+establish unchanged engine work; the native timing above measures the rendering change.
+
 Live resize of a real app (Noop, 10 065 nodes, a horizontal corner drag of 6 s, release, `--target macos` package, no
 sampler): window sizes per second 12 → 62-65, gap between sizes p50 86 → 16 ms and p95 about 25 ms, the window's lag
 behind the pointer p50 20 → 3-4 pt. An empty page and TextEdit both do about 87 sizes per second on this machine. Text

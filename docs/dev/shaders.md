@@ -2,14 +2,14 @@
 
 A shader view (`Shader` from `nsh`, the `shader` host element; Rust `nsh_core::element::shader()` with `.source(..)`) is a view whose
 box a GPU program the app writes in WGSL draws, over the view's background and under its children. The program is
-checked and wrapped in Rust (`nsh_core::shader`), rendered by wgpu on the native backends (`nsh_engine::shader`, feature `shader`) and by
-WebGL 2 on the web, from GLSL ES the core translates it into. The module docs of `crates/nsh-core/src/shader.rs` and
+checked and wrapped in Rust (`nsh_core::shader`), rendered by wgpu on the native backends (`nsh_engine::shader`, feature `shader`),
+by GLES 3 on OHOS and by WebGL 2 on the web, from GLSL ES the core translates it into. The module docs of `crates/nsh-core/src/shader.rs` and
 `crates/nsh-engine/src/shader.rs` are the reference; this page is the overview.
 
 ## Feature `shader`
 
 The platform crates' feature `shader` (`nsh-platform-*`, `nsh-*-app`; on by default, and always with `dev`) is what links
-naga and wgpu. Off, `Shader::compile` refuses every source (`nsh-core`), `nsh_engine::shader::Renderer::new` is `None`
+naga and wgpu (OHOS uses GLES 3). Off, `Shader::compile` refuses every source (`nsh-core`), `nsh_engine::shader::Renderer::new` is `None`
 (`shader_off.rs`), shader views draw nothing and shader transitions end at once. The rest of the API stays. It is for
 Rust apps and embedders; the prebuilt runners an app without Rust crates ships have it on. The web links its compiler
 by what the app imports (`docs/dev/browser-js-size.md`), and GPUI always has it. A crate with `default-features = false`
@@ -138,17 +138,24 @@ is. Views out of sight stop rendering until they show again.
 | Windows | the surface's frame ticker (`Surface::on_frame`), at the window's scale | a Direct2D bitmap drawn under the children (made again after a device loss) | `reveal`: hidden, concealed or detached views |
 | GPUI | a frame client of its surface | a GPUI image (BGRA, straight, the view's opacity multiplied in, as canvases' pixmaps), whose replaced image leaves GPUI's atlases | views not drawn in the last frame |
 | Web | `requestAnimationFrame` | a `<canvas>` under the children (an effect's and a running transition's over them) | `IntersectionObserver` |
-| OHOS | a thread of the surface's own (`nsh-shader`), on the surface's `NativeVSync` | its own XComponent's native window, first among the view's children, clipped to its corners | `in_sight`: hidden, or outside the root or a scroll view around it |
+| OHOS | the surface's compositor worker (`nsh-compositor`), on native VSync | its own XComponent's native window, first among the view's children, clipped to its corners | `in_sight`: hidden, or outside the root or a scroll view around it |
 
-On OHOS wgpu has only its GLES backend, where rendering and reading a frame back wait for the GPU on the calling
-thread, so OHOS does not use `nsh_engine::shader`'s read-back renderer (`render/shader/`). Each shader view has an
-XComponent (`surface.rs`) first among its children, the size of its box and clipped to its corners, and a thread of the
-surface's own owns a wgpu device (`gpu.rs`: the engine's pipelines and bindings, `nsh_core::shader`'s programs,
-built-ins and slots) that renders each view straight into its XComponent's native window and presents it; RenderService
-composites it as it does a video's. The UI thread only sends the worker layers, slots, sizes, whether a view is in sight
-and its window; the worker renders on the surface's VSync while a view in sight has a frame due. A view that goes keeps
-its XComponent until the worker has dropped its surface of the window (`Message::Shader`). wgpu's GLES surfaces offer
-only the `Opaque` composite alpha mode, so a shader's translucent pixels are not blended with what is under the view.
+OHOS fills and effects share one GLES compositor worker per surface. Each fill has an XComponent
+(`render/composition/surface.rs`) first among its children, the size of its box and clipped to its corners.
+The UI sends layers, slots, sizes, visibility and windows; the worker presents while a visible view needs a frame.
+A retiring fill keeps its XComponent until the worker releases its native window (`Message::Shader`).
+
+OHOS effects compile through the core's `Shader::glsl_es`, as on the web. The compositor worker
+(`render/composition/gles.rs`) consumes ArkUI's NativeImage textures, runs GLES 3 passes and presents directly
+through an XComponent Surface with alpha. The same EGL context owns input and output textures. Continuous frames
+stay on the GPU; the UI updates presentation geometry only when bounds change. The worker follows the window's
+native VSync while visible effects need frames, independently of the UI callback cadence.
+Content transitions retain their previous GPU input. Navigation takes one outgoing ArkUI snapshot before native
+hiding and combines it with the live destination export. Pages compose on the root; ArkUI dialogs use their own
+surface. The compositor clock drives progress; generation-scoped completion releases the navigation layer after
+its terminal frame is presented. Screen shaders remain on the embedded root.
+Shader backdrop capture, expanded
+overflow capture and integration with the CSS scene compositor remain separate work (see [ohos.md](ohos.md)).
 
 ### Effects and transitions
 

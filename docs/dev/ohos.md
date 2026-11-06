@@ -20,7 +20,7 @@ cargo xtask clippy-ohos                  # clippy across default, dev, api-23 an
 ```
 
 `cargo xtask ohos` builds `libnsh_platform_ohos.so`, generates `index.d.ts`, and stages the companion `@nsh/ohos`
-ArkTS package under `target/ohos/arkts-deps/nsh/`.
+ArkTS package under `target/ohos/<profile>/arkts-deps/nsh/`.
 The SDK enables the core's shader compiler and the base library's editor, highlighting, math, plot and rich-editor
 features explicitly, so the shared component exports remain present after the 0.4.0 feature split.
 
@@ -39,12 +39,32 @@ Features:
 - **Commits and frames** (`src/render/`): the engine submits each `MountBatch` through a N-API threadsafe function to
   the ArkUI UI thread. Per-surface `NativeVSync` callbacks drive animations on the UI thread; idle surfaces request no
   frames.
-- **Shaders** (`src/render/shader/`): wgpu runs on GLES only, which waits for the GPU on the calling thread, so each
-  shader view renders into a native surface of its own (an XComponent first among its children) from a thread of the
-  surface's (`nsh-shader`), paced by the surface's `NativeVSync`, skipping views out of sight; nothing is read back
-  (`docs/dev/shaders.md`).
+- **Shader fills** (`src/render/shader/`, `src/render/composition/fill.rs`): each fill presents through an XComponent
+  first among its children. Fills and effects share the surface's GLES compositor worker (`nsh-compositor`) and
+  native VSync, compiling the core's GLSL ES and skipping fills out of sight; pixels stay on the GPU.
+- **Shader effects and transitions** (`src/render/composition/gles.rs`): ArkUI exports the native subtree to a
+  NativeImage texture while its original nodes retain input. The compositor consumes the external texture and
+  renders the core's GLSL ES program with GLES 3 on that same context. Inputs, intermediate targets and output
+  remain on the GPU; an inert XComponent Surface outside the exported subtree presents through EGL and keeps
+  alpha for RenderService composition. Its geometry changes only when the capture bounds change.
+  The worker advances shader clocks on the window's native VSync, requesting 120 Hz during active rendering.
+  UI frame callbacks update ownership and animated uniforms. Actual presentation cadence is measured separately
+  from the requested rate (see `performance.md`). Exported CSS filters use ordered GLES passes; masks and ordered
+  backdrop roots use the separate CPU scene compositor (`composition/raster.rs`).
+  Content transitions hold their previous input texture; an interrupted transition starts from its displayed
+  output. Navigation holds the outgoing side once and releases its overlay after the transition completes.
+  At completion the GPU keeps the transition's terminal frame until the UI removes its layer; it resumes
+  ordinary content only after that handoff, so a returning page cannot flash its outgoing content again.
+  Screen shaders target the embedded root and stay active until their declaring node is unmounted, including
+  while its page is covered. Native dialogs have their own surface and retain their wrappers until exit completes.
+  The root's content wrapper is established at initial mount, before scroll descendants are laid out; enabling
+  a screen effect then changes its render target while preserving the root's layout host and scroll positions.
+  Navigation takes one outgoing ArkUI snapshot before changing visibility. Page transitions compose on the
+  root (the nearest dialog root for nested stacks), with its live destination export; dialogs compose on their
+  own surface. Inputs align in physical screen coordinates. The compositor clock drives progress and a
+  generation-scoped completion message retires the layer. Continuous frames require no CPU pixel transfer.
 - **Typography** (`src/text/`): the engine thread shapes and measures paragraphs with `ohos-drawing-binding`
-  (`FontCollection::shared()`, `Typography`) and hands owned RGBA bitmaps and selection geometry to the UI thread.
+  (`src/text/fonts.rs`, `Typography`) and hands owned native drawing commands and selection geometry to the UI thread.
 - **Controls and media** (`src/input/`, `src/scroll/`, `src/media/`, `src/interop/`): `Input` uses the system
   `TextInput` / `TextArea` BuilderNode; `Scroll` and `List` use native ArkUI `Scroll` (with on-demand `Refresh`);
   `WebView` uses `ArkWeb`; `Video` uses a C `XComponent` surface and an `AVPlayer` worker.
@@ -63,23 +83,22 @@ cross-compilation and host tests do not establish native rendering or interactio
 
 The integration updates `EngineConfig::speech`, the shader built-ins' 32-byte buffer (`progress` and `overflow`),
 and the exhaustive mount protocol. `TreeOrder` and `ProjectStates` are opt-in projections used by the terminal
-backend; OHOS does not request them. Shader fills continue to draw in their XComponents. Effects show their
-children directly, transitions change them immediately, and pages and dialogs retain their ordinary `animation`,
-following the fallback also used by GPUI. Only `ShaderRole::Fill` is passed to the OHOS GPU renderer.
+backend; OHOS does not request them. Shader fills draw in XComponents; effects, content/screen transitions and
+pages' and dialogs' `transitionShader` use the compositor path described above.
 
-The following work remains for native feature parity, in suggested order:
+Native feature support and platform boundaries:
 
 | Priority | API or behavior | Current OHOS behavior and implementation boundary |
 |---|---|---|
-| High | `lifecycle()` / Rust `lifecycle()` | `Environment::lifecycle` stays at its default `Active`. `arkts/src/main/ets/NshHost.ets` folds window inactivity and background into one foreground boolean; `src/app/runtime.rs` uses it to gate frames but does not publish lifecycle changes. Preserve three states and send the environment to the engine, including the initial state. |
-| High | `fontFamily` lists; WOFF / WOFF2 imports | `src/text/typography.rs` and `src/render/canvas.rs` pass a list as one font name. Use `nsh_core::style::font_families` with native generic-family mappings; check the native editor path too. `register_font` parses raw bytes as TTF/OTF: call bounded `nsh_core::text::font_data` before parsing and retain the decompressed bytes. |
-| High | `ShaderEffect`, `ShaderTransition`, `ScreenEffect`, `ScreenTransition`, `transitionShader` | The fallback above preserves content. Full support needs subtree/surface/backdrop pictures, texture bindings, invalidation, transition clocks and presentation above live children in `src/render/shader/` and navigation. Passing effect programs to the fill pipeline is insufficient. |
-| Medium | `Speech.available()`, `Speech.start()` | `Environment::speech` is false and `EngineConfig::speech` is `None`; the core answers unavailable (after capability checks). Add a native recognizer or expose an embedding backend, with permission, cancellation and session teardown. |
-| Medium | `Notifications` permission, show, cancel, badge and press events | `Environment::notifications` is false; the core answers unavailable. `Command::Notification` has no OHOS handler. Add permission requests, native notification IDs, badge handling and cold-start press delivery before enabling the flag. |
-| Medium | `ViewProps::continues_text`, selectable views | OHOS selection is per paragraph (`src/text/selection/`), with no `SelectionTexts` adapter. Cross-view selection was already a gap; the new soft-wrapped `DiffView` continuation contract additionally needs joins without inserted line breaks. |
-| Medium | `AccessibilityState::has_popup`; diagonal resize cursors | The new popup distinction and `Cursor::NwseResize` / `NeswResize` are not consumed by the OHOS backend. Extend native accessibility and pointer presentation where supported. |
-| Optional extension | `WebView.sendInput`, `onDownload` | These land with macOS implementations. OHOS handles neither trusted `Command::SendInput` nor native download events; an ArkWeb implementation is separate work, including its input capability and download lifetime/storage rules. |
-| Follow-up | System alert/action-sheet and TabBar theme colors | Upstream now derives these from design tokens. OHOS does not handle `Command::DesignTokens`; connect token changes to the ArkTS system controls when adopting that behavior. |
+| Supported | `lifecycle()` / Rust `lifecycle()` | WindowStage publishes active, inactive and background, including the initial state; only background suspends frames. |
+| Supported | `fontFamily` lists; WOFF / WOFF2 imports | Core family parsing and bounded font decoding feed the shared engine/Canvas collection (`src/text/fonts.rs`). |
+| Follow-up | Shader backdrop pictures, overflow and CSS scene composition | Content/from/to pictures are implemented. Backdrop shader inputs, expanded shader capture bounds and combinations with the CSS scene compositor still need dedicated capture integration and device coverage. Screen effects apply to the embedded root; ArkUI dialogs have their own surface. |
+| Platform service | `Speech.available()`, `Speech.start()` | HarmonyOS SpeechRecognizer supplies offline zh-CN recognition with microphone permission, cancellation and teardown; availability follows its system capability. |
+| Supported | `Notifications` | Native permission, show, cancel, badge and press delivery; hosts forward Ability wants to `onNotificationWant`, including cold starts. |
+| Supported | `ViewProps::continues_text`, selectable views | `src/text/selection/area.rs` adapts mounted text to core `SelectionTexts`, with cross-view ranges and continuation joins. |
+| API gap | `AccessibilityState::has_popup` | ArkUI C `ArkUI_AccessibilityState`, native accessibility element info and ArkTS accessibility state expose no popup-kind field. Diagonal resize cursors use the UIContext cursor controller. |
+| Supported | `WebView.sendInput`, `onDownload` | ArkWeb native touch/key dispatch and browser editing commands; scoped download delegates write unique private files and cancel on teardown. |
+| Supported | System alert/action-sheet colors; TabBar registration | `Command::DesignTokens` colors native dialogs; OHOS registers a native ArkUI TabBar with selection and tint updates. |
 
 Shared-layer additions need no new platform protocol: `Carousel`, `Tree`, `HoverCard`, `Command`, the new plot
 marks (`Rule`, `Dot`, `Cell`, `Treemap`, per-row `Bar` bases and a second y scale), Editor decorations, DiffView
@@ -93,4 +112,15 @@ dev, API 23 and API 26 with warnings denied; `cargo test -p nsh-platform-ohos --
 `cargo test -p nsh-core --lib platform:: --locked` passes 10 tests, including OHOS desktop/terminal classification.
 The CI path check and formatting of the touched Rust files pass. The workspace-wide formatting check still reports
 six files identical to upstream (base library, macOS, Windows and xtask); its whitespace check also reports the
-upstream KaTeX license and browser-size document. No device smoke tests were run in this integration.
+upstream KaTeX license and browser-size document. The later shader adaptation is validated separately on ALN-AL00
+(API 26) using local SVG/text/color fixtures so network image loading does not determine the shader result.
+
+## Shader presentation lifetime
+
+The UI owns XComponent nodes and the worker owns their EGL windows and textures. On retirement, the UI keeps the
+node until the worker has released its window; the worker's completion message also collects nodes removed from
+the mount tree. Surface teardown joins the worker before destroying the remaining native presentation nodes.
+
+A dialog's content participates in its native Column's measurement: its root has width/height and no absolute
+`Position`. An absolutely positioned root leaves that Column at zero size and displaces hit testing even when a
+recorded composite still appears at the expected position.

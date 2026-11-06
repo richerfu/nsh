@@ -630,6 +630,12 @@ Things that were found the hard way. Read the section of the area you change bef
 
 ## OHOS
 
+- **Texture export retains RenderThread children across sessions**: `RSNode::SetTextureExport` reuses its RT node,
+  `SyncTextureExport` adds only current children, and `RemoveChild` targets only the current renderer. A retained
+  hidden node can therefore reappear when switching renderers in either direction. At attachment, temporarily include the
+  outermost hidden nodes with zero opacity, no hit testing and hidden accessibility; restore visibility after a
+  complete ArkUI frame so removal reaches both renderers (`interop/texture_export.rs`). Keep repair armed until
+  that attachment runs, even if the wrapper is updated again first.
 - **Use `FontCollection::shared()` for the engine's typography cache**: `FontCollection::new()` serves only one
   typography builder and crashes in `FontCollection::CreateSktFontCollection` when reused across text nodes.
 - **Register native clicks only for nodes with `onPress`**: registering a no-op handler on every custom node makes
@@ -638,3 +644,8 @@ Things that were found the hard way. Read the section of the area you change bef
   the owned callback instead of passing a null function pointer.
 - **Pinch gesture centers are physical pixels** (`OH_ArkUI_PinchGesture_GetCenterX/Y`) even when the node length metric
   is `vp`: divide by the surface density before computing the focal point.
+- **A cloned touch has two independent local-coordinate fields**: ArkUI's
+  `SetClonedEventLocalPosition` updates `actionTouchPoint`, while `SetClonedEventLocalPositionByIndex` updates only
+  the pointer array (`interfaces/native/event/ui_input_event.cpp`). When forwarding from a `vp` node, convert both
+  to physical pixels before posting. Updating only the array leaves the hit-test point at the old scale: a scroll
+  can still receive a drag while buttons farther down the same exported subtree fail to receive clicks.
