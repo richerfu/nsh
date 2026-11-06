@@ -9,15 +9,15 @@ acceptance criteria and the check that proves it. Line numbers are for the audit
 the code changes; the symbols named beside them are the stable reference.
 
 Revised after the render/mount pass: P1-11–P1-13, P2-14 (draw callbacks), P2-15–P2-18 and
-P3-8–P3-10.
+P3-8–P3-10. Revised again for the binding dependency: P0-6.
 
 Items marked **device-verify** need a run on an OHOS device (the reference device is ALN-AL00,
 API 26). Everything else was read in the code or reproduced on this machine.
 
-> Working-tree note: `.cargo/config.toml`, `Cargo.lock` and
-> `examples/embed-ohos/build-profile.json5` currently carry machine-local binding patches and signing
-> material. Keep them out of commits; the fix list below does not depend on them, except that the
-> branch must build against released `ohos-*` crates before it can merge.
+> Working-tree note: `.cargo/config.toml` and `Cargo.lock` patch every `ohos-*` crate to a local
+> binding checkout, and `examples/embed-ohos/build-profile.json5` carries signing material. Keep them
+> out of commits. The checkout's only functional addition over released `ohos-arkui-binding 0.6.0` is
+> `ArkUINode::snapshot()` (P0-6); the branch must build against released crates before it can merge.
 
 ## Summary
 
@@ -28,6 +28,7 @@ API 26). Everything else was read in the code or reproduced on this machine.
 | P0-3 | P0 | Shader `nsh.size` / `overflow` are derived from the capture target | M |
 | P0-4 | P0 | Shader layers are dropped when the CSS scene compositor is active | M |
 | P0-5 | P0 | No CI builds, lints or tests the OHOS backend | S |
+| P0-6 | P0 | The branch needs an unreleased `ohos-arkui-binding` wrapper | S |
 | P1-1 | P1 | `nsh/mobile` `TabBar` is unreachable; the native TabBar is dead code | S |
 | P1-2 | P1 | Status bar and fullscreen-video bars are silent no-ops by default | M |
 | P1-3 | P1 | Input events missing: paste, caret, composition, autoCorrect, readonly | M |
@@ -197,6 +198,39 @@ API 26). Everything else was read in the code or reproduced on this machine.
   - [ ] `CI paths` passes and the job is a required status check (or at least reported).
 - **Verify:** open a draft PR that touches one comment in the crate.
 
+### P0-6 — The branch needs an unreleased `ohos-arkui-binding` wrapper
+
+- **Area:** `.cargo/config.toml`, `Cargo.lock`,
+  `crates/nsh-platform-ohos/src/render/composition/snapshot.rs`, the `ohos-rs/ohos-native-bindings`
+  checkout.
+- **Status:** Confirmed.
+- **Problem:** the working tree patches every `ohos-*` crate to a local checkout
+  (`.cargo/config.toml`'s `[patch.crates-io]`). The checkout differs from released
+  `ohos-arkui-binding 0.6.0` by one uncommitted 24-line change: a public
+  `ArkUINode::snapshot() -> ohos_image_native_binding::PixelMap` around
+  `OH_ArkUI_GetNodeSnapshot`, gated on `api-15` + `image`
+  (`crates/arkui/src/common/node.rs`). The released crate already makes the same native call, but
+  only as `pub(crate) NodeUtils::get_node_snapshot`, which returns `PixelMapNativeHandle`;
+  `node_utils` is `pub(crate)`, and `PixelMapNativeHandle` has no `image_info()`/`read_pixels()`,
+  the methods NSH needs. The only consumer is `render/composition/snapshot.rs:56` (the shader
+  navigation snapshot). Without the patch the OHOS SDK does not compile against crates.io; with it,
+  the branch builds only on machines that have the checkout and `NSH_ALLOW_PATH_DEPENDENCIES=1`.
+  Every `ohos-*` crate is patched because a path-patched `ohos-arkui-binding` pulls its path
+  dependency closure, and one package cannot come from both the registry and a path.
+- **Change:** one of:
+  1. Upstream `ArkUINode::snapshot()` to `ohos-native-bindings`, release it (0.6.1 or the next
+     version), bump the workspace pin, then delete `.cargo/config.toml`'s patch block and regenerate
+     `Cargo.lock`.
+  2. Remove the snapshot consumer first (P1-4's texture-export/worker replacement), then delete the
+     patch; the released crate then covers every API the backend uses.
+- **Acceptance:**
+  - [ ] `cargo xtask ohos` and `cargo xtask clippy-ohos` build with no `[patch.crates-io]` entries
+    and no path dependencies.
+  - [ ] The released binding versions named in the root `Cargo.toml` contain every API the crate
+    uses.
+- **Verify:** on a clean checkout without the override, `cargo update -p ohos-arkui-binding`, then
+  `cargo xtask ohos` and `cargo xtask clippy-ohos`.
+
 ---
 
 ## P1 — user-visible correctness and jank
@@ -277,7 +311,9 @@ API 26). Everything else was read in the code or reproduced on this machine.
 - **Change:**
   - Capture the outgoing picture through the existing texture-export path (GPU), or move the
     snapshot and its conversion to the compositor worker and begin the transition when it arrives
-    (the native animation is the fallback until then).
+    (the native animation is the fallback until then). This snapshot is the only consumer of the
+    unreleased `ArkUINode::snapshot()` wrapper (P0-6), so replacing it also lets the local binding
+    patch go.
   - Move the teardown joins off the UI thread: post the close to a worker, or retain the engine and
     join on the render/engine lane, then dispose the native owners on the next UI turn.
 - **Acceptance:**
@@ -979,6 +1015,8 @@ One change per PR, with the tests named above:
 30. `ohos: Draw inset shadows without blur` (P2-17).
 31. `ohos: Rebuild scenes and composites only when dirty` (P2-18).
 32. `ohos: Match the other backends' mount tolerance` (P3-8, P3-9, P3-10).
+33. `build: Build the OHOS SDK against released ohos bindings` (P0-6; after the binding release or
+    after P1-4 removes the snapshot consumer).
 
 ## What was checked and is sound
 
