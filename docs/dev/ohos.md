@@ -124,3 +124,8 @@ the mount tree. Surface teardown joins the worker before destroying the remainin
 A dialog's content participates in its native Column's measurement: its root has width/height and no absolute
 `Position`. An absolutely positioned root leaves that Column at zero size and displaces hit testing even when a
 recorded composite still appears at the expected position.
+
+## Known issues
+
+The 2026-11-06 audit and its prioritized, executable fix list are in
+[ohos-audit.md](ohos-audit.md).
