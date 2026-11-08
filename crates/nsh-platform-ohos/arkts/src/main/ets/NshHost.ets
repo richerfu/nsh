@@ -26,7 +26,7 @@ import {
 import { Batch, NshPlugin } from "./NshPlugin";
 import { NativeTabBar, TabBarContext } from "./NativeTabBar";
 
-import { NativeSystem } from "./NativeSystem";
+import { NativeSystem, SystemReply, SystemRequest } from "./NativeSystem";
 
 interface AvoidRectPayload {
   left: number;
@@ -60,6 +60,7 @@ interface HostInitPayload {
 }
 
 interface HostCommandPayload {
+  system?: SystemRequest;
   kind: string;
   enabled?: boolean;
   lightContent?: boolean;
@@ -73,6 +74,11 @@ interface HostCommandPayload {
   url?: string;
 }
 
+interface PickedDescriptor {
+  fd: number;
+  name: string;
+}
+
 interface NshNativeModule {
   nshRegisterSessionBinder(sdkApiVersion: number, binder: (uiContext: UIContext) => number): void;
   nshCreateSession(
@@ -84,7 +90,7 @@ interface NshNativeModule {
     tabBar: (context: TabBarContext) => object,
   ): number;
   nshCloseSession(sessionId: number): void;
-  nshServiceEvent(sessionId: number, key: number, event: object): void;
+  nshServiceEvent(sessionId: number, key: number, event: SystemReply): void;
   nshSetLifecycle(sessionId: number, lifecycle: string): void;
   nshUpdateKeyboard(sessionId: number, duration: number): void;
   nshUpdateConfig(
@@ -94,6 +100,7 @@ interface NshNativeModule {
     language: string,
     rtl: boolean,
     deviceType?: string,
+    pixelRatio?: number,
   ): void;
   nshUpdateAccessibility(sessionId: number, screenReader?: boolean, reduceMotion?: boolean): void;
   nshUpdateWindow(
@@ -103,7 +110,7 @@ interface NshNativeModule {
     keyboard: AvoidAreaPayload,
   ): void;
   nshOpenUrlResult(sessionId: number, openId: number, opened: boolean): void;
-  nshPickImagesResult(sessionId: number, pickId: number, paths: string[]): void;
+  nshPickImagesResult(sessionId: number, pickId: number, files: PickedDescriptor[]): void;
   nshReportHostError(sessionId: number, message: string): void;
   nshAttachNativeNode(targetId: number, content: FrameNode): void;
   nshAttachNativeSubtree(targetId: number, content: FrameNode, slot: NodeContent): void;
@@ -558,6 +565,7 @@ class HostSession {
         newConfig.language ?? "",
         i18n.isRTL(newConfig.language || i18n.System.getSystemLanguage()),
         deviceInfo.deviceType,
+        this.runtimeContext.getUIContext().vp2px(1),
       );
     } catch {}
   }
@@ -847,7 +855,7 @@ class HostSession {
 
     if (command.kind === "system") {
       this.system
-        .execute(command.openId ?? 0, command.text ?? "{}")
+        .execute(command.openId ?? 0, command.system ?? { op: "" })
         .catch((error: Error) => console.error(`NSH system: ${error}`));
       return;
     }
@@ -939,41 +947,26 @@ class HostSession {
           .select(options)
           .then((result: photoAccessHelper.PhotoSelectResult): void => {
             const uris = result?.photoUris ?? [];
-            const paths: string[] = [];
-            const cacheBase = this.abilityContext.cacheDir ?? "";
-            for (let i = 0; i < uris.length && i < limit; i++) {
-              const uri = uris[i];
-              if (!uri) {
-                continue;
+            const handles: fs.File[] = [];
+            const files: PickedDescriptor[] = [];
+            try {
+              for (let i = 0; i < uris.length && i < limit; i++) {
+                try {
+                  const file = fs.openSync(uris[i], fs.OpenMode.READ_ONLY);
+                  handles.push(file);
+                  const name = decodeURIComponent(uris[i].split("/").pop() ?? `image_${i}`);
+                  files.push({ fd: file.fd, name });
+                } catch (error) {
+                  console.warn(`NSH picked image: ${String(error)}`);
+                }
               }
-              let srcFile: fs.File | undefined = undefined;
-              let dstFile: fs.File | undefined = undefined;
-              try {
-                srcFile = fs.openSync(uri, fs.OpenMode.READ_ONLY);
-                const rawName = decodeURIComponent(uri.split("/").pop() ?? `image_${i}`);
-                const safeName = rawName.replace(/[^A-Za-z0-9._-]/g, "_") || `image_${i}`;
-                const dstPath = `${cacheBase}/nsh_pick_${this.sessionId}_${pickId}_${i}__${safeName}`;
-                dstFile = fs.openSync(
-                  dstPath,
-                  fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC,
-                );
-                fs.copyFileSync(srcFile.fd, dstFile.fd);
-                paths.push(dstPath);
-              } catch {
-              } finally {
-                if (srcFile !== undefined) {
-                  try {
-                    fs.closeSync(srcFile);
-                  } catch {}
-                }
-                if (dstFile !== undefined) {
-                  try {
-                    fs.closeSync(dstFile);
-                  } catch {}
-                }
+              // Rust retains independent descriptors synchronously; bytes are read on its worker.
+              this.mod.nshPickImagesResult(this.sessionId, pickId, files);
+            } finally {
+              for (const file of handles) {
+                try { fs.closeSync(file); } catch {}
               }
             }
-            this.mod.nshPickImagesResult(this.sessionId, pickId, paths);
           })
           .catch((): void => {
             this.mod.nshPickImagesResult(this.sessionId, pickId, []);

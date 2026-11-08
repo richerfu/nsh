@@ -719,9 +719,15 @@ impl NshSurface {
                 wake.build_threadsafe_function::<Message>()
                     .callee_handled::<false>()
                     .build_callback(move |ctx| {
-                        if let Err(error) = State::dispatch(&ui_state, ctx.env, ctx.value) {
-                            let errors = ui_state.borrow().errors.clone();
-                            errors.report(error.to_string());
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if let Err(error) = State::dispatch(&ui_state, ctx.env, ctx.value) {
+                                let errors = ui_state.borrow().errors.clone();
+                                errors.report(error.to_string());
+                            }
+                        }))
+                        .is_err()
+                        {
+                            log::error!("panic in OHOS surface TSFN callback");
                         }
                         Ok(())
                     })?,
@@ -867,24 +873,26 @@ impl NshSurface {
     pub fn run_package(&self, env: Env, package: &crate::app::trust::NshPackage) -> Result<()> {
         let host = self.host()?;
         let mut state = self.state.try_borrow_mut().map_err(reentry)?;
+        state.check()?;
         if state.phase.runtime().is_some_and(Runtime::is_busy) {
             return Err(reentry("engine callback"));
         }
-        let prepared = package.take()?;
         state.next_load()?;
+        let prepared = package.take()?;
         #[cfg(feature = "dev")]
         state.disconnect_dev();
         let result = state.accept_app(
             env,
             App::new(
-                prepared.bundle,
+                prepared.bundle.clone(),
                 Arc::new(crate::services::assets::HostAssets::new(
                     host,
-                    Some(prepared.assets),
+                    Some(prepared.assets.clone()),
                 )),
             ),
         );
         if let Err(error) = &result {
+            package.restore(prepared);
             self.errors.report(error.to_string());
         }
         result
@@ -903,7 +911,7 @@ impl NshSurface {
         let host = self.host()?;
         crate::app::session::resource_name(&name)?;
         let permit = host.reserve_load()?;
-        let (token, generation, has_override) = {
+        let (token, generation) = {
             let mut state = self.state.try_borrow_mut().map_err(reentry)?;
             #[cfg(feature = "dev")]
             state.disconnect_dev();
@@ -911,9 +919,8 @@ impl NshSurface {
                 runtime.close()?;
             }
             let token = state.next_load()?;
-            let has_override = state.config()?.policy.granted.is_some();
             state.phase = SurfacePhase::Loading { token };
-            (token, state.generation.clone(), has_override)
+            (token, state.generation.clone())
         };
         let chunks = crate::app::chunks::ResourceChunks::new(host.clone(), &name);
         let entry_chunks_loader = chunks.clone();
@@ -938,49 +945,9 @@ impl NshSurface {
                             .map_err(|_| Error::from_reason("source resource must be UTF-8"))?,
                     )
                 };
-                let app_json = name.rsplit_once('/').map_or_else(
-                    || "app.json".to_owned(),
-                    |(parent, _)| format!("{parent}/app.json"),
-                );
-                let mut manifest_specs = Vec::new();
-                if let Ok(bytes) = host.resource(&app_json)
-                    && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
-                {
-                    if let Some(id) = value.get("id").and_then(serde_json::Value::as_str) {
-                        bundle.app_id = Some(id.to_owned());
-                    }
-                    if let Some(specs) = value
-                        .get("entryChunks")
-                        .and_then(serde_json::Value::as_array)
-                    {
-                        manifest_specs.extend(
-                            specs
-                                .iter()
-                                .filter_map(serde_json::Value::as_str)
-                                .map(str::to_owned),
-                        );
-                    }
-                }
-                let initial_chunks = entry_chunks_loader
-                    .collect_entry_chunks(&bundle, &manifest_specs)
+                entry_chunks_loader
+                    .preload(&mut bundle)
                     .map_err(Error::from_reason)?;
-                if !initial_chunks.is_empty() {
-                    bundle = bundle.with_chunks(initial_chunks);
-                }
-                if !has_override {
-                    let companion = name.rsplit_once('/').map_or_else(
-                        || "capabilities.json".to_owned(),
-                        |(parent, _)| format!("{parent}/capabilities.json"),
-                    );
-                    if let Ok(bytes) = host.resource(&companion) {
-                        let value = serde_json::from_slice(&bytes)
-                            .map_err(|e| Error::from_reason(e.to_string()))?;
-                        bundle.policy.declared = Some(
-                            nsh_engine::Capabilities::from_json(&value)
-                                .map_err(Error::from_reason)?,
-                        );
-                    }
-                }
                 Ok(bundle)
             })
             .await
@@ -1276,7 +1243,8 @@ impl NshSurface {
         #[napi(ts_arg_type = "(id: number) => object")] factory: FunctionRef<u32, ObjectRef>,
     ) -> Result<()> {
         self.check()?;
-        self.components.register(name, factory);
+        crate::interop::component::check_name(&name)?;
+        self.components.register(name, factory)?;
         Ok(())
     }
 
@@ -1284,7 +1252,8 @@ impl NshSurface {
     #[napi]
     pub fn unregister_component(&self, name: String) -> Result<()> {
         self.check()?;
-        self.components.unregister(&name);
+        crate::interop::component::check_name(&name)?;
+        self.components.unregister(&name)?;
         Ok(())
     }
 

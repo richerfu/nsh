@@ -4,12 +4,25 @@ import { NativeClipboard, ClipboardReply } from "./NativeClipboard";
 import { NativeNotifications, NotificationReply } from "./NativeNotifications";
 import { NativeSpeech, SpeechReply } from "./NativeSpeech";
 
-interface SystemReply extends ClipboardReply, NotificationReply {
+// The system bridge uses the same typed completion for every service.
+export interface SystemReply {
+  has?: boolean;
+  text?: string;
+  uri?: string;
+  width?: number;
+  height?: number;
+  tooLarge?: number;
+  files?: string;
+  permission?: string;
+  shown?: boolean;
+  pressed?: string;
   error?: string;
+  code?: string;
   phase?: string;
   final?: boolean;
 }
-interface SystemRequest {
+
+export interface SystemRequest {
   op: string;
   text?: string;
   uri?: string;
@@ -26,27 +39,26 @@ export class NativeSystem {
   private readonly clipboard: NativeClipboard;
   private readonly notifications: NativeNotifications;
   private readonly speech: NativeSpeech;
-  private readonly reply: (key: number, event: object) => void;
+  private readonly reply: (key: number, event: SystemReply) => void;
   private active: Set<number> = new Set();
   private listening?: number;
   private closed: boolean = false;
   constructor(
     ui: UIContext,
     context: common.UIAbilityContext,
-    reply: (key: number, event: object) => void,
+    reply: (key: number, event: SystemReply) => void,
   ) {
     this.clipboard = new NativeClipboard(ui);
     this.notifications = new NativeNotifications(context);
     this.speech = new NativeSpeech(context);
     this.reply = reply;
   }
-  async execute(key: number, json: string): Promise<void> {
+  async execute(key: number, request: SystemRequest): Promise<void> {
     if (this.closed) {
       return;
     }
-    const request = JSON.parse(json) as SystemRequest;
     this.active.add(key);
-    const reply = (event: object): void => {
+    const reply = (event: SystemReply): void => {
       if (!this.closed && this.active.has(key)) {
         this.reply(key, event);
       }
@@ -110,6 +122,8 @@ export class NativeSystem {
     } catch (error) {
       reply({
         error: String(error),
+        code: "ERR_NSH_HOST_ERROR",
+        phase: request.op.startsWith("speech-") ? "end" : undefined,
         has: false,
         shown: false,
         permission: "unavailable",

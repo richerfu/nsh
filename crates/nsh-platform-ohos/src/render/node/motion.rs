@@ -165,6 +165,10 @@ impl Node {
         } else {
             live.step(now, self.frame.get(), &mut self.style.borrow_mut())
         };
+        if live.recolor {
+            self.native.borrow().mark_dirty(NodeDirtyFlag::NeedRender)?;
+            self.invalidate_scene();
+        }
         if step.active {
             *self.live.borrow_mut() = Some(live);
         }
@@ -174,6 +178,7 @@ impl Node {
         let previous = self.extra.replace((step.opacity, step.extra));
         let style = self.style.borrow();
         if step.restyled {
+            self.invalidate_composites();
             self.ensure_shadow_layer(&style)?;
             self.apply_background_color(style.background_color)?;
             self.apply_borders(&style)?;

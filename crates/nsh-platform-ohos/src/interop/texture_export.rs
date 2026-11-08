@@ -142,13 +142,61 @@ impl Export {
         if self.hidden.borrow().is_empty() {
             return Ok(());
         }
-        let repair = Rc::downgrade(self);
-        let native = Rc::downgrade(inner);
-        let result = inner.borrow().post_frame_callback(move |_, _| {
+        let result = Self::defer_restore(Rc::downgrade(self), Rc::downgrade(inner), 3);
+        if result.is_err() {
+            self.restore();
+        }
+        result
+    }
+
+    fn defer_restore(
+        repair: Weak<Self>,
+        native: Weak<RefCell<ohos_arkui_binding::common::node::ArkUINode>>,
+        remaining: u8,
+    ) -> Result<()> {
+        let Some(node) = native.upgrade() else {
             if let Some(repair) = repair.upgrade() {
-                // Property updates before this callback must not shorten the
-                // full rebuild in which these nodes join the exported tree.
-                for hidden in repair.hidden.borrow().iter() {
+                repair.restore();
+            }
+            return Ok(());
+        };
+        node.borrow()
+            .post_frame_callback(move |_, _| {
+                let Some(current) = repair.upgrade() else {
+                    return;
+                };
+                if remaining == 0 {
+                    current.restore();
+                    return;
+                }
+                // Property updates or nested textureController attachment before
+                // RSRootNode::AttachRSSurfaceNode must not shorten the rebuild
+                // in which these nodes join the exported tree.
+                let mut released = Vec::new();
+                current.hidden.borrow_mut().retain(|hidden| {
+                    let keep = hidden
+                        .owner
+                        .as_ref()
+                        .and_then(Weak::upgrade)
+                        .is_none_or(|owner| owner.desired_visibility() != 0);
+                    if !keep {
+                        released.push(Hidden {
+                            native: hidden.native.clone(),
+                            owner: hidden.owner.clone(),
+                            controls: hidden.controls.clone(),
+                            visibility: hidden.visibility,
+                            opacity: hidden.opacity,
+                            hit_test: hidden.hit_test,
+                            accessibility: hidden.accessibility,
+                            focusable: hidden.focusable,
+                        });
+                    }
+                    keep
+                });
+                for hidden in released {
+                    Self::restore_one(hidden);
+                }
+                for hidden in current.hidden.borrow().iter() {
                     if let Some(native) = hidden.native.upgrade()
                         && native.borrow().is_owned()
                     {
@@ -166,56 +214,49 @@ impl Export {
                         });
                     }
                 }
-                let weak = Rc::downgrade(&repair);
-                let result = native.upgrade().map(|node| {
-                    node.borrow().post_frame_callback(move |_, _| {
-                        if let Some(repair) = weak.upgrade() {
-                            repair.restore();
-                        }
-                    })
-                });
-                if !matches!(result, Some(Ok(()))) {
-                    repair.restore();
+                if Self::defer_restore(repair, native, remaining - 1).is_err() {
+                    current.restore();
                 }
-            }
-        });
-        if result.is_err() {
-            self.restore();
-        }
-        result.map_err(Into::into)
+            })
+            .map_err(Into::into)
     }
 
     pub(crate) fn restore(&self) {
         for hidden in self.hidden.take() {
-            callback(|| {
-                let owner = hidden.owner.and_then(|owner| owner.upgrade());
-                if let Some(owner) = &owner {
-                    owner
-                        .export_repair
-                        .set(owner.export_repair.get().saturating_sub(1));
-                }
-                let Some(native) = hidden.native.upgrade() else {
-                    return Ok(());
-                };
-                {
-                    let node = native.borrow();
-                    if !node.is_owned() {
-                        return Ok(());
-                    }
-                    node.set_i32_attribute(A::Visibility, hidden.visibility)?;
-                    node.opacity(hidden.opacity)?;
-                    node.set_i32_attribute(A::HitTestBehavior, hidden.hit_test)?;
-                    node.set_i32_attribute(A::AccessibilityMode, hidden.accessibility)?;
-                    node.set_i32_attribute(A::Focusable, hidden.focusable)?;
-                }
-                if let Some(owner) = owner {
-                    owner.restore_after_export()?;
-                }
-                if let Some(controls) = hidden.controls.and_then(|node| node.upgrade()) {
-                    controls.restore_export_controls()?;
-                }
-                Ok(())
-            });
+            Self::restore_one(hidden);
         }
+    }
+
+    fn restore_one(hidden: Hidden) {
+        callback(|| {
+            let owner = hidden.owner.and_then(|owner| owner.upgrade());
+            if let Some(owner) = &owner {
+                owner
+                    .export_repair
+                    .set(owner.export_repair.get().saturating_sub(1));
+            }
+            let Some(native) = hidden.native.upgrade() else {
+                return Ok(());
+            };
+            {
+                let node = native.borrow();
+                if !node.is_owned() {
+                    return Ok(());
+                }
+                node.set_i32_attribute(A::Visibility, hidden.visibility)?;
+                node.opacity(hidden.opacity)?;
+                node.set_i32_attribute(A::HitTestBehavior, hidden.hit_test)?;
+                node.set_i32_attribute(A::AccessibilityMode, hidden.accessibility)?;
+                node.set_i32_attribute(A::Focusable, hidden.focusable)?;
+            }
+            if let Some(owner) = owner {
+                owner.restore_after_export()?;
+                owner.invalidate_subtree_paint()?;
+            }
+            if let Some(controls) = hidden.controls.and_then(|node| node.upgrade()) {
+                controls.restore_export_controls()?;
+            }
+            Ok(())
+        });
     }
 }

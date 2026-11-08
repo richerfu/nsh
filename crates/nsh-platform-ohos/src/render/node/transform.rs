@@ -10,6 +10,20 @@ use ohos_arkui_binding::{
 use super::{Node, Result};
 
 impl Node {
+    pub(crate) fn desired_visibility(&self) -> i32 {
+        if self.retained.get() || !self.header_item_visible() {
+            2
+        } else if self
+            .screen
+            .borrow()
+            .as_ref()
+            .is_some_and(|screen| !screen.paint_visible())
+        {
+            1
+        } else {
+            i32::from(self.style.borrow().hidden)
+        }
+    }
     /// Native child-plane transform, calculated once for a hit-test descent.
     pub(crate) fn input_children_transform(&self) -> Result<nsh_core::Matrix> {
         use nsh_core::{Matrix, TransformKind as K};
@@ -19,8 +33,8 @@ impl Node {
         let content = scroll.content.borrow().layout_position_in_window()?;
         let origin = self.native.borrow().layout_position_in_window()?;
         let offset = (
-            (content.x - origin.x) as f64 / self.scale as f64 + scroll.centering().0 as f64,
-            (content.y - origin.y) as f64 / self.scale as f64 + scroll.centering().1 as f64,
+            (content.x - origin.x) as f64 / self.scale.get() as f64 + scroll.centering().0 as f64,
+            (content.y - origin.y) as f64 / self.scale.get() as f64 + scroll.centering().1 as f64,
         );
         let matrix = Matrix::of(K::Scale, scroll.scale() as f64)
             .mul(&Matrix::of(K::TranslateX, offset.0))
@@ -43,11 +57,11 @@ impl Node {
             .get()
             .mul(&Matrix::of(
                 K::TranslateX,
-                position.x as f64 / self.scale as f64,
+                position.x as f64 / self.scale.get() as f64,
             ))
             .mul(&Matrix::of(
                 K::TranslateY,
-                position.y as f64 / self.scale as f64,
+                position.y as f64 / self.scale.get() as f64,
             ))
             .mul(plane))
     }
@@ -124,32 +138,31 @@ impl Node {
         let mut applied = self.applied.get();
         let native = visual.borrow();
         if is_identity {
+            self.backface_away.set(false);
+            let visibility = if self.export_repair.get() != 0 {
+                0
+            } else {
+                self.desired_visibility()
+            };
+            let revealed =
+                applied.visibility != visibility && applied.visibility != 0 && visibility == 0;
+            if applied.visibility != visibility {
+                native.set_i32_attribute(Attribute::Visibility, visibility)?;
+                applied.visibility = visibility;
+            }
             if applied.transform.is_some() {
                 native.reset_attribute(Attribute::Transform)?;
                 applied.transform = None;
                 self.invalidate_ink(applied.ink_outset)?;
             }
-            self.backface_away.set(false);
-            let visibility = if self.export_repair.get() != 0 {
-                0
-            } else if self.retained.get() || !self.header_item_visible() {
-                2
-            } else if self
-                .screen
-                .borrow()
-                .as_ref()
-                .is_some_and(|screen| !screen.paint_visible())
-            {
-                1
-            } else {
-                i32::from(style.hidden)
-            };
-            if applied.visibility != visibility {
-                native.set_i32_attribute(Attribute::Visibility, visibility)?;
-                applied.visibility = visibility;
-            }
             self.applied.set(applied);
-            self.input_transform.set(Matrix::IDENTITY);
+            drop(native);
+            if revealed {
+                self.schedule_subtree_paint(2)?;
+            }
+            if self.input_transform.replace(Matrix::IDENTITY) != Matrix::IDENTITY {
+                self.invalidate_composites();
+            }
             if self.scene_active() {
                 self.invalidate_scene();
             }
@@ -177,9 +190,9 @@ impl Node {
         let mut raw_values = [0.0f32; 16];
         for (i, v) in matrix.into_iter().enumerate() {
             raw_values[i] = (v * if matches!(i, 12..=14) {
-                self.scale as f64
+                self.scale.get() as f64
             } else if matches!(i, 3 | 7 | 11) {
-                1.0 / self.scale as f64
+                1.0 / self.scale.get() as f64
             } else {
                 1.0
             }) as f32;
@@ -208,6 +221,8 @@ impl Node {
         } else {
             i32::from(style.hidden || self.backface_away.get())
         };
+        let revealed =
+            applied.visibility != visibility && applied.visibility != 0 && visibility == 0;
         if applied.visibility != visibility {
             native.set_i32_attribute(Attribute::Visibility, visibility)?;
             applied.visibility = visibility;
@@ -236,6 +251,10 @@ impl Node {
             applied.transform_center = center;
         }
         self.applied.set(applied);
+        drop(native);
+        if revealed {
+            self.schedule_subtree_paint(2)?;
+        }
         let origin = (ox as f64, oy as f64, oz as f64);
         let mut before = Matrix::IDENTITY;
         before.0[12] = -origin.0;
@@ -245,8 +264,10 @@ impl Node {
         after.0[12] = origin.0;
         after.0[13] = origin.1;
         after.0[14] = origin.2;
-        self.input_transform
-            .set(before.mul(&Matrix(matrix)).mul(&after));
+        let transform = before.mul(&Matrix(matrix)).mul(&after);
+        if self.input_transform.replace(transform) != transform {
+            self.invalidate_composites();
+        }
         if self.scene_active() {
             self.invalidate_scene();
         }

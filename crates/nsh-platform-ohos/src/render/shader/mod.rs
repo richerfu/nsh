@@ -36,6 +36,8 @@ pub(crate) struct Shaders {
     rate: Arc<FrameRate>,
     worker: RefCell<Option<Rc<Worker>>>,
     generation: Cell<u32>,
+    visibility_generation: Cell<u64>,
+    visibility: RefCell<FxHashMap<NodeId, (u64, bool, bool)>>,
     views: RefCell<FxHashMap<NodeId, State>>,
     /// A generation distinguishes windows retired before an id is reused.
     retiring: RefCell<Vec<(Key, Retiring)>>,
@@ -49,6 +51,7 @@ struct State {
     /// What the worker was last told: the size and scale, whether it shows.
     size: Option<(Size, f32)>,
     shown: Option<bool>,
+    overflow: f32,
 }
 
 /// A view's surface kept after it went, with the view's native node it is
@@ -59,6 +62,32 @@ struct Retiring {
 }
 
 impl Shaders {
+    pub(crate) fn invalidate_visibility(&self) {
+        self.visibility_generation
+            .set(self.visibility_generation.get().wrapping_add(1));
+    }
+    fn visibility(&self, node: &Rc<Node>) -> (bool, bool) {
+        let generation = self.visibility_generation.get();
+        if let Some(&(old, attached, shown)) = self.visibility.borrow().get(&node.id)
+            && old == generation
+        {
+            return (attached, shown);
+        }
+        let mut at = Some(node.clone());
+        let mut attached = false;
+        while let Some(node) = at {
+            if node.id == nsh_core::ROOT_ID {
+                attached = true;
+                break;
+            }
+            at = node.parent_node.borrow().upgrade();
+        }
+        let shown = attached && in_sight_uncached(node);
+        self.visibility
+            .borrow_mut()
+            .insert(node.id, (generation, attached, shown));
+        (attached, shown)
+    }
     pub(crate) fn frame_rate(&self) -> Arc<FrameRate> {
         self.rate.clone()
     }
@@ -69,6 +98,8 @@ impl Shaders {
             rate: FrameRate::new(vsync),
             worker: RefCell::default(),
             generation: Cell::new(0),
+            visibility_generation: Cell::new(1),
+            visibility: RefCell::default(),
             views: RefCell::default(),
             retiring: RefCell::default(),
         }
@@ -86,6 +117,13 @@ impl Shaders {
             return self.effects.set(owner, layer);
         }
         self.effects.remove(owner.id)?;
+        if !self.views.borrow().contains_key(&owner.id)
+            && self.views.borrow().len() >= super::composition::worker::MAX_LAYERS
+        {
+            return Err(super::node::Error::Unsupported(
+                "shader fill layer budget exceeded",
+            ));
+        }
         let worker = Worker::for_owner(owner)?;
         *self.worker.borrow_mut() = Some(worker.clone());
         let key = self
@@ -101,6 +139,7 @@ impl Shaders {
                     generation,
                 }
             });
+        let overflow = layer.overflow.0.max(0.0);
         worker.fill(Command::Layer(key, layer));
         if !self.views.borrow().contains_key(&owner.id) {
             let surface = match surface::Surface::new(
@@ -134,10 +173,16 @@ impl Shaders {
                     surface,
                     size: None,
                     shown: None,
+                    overflow,
                 },
             );
             owner.enable_layout();
         }
+        if let Some(state) = self.views.borrow_mut().get_mut(&owner.id) {
+            state.overflow = overflow;
+            state.surface.native.borrow().set_clip(overflow <= 0.0)?;
+        }
+        owner.invalidate_composites();
         owner.animator.request_frame();
         Ok(())
     }
@@ -167,6 +212,12 @@ impl Shaders {
     }
 
     /// The native node of `id`'s surface, which its view lays out.
+    pub(crate) fn overflow(&self, id: NodeId) -> f32 {
+        self.views
+            .borrow()
+            .get(&id)
+            .map_or(0.0, |state| state.overflow)
+    }
     pub(crate) fn native(&self, id: NodeId) -> Option<NativeNode> {
         self.views
             .borrow()
@@ -175,10 +226,14 @@ impl Shaders {
     }
 
     pub(crate) fn remove(&self, id: NodeId) {
+        self.visibility.borrow_mut().remove(&id);
         callback(|| self.effects.remove(id));
         let Some(state) = self.views.borrow_mut().remove(&id) else {
             return;
         };
+        if let Some(owner) = state.owner.upgrade() {
+            owner.invalidate_composites();
+        }
         if let Some(worker) = self.worker.borrow().as_ref() {
             worker.fill(Command::Remove(state.key));
             self.retiring.borrow_mut().push((
@@ -222,15 +277,22 @@ impl Shaders {
                 worker.fill(Command::Shown(state.key, shown));
             }
             let frame = owner.frame.get();
-            let size = (Size::new(frame.width, frame.height), owner.scale);
+            let size = (Size::new(frame.width, frame.height), owner.scale.get());
             if state.size != Some(size) {
                 state.size = Some(size);
                 worker.fill(Command::Size(state.key, size.0, size.1));
             }
-            if state
-                .surface
-                .place((frame.width, frame.height), owner.border_radii())?
-            {
+            if state.surface.place(
+                (
+                    frame.width + 2.0 * state.overflow,
+                    frame.height + 2.0 * state.overflow,
+                ),
+                if state.overflow > 0.0 {
+                    [0.0; 4]
+                } else {
+                    owner.border_radii()
+                },
+            )? {
                 owner
                     .native
                     .borrow()
@@ -255,6 +317,13 @@ impl Shaders {
         self.frame().map(|_| ())
     }
 
+    pub(crate) fn close(&self) -> Result<()> {
+        let ids: Vec<_> = self.views.borrow().keys().copied().collect();
+        for id in ids {
+            self.remove(id);
+        }
+        self.collect()
+    }
     /// `Message::Shader`: releases the surfaces of views the worker has let
     /// go of.
     pub(crate) fn collect(&self) -> Result<()> {
@@ -288,6 +357,9 @@ impl Shaders {
 /// surface's root and within every scroll view around it, which clip their
 /// content (a row scrolled away, a card below the fold).
 fn in_sight(node: &Rc<Node>) -> bool {
+    node.shaders.visibility(node).1
+}
+fn in_sight_uncached(node: &Rc<Node>) -> bool {
     if !node.visible_in_tree() {
         return false;
     }

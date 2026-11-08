@@ -72,5 +72,7 @@ napi-build-ohos.workspace = true
 [dev-dependencies]
 getrandom = { workspace = true, features = ["std"] }
 log.workspace = true
-nsh-core.workspace = true
+nsh-core = { workspace = true, features = ["shader"] }
 unicode-segmentation.workspace = true
+nsh-engine.workspace = true
+serde_json.workspace = true

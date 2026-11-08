@@ -9,6 +9,8 @@ use crate::render::geometry::Rect;
 pub(crate) struct Live {
     inner: transition::Live,
     target_style: Option<Box<ViewStyle>>,
+    pub(crate) recolor: bool,
+    pub(crate) text_color: Option<nsh_core::Color>,
 }
 
 pub(crate) struct Step {
@@ -21,12 +23,22 @@ pub(crate) struct Step {
 }
 
 impl Live {
+    pub(crate) fn text_color(&self) -> Option<nsh_core::Color> {
+        self.text_color
+    }
+
+    pub(crate) fn recolor(&mut self, change: transition::Recolor) {
+        self.inner.recolor(change);
+        self.text_color = self.inner.text_color();
+    }
+
     pub(crate) fn finish(&mut self, style: &mut Box<ViewStyle>) -> Step {
         let frame = self.inner.frame_target().map(Rect::from);
         if let Some(target) = self.target_style.take() {
             *style = target;
         }
         let removed = self.inner.dying();
+        self.recolor = self.text_color.take().is_some();
         self.inner = transition::Live::default();
         Step {
             frame,
@@ -114,6 +126,9 @@ impl Live {
         let mut bounds = prev_bounds;
         let had_frame = self.inner.frame_target().is_some();
         let s = self.inner.step(now, &mut bounds, style);
+        let color = self.inner.text_color();
+        self.recolor = self.text_color != color;
+        self.text_color = color;
         if s.restyled && self.inner.idle() {
             self.target_style = None;
         }
@@ -126,5 +141,53 @@ impl Live {
             removed: s.removed,
             restyled: s.restyled,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nsh_core::{AttributedText, Color, ResolvedTextStyle, Transition, TransitionProps};
+
+    use super::*;
+
+    fn text(color: Color) -> AttributedText {
+        let mut text = AttributedText::default();
+        text.push(
+            "Color",
+            ResolvedTextStyle {
+                color,
+                ..Default::default()
+            },
+        );
+        text
+    }
+
+    #[test]
+    fn text_color_interpolates_and_invalidates_the_terminal_frame() {
+        let mut style = Box::new(ViewStyle {
+            transition: Some(Transition {
+                properties: TransitionProps(TransitionProps::COLORS),
+                duration: 100.0,
+                delay: 0.0,
+                easing: [0.0, 0.0, 1.0, 1.0],
+            }),
+            ..Default::default()
+        });
+        let (red, blue) = (Color(0xff0000ff), Color(0x0000ffff));
+        let mut live = Live::default();
+        live.recolor(transition::recolor(&text(red), &text(blue), &style, false));
+        assert_eq!(live.text_color(), Some(red));
+        live.step(0.0, Rect::default(), &mut style);
+        assert!(live.step(50.0, Rect::default(), &mut style).active);
+        assert!(live.recolor);
+        assert_eq!(live.text_color(), Some(Color(0x800080ff)));
+        assert!(!live.step(100.0, Rect::default(), &mut style).active);
+        assert!(live.recolor);
+        assert_eq!(live.text_color(), None);
+
+        live.recolor(transition::recolor(&text(red), &text(blue), &style, false));
+        live.finish(&mut style);
+        assert!(live.recolor);
+        assert_eq!(live.text_color(), None);
     }
 }

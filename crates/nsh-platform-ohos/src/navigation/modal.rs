@@ -331,16 +331,16 @@ impl Modal {
         self.transition.borrow_mut().take();
         self.progress.set(to);
         if to == 0.0 {
-            if let Some(owner) = self.owner.upgrade() {
-                owner.presentation(1.0, 0.0)?;
-            }
             if self.shown.replace(false) {
                 self.dialog.borrow().close()?;
                 self.overlay.borrow_mut().take();
                 self.dialog.borrow().remove_content()?;
                 if let Some(owner) = self.owner.upgrade() {
+                    owner.presentation(1.0, 0.0)?;
                     owner.emit(EventKind::Dismiss, EventPayload::None);
                 }
+            } else if let Some(owner) = self.owner.upgrade() {
+                owner.presentation(1.0, 0.0)?;
             }
         } else {
             self.paint()?;
@@ -424,7 +424,7 @@ impl Modal {
         };
         let size = if let Some(constraint) = event.layout_constraint_in_measure() {
             let bound = |value: i32, fallback: f32| {
-                let value = value as f32 / owner.scale;
+                let value = value as f32 / owner.scale.get();
                 if value > 0.0 && value <= 16384.0 {
                     value
                 } else {

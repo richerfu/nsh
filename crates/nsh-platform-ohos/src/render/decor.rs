@@ -13,6 +13,7 @@ use ohos_drawing_binding::{
     PathEffect, PathFillType, Pen, Rect, RoundRect, ShaderEffect, TileMode,
 };
 
+use super::shadow_geometry::visible_shadow;
 use crate::{
     render::{
         geometry::Size,
@@ -131,10 +132,10 @@ impl Decoration {
             owner
                 .visual_node()
                 .borrow()
-                .set_f32_attribute(A::Blur, effect.blur * owner.scale)?;
+                .set_f32_attribute(A::Blur, effect.blur.max(0.0))?;
         }
         if old.backdrop_blur != effect.backdrop_blur {
-            native.set_f32_attribute(A::BackdropBlur, effect.backdrop_blur * owner.scale)?;
+            native.set_f32_attribute(A::BackdropBlur, effect.backdrop_blur.max(0.0))?;
         }
         if old.blend != effect.blend {
             let mode = match effect.blend {
@@ -232,9 +233,7 @@ impl Decoration {
             .effects
             .as_ref()
             .map_or(&[][..], |effects| effects.box_shadows.as_slice());
-        let visible_layer = |layer: &nsh_core::BoxShadow| {
-            layer.inset == inset && layer.is_visible() && (!inset || layer.blur.0 > 0.0)
-        };
+        let visible_layer = |layer: &nsh_core::BoxShadow| visible_shadow(layer, inset);
         if !layers.iter().any(visible_layer) {
             self.shadows.borrow_mut()[usize::from(inset)] = None;
             return;

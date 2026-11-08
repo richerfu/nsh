@@ -101,9 +101,38 @@ impl Filters {
         &mut self,
         mut picture: Picture,
         filters: &[Filter],
-        scale: f32,
-    ) -> Result<(Picture, f32, f32)> {
+        mut scale: f32,
+    ) -> Result<(Picture, f32, f32, f32)> {
         self.next = 0;
+        let bounds =
+            super::super::geometry::Bounds::new(picture.1 as f32 / scale, picture.2 as f32 / scale)
+                .filters(filters)
+                .0;
+        let (_, _, bounded_scale) = super::super::geometry::target_size(
+            bounds[2] - bounds[0],
+            bounds[3] - bounds[1],
+            scale,
+        );
+        // Reserve rounding room for the padding of each ordered pass.
+        let ratio = if bounded_scale < scale {
+            bounded_scale / scale * (1.0 - (filters.len() as f32 * 4.0 + 2.0).min(1024.0) / 4096.0)
+        } else {
+            1.0
+        };
+        if ratio < 1.0 {
+            let size = (
+                (picture.1 as f32 * ratio).floor().max(1.0) as u32,
+                (picture.2 as f32 * ratio).floor().max(1.0) as u32,
+            );
+            let mut pass = Pass::new(size);
+            pass.mode = 3;
+            pass.source_scale = [
+                picture.1 as f32 / size.0 as f32,
+                picture.2 as f32 / size.1 as f32,
+            ];
+            picture = self.draw(picture, pass)?;
+            scale *= ratio;
+        }
         let (mut x, mut y) = (0.0, 0.0);
         for filter in filters {
             match *filter {
@@ -151,7 +180,7 @@ impl Filters {
             }
         }
         self.targets.truncate(self.next);
-        Ok((picture, x, y))
+        Ok((picture, x, y, scale))
     }
     fn blur(&mut self, mut picture: Picture, sigma: f32) -> Result<Picture> {
         if sigma <= 0.0 {

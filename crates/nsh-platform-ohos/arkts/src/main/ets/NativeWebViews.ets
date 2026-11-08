@@ -1,9 +1,12 @@
 import { BuilderNode } from "@ohos.arkui.node";
 import { fileIo as fs } from "@kit.CoreFileKit";
+import picker from "@ohos.file.picker";
 import webview from "@ohos.web.webview";
 import { NshRuntimeContext } from "./NativeEditors";
 
 export interface WebSettings {
+  sharedCookies: boolean;
+  clearCookies: boolean;
   targetId: number;
   url?: string | null;
   html?: string | null;
@@ -35,12 +38,26 @@ function ensureWebEngineInitialized(): void {
   }
 }
 
+// Clear the selected store before the controller's first navigation, including
+// settings queued while its native node was still attaching.
+function clearCookiesIfNeeded(entry: WebEntry): void {
+  if (!entry.settings.clearCookies) { return; }
+  try {
+    webview.WebCookieManager.clearAllCookiesSync(!entry.settings.sharedCookies);
+    entry.settings.clearCookies = false;
+  } catch (error) {
+    entry.emit("error", `Cookie reset failed: ${String(error)}`);
+    throw new Error(String(error));
+  }
+}
+
 @Builder
 function webContent(entry: WebEntry) {
   Web({
     src: "",
     controller: entry.controller,
     renderMode: RenderMode.SYNC_RENDER,
+    incognitoMode: !entry.settings.sharedCookies,
   })
     .id(`nsh-web-${entry.settings.targetId}`)
     .width("100%")
@@ -58,6 +75,11 @@ function webContent(entry: WebEntry) {
         scriptRules: ["*", "nsh-asset://"],
       },
     ])
+    .onShowFileSelector((event): boolean => {
+      if (!event) { return false; }
+      entry.selectFiles(event.fileSelector, event.result);
+      return true;
+    })
     .onControllerAttached(() => {
       entry.onControllerAttached();
     })
@@ -100,6 +122,7 @@ class WebEntry {
   private appliedLoadGeneration: number = 0;
   private pendingCommands: WebCommand[] = [];
   private inputCommands: Promise<void> = Promise.resolve();
+  private fileSelectors: Set<FileSelectorResult> = new Set();
   private downloads: Map<string, webview.WebDownloadItem> = new Map();
   private readonly downloadDelegate: webview.WebDownloadDelegate =
     new webview.WebDownloadDelegate();
@@ -150,6 +173,11 @@ class WebEntry {
   }
 
   onControllerAttached(): void {
+    try {
+      clearCookiesIfNeeded(this);
+    } catch (_) {
+      return;
+    }
     this.controllerObserved = true;
     if (!this.attached || this.controllerReady || this.closed || !this.context.isActive()) {
       return;
@@ -224,6 +252,7 @@ class WebEntry {
     if (settings.targetId !== this.settings.targetId) {
       throw new Error("WebView replacement requires a new target");
     }
+    settings.clearCookies = settings.clearCookies || this.settings.clearCookies;
     this.settings = settings;
     if (!this.controllerReady) {
       return;
@@ -240,6 +269,7 @@ class WebEntry {
   }
 
   private applySource(): void {
+    clearCookiesIfNeeded(this);
     this.appliedLoadGeneration = this.settings.loadGeneration;
     if (this.settings.url != null) {
       this.controller.loadUrl(this.settings.url);
@@ -252,6 +282,48 @@ class WebEntry {
         " ",
       );
     }
+  }
+
+  selectFiles(selector: FileSelectorParam, result: FileSelectorResult): void {
+    this.fileSelectors.add(result);
+    const epoch = this.epoch;
+    const finish = (uris: string[]): void => {
+      if (this.fileSelectors.delete(result)) {
+        result.handleFileList(this.closed || !this.context.isActive() || epoch !== this.epoch ? [] : uris);
+      }
+    };
+    this.pickFiles(selector).then(finish).catch((error: Error) => {
+      console.warn(`NSH WebView file picker: ${String(error)}`);
+      finish([]);
+    });
+  }
+
+  private async pickFiles(selector: FileSelectorParam): Promise<string[]> {
+    if (this.closed || !this.context.isActive()) { return []; }
+    const mode = selector.getMode();
+    if (mode === FileSelectorMode.FileSaveMode) { return []; }
+    const limit = mode === FileSelectorMode.FileOpenMultipleMode ? 100 : 1;
+    const accept = selector.getAcceptType().map((type: string) => type.toLowerCase());
+    const host = this.context.getUIContext().getHostContext();
+    if (!host) { return []; }
+    const media = accept.length > 0 && accept.every((type: string) => type.startsWith("image/") || type.startsWith("video/"));
+    if (media && mode !== FileSelectorMode.FileOpenFolderMode) {
+      const photos = new picker.PhotoViewPicker(host);
+      const options = new picker.PhotoSelectOptions();
+      options.maxSelectNumber = limit;
+      options.MIMEType = accept.every((type: string) => type.startsWith("image/"))
+        ? picker.PhotoViewMIMETypes.IMAGE_TYPE
+        : accept.every((type: string) => type.startsWith("video/"))
+          ? picker.PhotoViewMIMETypes.VIDEO_TYPE : picker.PhotoViewMIMETypes.IMAGE_VIDEO_TYPE;
+      return (await photos.select(options)).photoUris;
+    }
+    const documents = new picker.DocumentViewPicker(host);
+    const options = new picker.DocumentSelectOptions();
+    options.maxSelectNumber = limit;
+    if (mode === FileSelectorMode.FileOpenFolderMode) { options.selectMode = picker.DocumentSelectMode.FOLDER; }
+    const suffixes = accept.filter((type: string) => /^\.[a-z0-9]+$/.test(type));
+    if (suffixes.length > 0) { options.fileSuffixFilters = suffixes; }
+    return documents.select(options);
   }
 
   onLoadIntercept(url: string): boolean {
@@ -489,6 +561,10 @@ class WebEntry {
   }
 
   dispose(cleanup: NshRuntimeContext = this.context): void {
+    for (const result of this.fileSelectors) {
+      try { result.handleFileList([]); } catch {}
+    }
+    this.fileSelectors.clear();
     if (this.disposed) {
       return;
     }

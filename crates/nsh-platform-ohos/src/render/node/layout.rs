@@ -82,6 +82,8 @@ impl Node {
         if old == frame {
             return Ok(());
         }
+        self.invalidate_composites();
+        self.invalidate_scene();
         self.update_layout_bounds()?;
         self.invalidate_ink(self.applied.get().ink_outset)?;
         let size_changed = old.width != frame.width || old.height != frame.height;
@@ -125,7 +127,9 @@ impl Node {
             if let Some(scroll) = self.scroll.borrow().as_ref() {
                 scroll.viewport(Size::new(frame.width, frame.height))?;
             }
-            if let Some(screen) = self.screen.borrow().as_ref() {
+            if let Some(screen) = self.screen.borrow().as_ref()
+                && screen.insets_initialized()
+            {
                 screen.update(screen.has_back())?;
             }
             if self.text_drawing.borrow().is_some()
@@ -153,15 +157,22 @@ impl Node {
     }
     pub(crate) fn update_layout_bounds(&self) -> Result<()> {
         let frame = self.frame.get();
+        // Header slots have core-measured sizes, but the native bar owns their
+        // positions. Rewrapping for scene export must preserve that placement.
+        let header_position = (self.kind == ViewKind::HeaderItem)
+            .then(|| self.parent_node.borrow().upgrade())
+            .flatten()
+            .and_then(|parent| parent.screen.borrow().as_ref()?.item_position(self));
+        let (x, y) = header_position.unwrap_or((frame.x, frame.y));
         self.place_bounds(
-            (frame.x * self.scale).round() as i32,
-            (frame.y * self.scale).round() as i32,
+            (x * self.scale.get()).round() as i32,
+            (y * self.scale.get()).round() as i32,
         )
     }
     pub(super) fn place_bounds(&self, x: i32, y: i32) -> Result<()> {
         let frame = self.frame.get();
-        let mut width = (frame.width * self.scale).round() as i32;
-        let mut height = (frame.height * self.scale).round() as i32;
+        let mut width = (frame.width * self.scale.get()).round() as i32;
+        let mut height = (frame.height * self.scale.get()).round() as i32;
         if !self.clips_children() && !self.children.borrow().is_empty() {
             width = width.max(1);
             height = height.max(1);
@@ -188,14 +199,15 @@ impl Node {
             self.applied_layout_size.set((ptr, width, height));
         }
         if self.applied_position.get() != (ptr, x, y) {
-            native.set_position([x as f32 / self.scale, y as f32 / self.scale])?;
+            native.set_position([x as f32 / self.scale.get(), y as f32 / self.scale.get()])?;
             self.applied_position.set((ptr, x, y));
         }
         Ok(())
     }
     pub(crate) fn place(&self, event: &NodeCustomEvent, x: i32, y: i32) -> Result<()> {
         let frame = self.frame.get();
-        if x != (frame.x * self.scale).round() as i32 || y != (frame.y * self.scale).round() as i32
+        if x != (frame.x * self.scale.get()).round() as i32
+            || y != (frame.y * self.scale.get()).round() as i32
         {
             self.place_bounds(x, y)?;
         }
@@ -215,7 +227,9 @@ impl Node {
             {
                 canvas.invalidate()?;
             }
-            self.frame.set(frame);
+            if self.frame.replace(frame) != frame {
+                self.invalidate_composites();
+            }
             self.raw_frame.set(frame);
         }
         // Rosen's `RSObjAbsGeometry::UpdateMatrix` returns early when both
@@ -223,8 +237,8 @@ impl Node {
         // offset and transforms for all descendants, and `A::ResponseRegion`
         // percentages multiply by the measured size. Keep unclipped containers
         // at least 1px in each axis so their geometry and hit regions propagate.
-        let mut width = (frame.width * self.scale).round() as i32;
-        let mut height = (frame.height * self.scale).round() as i32;
+        let mut width = (frame.width * self.scale.get()).round() as i32;
+        let mut height = (frame.height * self.scale.get()).round() as i32;
         if !self.clips_children() && !self.children.borrow().is_empty() {
             width = width.max(1);
             height = height.max(1);
@@ -293,7 +307,7 @@ impl Node {
         #[cfg(feature = "api-23")]
         self.accessibility_provider.bounds(self)?;
         if let Some(input) = self.input.borrow().as_ref() {
-            input.layout(event, self.scale)?;
+            input.layout(event, self.scale.get())?;
         } else if let Some(image) = self.image.borrow().as_ref() {
             event.layout_child(&image.native.borrow(), 0, 0)?;
         } else if let Some(scroll) = self.scroll.borrow().as_ref() {
@@ -324,7 +338,8 @@ impl Node {
             event.layout_child(&component.native.borrow(), 0, 0)?;
         }
         if let Some(surface) = self.shaders.native(self.id) {
-            event.layout_child(&surface.borrow(), 0, 0)?;
+            let overflow = (self.shaders.overflow(self.id) * self.scale.get()).round() as i32;
+            event.layout_child(&surface.borrow(), -overflow, -overflow)?;
         }
         // Engine children place themselves through native Position; only
         // platform-owned children participate in this parent's layout pass.

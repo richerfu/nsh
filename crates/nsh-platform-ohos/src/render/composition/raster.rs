@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use super::{draw::Plan, filter::Image, worker::Key};
+use super::draw::{Plan, Sources};
 use crate::app::runtime::{Dispatcher, Message};
 
 pub(crate) struct Pixels {
@@ -24,7 +24,7 @@ pub(crate) struct Scene {
     pub(crate) shared: Arc<Shared>,
 }
 impl Scene {
-    pub(super) fn render<'a>(&self, source: impl Fn(Key) -> Option<&'a Image>, route: &Dispatcher) {
+    pub(super) fn render(&self, source: &mut impl Sources, route: &Dispatcher) {
         match self.plan.render(source) {
             Ok(Some(frames)) => {
                 *self.shared.output.lock().unwrap() = Some(

@@ -1,3 +1,4 @@
+import { SystemReply } from "./NativeSystem";
 import { common, Want } from "@kit.AbilityKit";
 import notification from "@ohos.notificationManager";
 import wantAgent from "@ohos.app.ability.wantAgent";
@@ -21,7 +22,7 @@ export function onNotificationWant(want: Want): void {
     pending.set(ability, queued);
   }
 }
-export interface NotificationReply {
+export interface NotificationReply extends SystemReply {
   permission?: string;
   shown?: boolean;
   pressed?: string;

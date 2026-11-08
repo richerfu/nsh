@@ -76,8 +76,8 @@ impl Plane {
                 if let (Some(plane), Some(owner)) = (weak.upgrade(), node.upgrade()) {
                     let frame = owner.frame.get();
                     event.set_measured_size(
-                        (frame.width * owner.scale).round() as i32,
-                        (frame.height * owner.scale).round() as i32,
+                        (frame.width * owner.scale.get()).round() as i32,
+                        (frame.height * owner.scale.get()).round() as i32,
                     )?;
                     if let Some(result) = plane.with_child(|child| {
                         crate::render::layout::ChildMeasure::new(event).child(child)

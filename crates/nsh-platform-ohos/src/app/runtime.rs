@@ -97,12 +97,7 @@ pub(crate) enum Message {
     UpdateBack,
     DismissKeyboard,
     ReconcileNavigation,
-    ScrollPosition {
-        id: u32,
-        x: f32,
-        y: f32,
-        animated: bool,
-    },
+    FlushScrollLayout(nsh_core::NodeId),
     DialogResult {
         id: u32,
         index: i32,
@@ -128,7 +123,6 @@ pub(crate) enum Message {
     #[cfg(feature = "api-23")]
     AccessibilityEvent(nsh_core::NodeId, ohos_accessibility_binding::EventType),
     HostClosed,
-    ClipboardProbe(std::sync::mpsc::SyncSender<std::result::Result<bool, String>>),
     Close,
     Image(crate::media::image::Ready),
     ImageProgress(crate::media::image::Progress),
@@ -150,6 +144,7 @@ pub(crate) struct Dispatcher {
     pub(crate) active: std::sync::atomic::AtomicBool,
     pub(crate) live: std::sync::atomic::AtomicBool,
     pub(crate) manages_status_bar: bool,
+    pub(crate) status_bar_configured: std::sync::atomic::AtomicBool,
     pub(crate) status_bar: std::sync::Mutex<Option<(nsh_core::StatusBarConfig, bool)>>,
     pub(crate) keyboard: std::sync::Mutex<crate::input::keyboard::Snapshot>,
 }
@@ -261,6 +256,7 @@ struct State {
     attached: bool,
     visible: bool,
     frame_wanted: bool,
+    retiring_dispatcher: Option<Arc<Dispatcher>>,
     #[cfg(feature = "dev")]
     reload: Option<(u64, std::sync::Weak<crate::app::surface::Queue>)>,
     #[cfg(feature = "dev")]
@@ -286,6 +282,20 @@ impl State {
             return Ok(());
         }
         if self.engine.is_none() {
+            if let Some(mounter) = &self.mounter {
+                mounter.shaders.collect()?;
+                if let Some(worker) = mounter.compositor.borrow().as_ref() {
+                    worker.collect();
+                }
+                if mounter
+                    .compositor
+                    .borrow()
+                    .as_ref()
+                    .is_none_or(|worker| worker.drained())
+                {
+                    self.retiring_dispatcher.take();
+                }
+            }
             return Ok(());
         }
         match message {
@@ -339,22 +349,14 @@ impl State {
             Message::DismissKeyboard => {
                 self.mounter.as_ref().unwrap().dismiss_keyboard()?;
             }
-            Message::ScrollPosition { id, x, y, animated } => self
-                .mounter
-                .as_ref()
-                .unwrap()
-                .scroll_to(id, x, y, animated)?,
+            Message::FlushScrollLayout(id) => {
+                self.mounter.as_ref().unwrap().flush_scroll_layout(id)?
+            }
             Message::ReconcileNavigation => {
                 self.mounter.as_mut().unwrap().reconcile_navigation()?;
             }
             Message::DialogResult { id, index } => {
                 self.mounter.as_mut().unwrap().dialog_result(id, index)?;
-            }
-            Message::ClipboardProbe(reply) => {
-                let result = ohos_pasteboard_binding::Pasteboard::new()
-                    .has_type(ohos_udmf_binding::UdsPlainText::new())
-                    .map_err(|error| error.to_string());
-                let _ = reply.send(result);
             }
             Message::HostEnvironment(changes) => self.update_environment(changes)?,
             Message::HostWindow(visual, keyboard) if self.laid_out => {
@@ -393,8 +395,8 @@ impl State {
                 self.retire()?;
                 if let Err(error) = result {
                     if matches!(error, crate::render::node::Error::Tree(_)) {
-                        // Only a failed native tree mutation invalidates the
-                        // generation. A later load can recover that instance.
+                        // Root creation is the only fatal mount item. Stale
+                        // references and detach failures are logged by the mounter.
                         if let Err(cleanup) = self.close() {
                             log::error!("OHOS failed-generation cleanup: {cleanup}");
                         }
@@ -452,6 +454,13 @@ impl State {
         let environment = changes.apply(self.environment)?;
         if environment == self.environment {
             return Ok(());
+        }
+        if let Some(mounter) = &self.mounter {
+            // Publish density before the engine records text for this environment.
+            mounter.text_scale.store(
+                environment.pixel_ratio.to_bits(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
         if let Some(engine) = &self.engine {
             engine.control().set_environment(environment);
@@ -530,18 +539,24 @@ impl State {
                 parent
                     .borrow()
                     .post_frame_callback(move |timestamp, _| {
-                        let Some(state) = state.upgrade() else {
-                            return;
-                        };
-                        if let Ok(mut state) = state.try_borrow_mut() {
-                            if let Err(error) = state.step_frame(true, Some(timestamp)) {
-                                state.report(error.to_string());
-                                log::error!("OHOS surface frame: {error}");
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let Some(state) = state.upgrade() else {
+                                return;
+                            };
+                            if let Ok(mut state) = state.try_borrow_mut() {
+                                if let Err(error) = state.step_frame(true, Some(timestamp)) {
+                                    state.report(error.to_string());
+                                    log::error!("OHOS surface frame: {error}");
+                                }
+                            } else if let Some(dispatcher) =
+                                state.try_borrow().ok().and_then(|s| s.dispatcher.upgrade())
+                            {
+                                dispatcher.send(Message::Frame(Some(timestamp)));
                             }
-                        } else if let Some(dispatcher) =
-                            state.try_borrow().ok().and_then(|s| s.dispatcher.upgrade())
+                        }))
+                        .is_err()
                         {
-                            dispatcher.send(Message::Frame(Some(timestamp)));
+                            log::error!("panic in OHOS frame callback");
                         }
                     })
                     .is_err()
@@ -592,6 +607,13 @@ impl State {
     }
     fn close(&mut self) -> Result<()> {
         if let Some(dispatcher) = self.dispatcher.upgrade() {
+            if self
+                .mounter
+                .as_ref()
+                .is_some_and(|mounter| mounter.compositor.borrow().is_some())
+            {
+                self.retiring_dispatcher = Some(dispatcher.clone());
+            }
             dispatcher
                 .active
                 .store(false, std::sync::atomic::Ordering::Release);
@@ -602,7 +624,9 @@ impl State {
                 .live
                 .store(false, std::sync::atomic::Ordering::Release);
         }
-        self.engine.take();
+        if let Some(engine) = self.engine.take() {
+            std::thread::spawn(move || drop(engine));
+        }
         if let Some(mounter) = &mut self.mounter {
             mounter.host.system.retire(&mounter.host, &self.dispatcher);
             mounter.host.apply_selected_status();
@@ -614,7 +638,9 @@ impl State {
 }
 impl Drop for State {
     fn drop(&mut self) {
-        self.engine.take();
+        if let Some(engine) = self.engine.take() {
+            std::thread::spawn(move || drop(engine));
+        }
         self.mounter.take();
     }
 }
@@ -678,8 +704,8 @@ impl Runtime {
         let status = vsync.set_expected_frame_rate_range(
             ohos_vsync_binding::OH_NativeVSync_ExpectedRateRange {
                 min: 0,
-                max: 120,
-                expected: 60,
+                max: crate::app::frame_rate::display_hz() as i32,
+                expected: crate::app::frame_rate::display_hz().min(60) as i32,
             },
         );
         if status != 0 {
@@ -708,6 +734,7 @@ impl Runtime {
                 attached: true,
                 visible: true,
                 frame_wanted: false,
+                retiring_dispatcher: None,
                 environment: Environment::default(),
                 #[cfg(feature = "dev")]
                 reload: app.reload,
@@ -723,10 +750,16 @@ impl Runtime {
                 .build_threadsafe_function::<Message>()
                 .callee_handled::<false>()
                 .build_callback(move |ctx| {
-                    let mut state = ui_state.borrow_mut();
-                    if let Err(error) = state.receive(ctx.value) {
-                        state.report(error.to_string());
-                        log::error!("OHOS surface: {error}");
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let mut state = ui_state.borrow_mut();
+                        if let Err(error) = state.receive(ctx.value) {
+                            state.report(error.to_string());
+                            log::error!("OHOS surface: {error}");
+                        }
+                    }))
+                    .is_err()
+                    {
+                        log::error!("panic in OHOS runtime TSFN callback");
                     }
                     Ok(())
                 })?,
@@ -734,6 +767,7 @@ impl Runtime {
             video_fullscreen: std::sync::atomic::AtomicBool::new(false),
             active: std::sync::atomic::AtomicBool::new(config.host.is_foreground()),
             manages_status_bar: config.manages_status_bar,
+            status_bar_configured: std::sync::atomic::AtomicBool::new(false),
             status_bar: std::sync::Mutex::new(None),
             keyboard: std::sync::Mutex::default(),
             live: std::sync::atomic::AtomicBool::new(true),
@@ -774,7 +808,7 @@ impl Runtime {
             environment,
             header_heights: (nsh_core::Points(52.0), nsh_core::Points(52.0)),
             limits: config.limits,
-            ui_sets: vec![nsh_base::registry()],
+            ui_sets: crate::ui_sets(),
             runtime: None,
             data_dir: Some(config.host.data_directory()),
             cache: config.cache.clone(),
@@ -792,9 +826,15 @@ impl Runtime {
         let host_tokens = config.host_tokens.clone();
         let fonts = crate::text::fonts::Fonts::new();
         let engine_fonts = fonts.clone();
+        let scale = environment.pixel_ratio;
+        let text_scale = Arc::new(std::sync::atomic::AtomicU32::new(scale.to_bits()));
+        let engine_scale = text_scale.clone();
+        // Engine::start_with installs Core's image context from these assets,
+        // access policy and disk cache. Its transport also serves SVG/font loads.
+        nsh_core::image::loader::set_transport(crate::media::image::transport());
         let engine = Engine::start_with(
             engine_config,
-            move || OhosTextEngine::new(scale, engine_fonts),
+            move || OhosTextEngine::new(engine_scale, engine_fonts),
             Sink(dispatcher.clone(), app.chunks),
             move |control| {
                 if let Some(tokens) = host_tokens {
@@ -806,6 +846,7 @@ impl Runtime {
         images.set_disk_cache(engine.image_cache());
         let control = engine.control();
         let context = Rc::new(crate::render::mount::UiContext {
+            theme: RefCell::default(),
             cursor: Default::default(),
             shaders: crate::render::shader::Shaders::new(shader_vsync),
             fullscreen_video: RefCell::default(),
@@ -825,7 +866,8 @@ impl Runtime {
             host: config.host.clone(),
             dispatcher: Arc::downgrade(&dispatcher),
             env,
-            scale,
+            scale: std::cell::Cell::new(scale),
+            text_scale,
             control: control.clone(),
             animator: crate::render::animation::Animator::new(control, Arc::downgrade(&dispatcher)),
             images,

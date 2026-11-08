@@ -14,6 +14,19 @@ use super::{NativeNode, Node, Result, callback};
 use crate::{render::geometry::Size, text::typography::argb};
 
 impl Node {
+    pub(crate) fn density_changed(&self) -> Result<()> {
+        self.decoration.clear_paint_cache();
+        self.invalidate_composites();
+        self.update_layout_bounds()?;
+        self.restore_style()?;
+        self.animator.apply_node(self)?;
+        self.native
+            .borrow()
+            .mark_dirty(NodeDirtyFlag::NeedMeasure)?;
+        self.native.borrow().mark_dirty(NodeDirtyFlag::NeedRender)?;
+        Ok(())
+    }
+
     /// The corner radii its native node was given (top-left first), which
     /// platform-owned children that fill it clip to.
     pub(crate) fn border_radii(&self) -> [f32; 4] {
@@ -21,7 +34,10 @@ impl Node {
     }
     pub(crate) fn clips_children(&self) -> bool {
         self.style.borrow().overflow_hidden
-            || self.kind == ViewKind::Scroll
+            || matches!(
+                self.kind,
+                ViewKind::Scroll | ViewKind::Image | ViewKind::Stack | ViewKind::Input
+            )
             || self.modal.borrow().as_ref().is_some_and(|modal| {
                 modal.presentation() != nsh_core::ModalPresentation::FullScreen
             })
@@ -43,6 +59,7 @@ impl Node {
                 || c.title_view == Some(self.id))
     }
     pub(crate) fn style(self: &Rc<Self>, style: &ViewStyle) -> Result<()> {
+        self.invalidate_composites();
         if style.outline.width.0 > 0.0 && !self.outlined.replace(true) {
             let weak = Rc::downgrade(self);
             self.native
@@ -61,7 +78,7 @@ impl Node {
                                 &canvas,
                                 &node.style.borrow(),
                                 Size::new(frame.width, frame.height),
-                                node.scale,
+                                node.scale.get(),
                             );
                         }
                         Ok(())
@@ -137,16 +154,12 @@ impl Node {
                 modal.presentation() != nsh_core::ModalPresentation::FullScreen
             });
         let bg = if default_surface_bg && color.is_transparent() {
-            if self
+            let dark = self
                 .appearance
                 .get()
                 .resolve(self.platform.get().color_scheme)
-                == nsh_engine::ColorScheme::Dark
-            {
-                0xff121212
-            } else {
-                0xffffffff
-            }
+                == nsh_engine::ColorScheme::Dark;
+            self.theme.borrow().color("background", dark)
         } else {
             argb(color)
         };
@@ -181,7 +194,7 @@ impl Node {
         if frame.width > 0.0 && frame.height > 0.0 {
             let short = frame.width.min(frame.height);
             let half = short * 0.5;
-            let snapped_half = ((short * self.scale).round() * 0.5) / self.scale;
+            let snapped_half = ((short * self.scale.get()).round() * 0.5) / self.scale.get();
             for r in &mut radius {
                 if *r >= half - 1e-4 && *r < snapped_half {
                     *r = snapped_half;
@@ -258,9 +271,9 @@ impl Node {
         use crate::render::shadow_geometry::{native_box_shadow, native_radius};
         let next = native_box_shadow(style).map(|shadow| {
             (
-                native_radius(shadow.blur.0 * self.scale * 0.5),
-                shadow.offset_x.0 * self.scale,
-                shadow.offset_y.0 * self.scale,
+                native_radius(shadow.blur.0 * self.scale.get() * 0.5),
+                shadow.offset_x.0 * self.scale.get(),
+                shadow.offset_y.0 * self.scale.get(),
                 argb(shadow.color),
             )
         });
@@ -318,12 +331,15 @@ impl Node {
                     nsh_core::Bounds::new(
                         nsh_core::Point::default(),
                         nsh_core::Size::new(
-                            Points(size.width * self.scale),
-                            Points(size.height * self.scale),
+                            Points(size.width * self.scale.get()),
+                            Points(size.height * self.scale.get()),
                         ),
                     ),
                     nsh_core::Corners::from(radii.map(|r| {
-                        nsh_core::Size::new(Points(r * self.scale), Points(r * self.scale))
+                        nsh_core::Size::new(
+                            Points(r * self.scale.get()),
+                            Points(r * self.scale.get()),
+                        )
                     })),
                     true,
                     false,

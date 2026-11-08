@@ -188,6 +188,10 @@ impl Ui {
             button.width(CONTROL)?;
             button.height(CONTROL)?;
             button.set_u32_attribute(A::AccessibilityRole, ArkUINodeType::Button.into())?;
+            button.set_i32_attribute(
+                A::AccessibilityMode,
+                ohos_arkui_binding::types::view::AccessibilityMode::Enabled.into(),
+            )?;
         }
         for text in [&current, &total] {
             let text = text.borrow();
@@ -327,7 +331,7 @@ impl Ui {
             fullscreen_size: Cell::new(Size::default()),
             state: Cell::new(UiState::default()),
             mode: Cell::new(ResizeMode::Contain),
-            scale: owner.scale,
+            scale: owner.scale.get(),
             updating_slider,
             scrubbing,
         });

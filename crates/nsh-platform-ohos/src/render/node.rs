@@ -102,8 +102,12 @@ pub(crate) struct Node {
     pub(crate) kind: ViewKind,
     pub(crate) pending_delete: Cell<bool>,
     pub(crate) scene_prepared: Cell<bool>,
+    pub(crate) scene_root: Cell<bool>,
     /// Effects applied to this node's exported native subtree, in mount order.
     pub(crate) shader_layers: RefCell<Vec<(NodeId, std::sync::Arc<nsh_core::shader::ShaderLayer>)>>,
+    pub(crate) navigation_capture: Cell<bool>,
+    pub(crate) composite_dirty: Cell<bool>,
+    capture_cache: Cell<Option<super::composition::geometry::Bounds>>,
     pub(crate) navigation_shader: RefCell<Option<nsh_core::NavShader>>,
     pub(crate) modal: RefCell<Option<Rc<crate::navigation::modal::Modal>>>,
     pub(crate) screen: RefCell<Option<Rc<crate::navigation::stack::Screen>>>,

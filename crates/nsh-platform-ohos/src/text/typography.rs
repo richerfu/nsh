@@ -6,7 +6,7 @@ use std::{
     cell::RefCell,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU32, AtomicUsize, Ordering},
     },
 };
 
@@ -44,6 +44,7 @@ pub(crate) struct EngineText {
 }
 
 pub(crate) struct NativeText {
+    pub(crate) source: Arc<AttributedText>,
     pub(crate) origin_y: f32,
     pub(crate) drawing: Mutex<Option<TextDrawing>>,
     pub(crate) scale: f32,
@@ -135,7 +136,7 @@ impl EngineText {
 
 pub(crate) struct Prepared {
     paragraph: RefCell<Arc<Mutex<Paragraph>>>,
-    source: AttributedText,
+    source: Arc<AttributedText>,
     single_line_ltr: bool,
     has_attachments: bool,
     text: Arc<str>,
@@ -178,17 +179,23 @@ impl Prepared {
 
 pub(crate) struct OhosTextEngine {
     fonts: Arc<Mutex<super::fonts::Fonts>>,
-    scale: f32,
+    scale: Arc<AtomicU32>,
     budget: Arc<AtomicUsize>,
 }
 
 impl OhosTextEngine {
-    pub(crate) fn new(scale: f32, fonts: Arc<Mutex<super::fonts::Fonts>>) -> Self {
+    pub(crate) fn new(scale: Arc<AtomicU32>, fonts: Arc<Mutex<super::fonts::Fonts>>) -> Self {
         Self {
             fonts,
             scale,
             budget: Arc::default(),
         }
+    }
+}
+
+impl OhosTextEngine {
+    fn scale(&self) -> f32 {
+        f32::from_bits(self.scale.load(Ordering::Relaxed))
     }
 }
 
@@ -452,7 +459,7 @@ impl TextEngine for OhosTextEngine {
                 width: None,
                 _fonts: fonts.data.clone(),
             }))),
-            source: text.clone(),
+            source: Arc::new(text.clone()),
             single_line_ltr: !rtl && matches!(text.align, TextAlign::Auto | TextAlign::Left),
             has_attachments: !text.attachments.is_empty(),
             selectable: (text.selectable != Some(false)).then(|| shared_text.clone()),
@@ -478,6 +485,8 @@ impl TextEngine for OhosTextEngine {
     }
 
     fn layout(&self, prepared: &Prepared, size: Size<Points>) -> TextLayout {
+        // One recording keeps one density even if a host update arrives mid-draw.
+        let scale = self.scale();
         let size = crate::render::geometry::Size::from(size);
         let target = if prepared.no_wrap {
             1_000_000.0
@@ -490,13 +499,12 @@ impl TextEngine for OhosTextEngine {
         let paragraph = &mut owned.native;
         let (mut top, mut bottom) = (0.0f32, size.height);
         for decoration in &prepared.decorations {
-            if let Some((min, max)) = decoration.vertical_bounds(paragraph, self.scale) {
+            if let Some((min, max)) = decoration.vertical_bounds(paragraph, scale) {
                 top = top.min(min);
                 bottom = bottom.max(max);
             }
         }
-        let padding_top = (-top * self.scale).ceil() / self.scale;
-        let scale = self.scale;
+        let padding_top = (-top * scale).ceil() / scale;
         let width = (f64::from(size.width.max(0.0)) * f64::from(scale))
             .ceil()
             .min(f64::from(i32::MAX)) as i32;
@@ -507,6 +515,7 @@ impl TextEngine for OhosTextEngine {
             .as_ref()
             .map_or_else(OnceLock::new, |lines| OnceLock::from(lines.clone()));
         let mut raster = NativeText {
+            source: prepared.source.clone(),
             origin_y: -padding_top,
             drawing: Mutex::new(None),
             scale,
@@ -703,7 +712,7 @@ impl TextEngine for OhosTextEngine {
             }
             paragraph.paint(canvas, 0.0, 0.0);
             for decoration in &prepared.decorations {
-                decoration.draw(canvas, paragraph, self.scale, size.width);
+                decoration.draw(canvas, paragraph, scale, size.width);
             }
             canvas.restore();
             match recording.finish() {

@@ -293,8 +293,11 @@ impl Node {
                     .map(|a| a.text())
                     .transpose()?
                     .unwrap_or_default();
-                self.host
-                    .enqueue_clipboard(self.dispatcher.clone(), Some(text), None)?;
+                self.host.system.command(
+                    &self.host,
+                    self.dispatcher.clone(),
+                    nsh_core::Command::SetClipboard(text),
+                )?;
                 self.selection_clear()?;
             }
             Command::SelectAll => {
@@ -336,20 +339,28 @@ impl Node {
                     if !self.selection.handles.get()[index] {
                         continue;
                     }
-                    let x = (content.x + x) * self.scale;
-                    let top = (content.y + top) * self.scale;
-                    let bottom = (content.y + bottom) * self.scale;
-                    canvas.draw_rect(&Rect::new(x - self.scale, top, x + self.scale, bottom));
-                    canvas.draw_circle(&Point::new(x, bottom + 5.0 * self.scale), 5.0 * self.scale);
+                    let x = (content.x + x) * self.scale.get();
+                    let top = (content.y + top) * self.scale.get();
+                    let bottom = (content.y + bottom) * self.scale.get();
+                    canvas.draw_rect(&Rect::new(
+                        x - self.scale.get(),
+                        top,
+                        x + self.scale.get(),
+                        bottom,
+                    ));
+                    canvas.draw_circle(
+                        &Point::new(x, bottom + 5.0 * self.scale.get()),
+                        5.0 * self.scale.get(),
+                    );
                 }
             }
         } else {
             for r in &geometry.rectangles {
                 canvas.draw_rect(&Rect::new(
-                    (content.x + r[0]) * self.scale,
-                    (content.y + r[1]) * self.scale,
-                    (content.x + r[2]) * self.scale,
-                    (content.y + r[3]) * self.scale,
+                    (content.x + r[0]) * self.scale.get(),
+                    (content.y + r[1]) * self.scale.get(),
+                    (content.x + r[2]) * self.scale.get(),
+                    (content.y + r[3]) * self.scale.get(),
                 ));
             }
         }

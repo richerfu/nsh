@@ -45,9 +45,32 @@ pub(crate) fn complete_swipe(distance: f32, width: f32, velocity: f32) -> bool {
         && (distance >= width * 0.35 || velocity > 600.0)
 }
 
+pub(crate) fn title_bounds(width: f32, back: bool, left: f32, right: f32, rtl: bool) -> (f32, f32) {
+    let leading =
+        if back { 56.0 } else { 12.0 } + left.max(0.0) + if left > 0.0 { 8.0 } else { 0.0 };
+    let trailing = 12.0 + right.max(0.0) + if right > 0.0 { 8.0 } else { 0.0 };
+    let (start, end) = if rtl {
+        (trailing, leading)
+    } else {
+        (leading, trailing)
+    };
+    let x = start.min(width.max(0.0));
+    (x, (width - x - end).max(0.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wide_items_bound_the_title_and_mirror_in_rtl() {
+        assert_eq!(
+            title_bounds(400.0, true, 100.0, 80.0, false),
+            (164.0, 136.0)
+        );
+        assert_eq!(title_bounds(400.0, true, 100.0, 80.0, true), (100.0, 136.0));
+        assert_eq!(title_bounds(100.0, true, 200.0, 80.0, false), (100.0, 0.0));
+        assert_eq!(title_bounds(400.0, false, 0.0, 0.0, false), (12.0, 376.0));
+    }
     #[test]
     fn cancelling_a_partial_swipe_preserves_position_and_finishes_at_rest() {
         let cancel = Motion::new(100.0, 0.4, 0.0, Some(nsh_core::navigation::SLIDE));

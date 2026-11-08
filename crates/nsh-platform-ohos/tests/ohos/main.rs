@@ -49,3 +49,14 @@ mod shadow_geometry;
 
 #[path = "../../src/render/frame_clock.rs"]
 mod frame_clock;
+
+#[path = "../../src/app/chunks.rs"]
+mod chunks;
+
+#[path = "../../src/render/transition.rs"]
+#[allow(dead_code)]
+mod transition;
+
+#[path = "../../src/services/system.rs"]
+#[allow(dead_code)]
+mod system;

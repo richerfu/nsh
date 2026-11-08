@@ -22,6 +22,17 @@ impl Image {
             y: 0.0,
         }
     }
+    /// Resample on the compositor lane when GPU limits require a smaller image.
+    pub(crate) fn resized(&self, width: u32, height: u32) -> Self {
+        let canvas = Canvas::with_bitmap(Bitmap::new(width, height, BitmapFormat::default()));
+        canvas.clear(0);
+        canvas.scale(
+            width as f32 / self.bitmap.width() as f32,
+            height as f32 / self.bitmap.height() as f32,
+        );
+        canvas.draw_bitmap(&self.bitmap, 0.0, 0.0);
+        Self::copy(canvas.bitmap().unwrap(), self.x, self.y)
+    }
     pub(crate) fn filtered(&self, effects: &[Effect], scale: f32) -> Result<Self, &'static str> {
         self.filter_chain(effects, scale, TileMode::Decal)
     }

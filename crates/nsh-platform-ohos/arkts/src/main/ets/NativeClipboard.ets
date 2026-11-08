@@ -1,10 +1,11 @@
+import { SystemReply } from "./NativeSystem";
 import pasteboard from "@ohos.pasteboard";
 import image from "@ohos.multimedia.image";
 import util from "@ohos.util";
 import { ComponentContent } from "@ohos.arkui.node";
 import { UIContext } from "@ohos.arkui.UIContext";
 
-export interface ClipboardReply {
+export interface ClipboardReply extends SystemReply {
   has?: boolean;
   text?: string;
   uri?: string;

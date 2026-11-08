@@ -158,7 +158,7 @@ impl Touches {
     }
 
     pub(crate) fn input(&mut self, root: &Rc<Node>, input: &ArkUIInputEvent) -> Result<()> {
-        self.record_down(root.scale, input);
+        self.record_down(root.scale.get(), input);
         self.timestamp = input.event_time() as f64 / 1_000_000.0;
         let phase = match input.action {
             UIInputAction::Down => TouchPhase::Start,
@@ -212,8 +212,8 @@ impl Touches {
                 input.pointer_window_y_by_index(i),
             );
             let page = (
-                window.0 - origin.x as f32 / root.scale,
-                window.1 - origin.y as f32 / root.scale,
+                window.0 - origin.x as f32 / root.scale.get(),
+                window.1 - origin.y as f32 / root.scale.get(),
             );
             if phase == TouchPhase::Start && changed == Some(id) {
                 let Some(node) = hit(root, local, &nsh_core::Matrix::IDENTITY)? else {
@@ -559,7 +559,10 @@ impl Touches {
         changed: Option<u32>,
         count: u32,
     ) -> Result<bool> {
-        if phase == TouchPhase::Start && count == 1 {
+        if phase == TouchPhase::Start
+            && count == 1
+            && !root.interaction.mask().contains(EventKind::BackPress)
+        {
             self.suppressed_presses.clear();
             let local = (input.pointer_x_by_index(0), input.pointer_y_by_index(0));
             let target = hit(root, local, &nsh_core::Matrix::IDENTITY)?;

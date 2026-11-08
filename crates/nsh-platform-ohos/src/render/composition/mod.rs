@@ -9,6 +9,5 @@ mod presentation;
 pub(crate) mod raster;
 pub(crate) mod readback;
 pub(crate) mod scene;
-pub(crate) mod snapshot;
 pub(crate) mod surface;
 pub(crate) mod worker;

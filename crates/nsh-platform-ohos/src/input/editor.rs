@@ -86,6 +86,9 @@ impl Input {
             return Ok(self.state.borrow().count);
         }
         if event.kind == "change" {
+            if !self.config.borrow().editable {
+                return Ok(self.state.borrow().count);
+            }
             let changed = self.state.borrow_mut().changed(event.text.clone());
             let Some(count) = changed else {
                 return Ok(self.state.borrow().count);
@@ -100,6 +103,61 @@ impl Input {
             return Ok(());
         };
         match event.kind.as_str() {
+            "paste" => owner.emit(
+                EventKind::Paste,
+                EventPayload::Paste(Box::new(nsh_core::PasteEvent::new(event.text))),
+            ),
+            "caret" => {
+                let content = self.content.get();
+                owner.emit(
+                    EventKind::CaretMove,
+                    EventPayload::caret(nsh_core::Bounds::new(
+                        nsh_core::Point::new(
+                            nsh_core::Points(content.x + event.x as f32),
+                            nsh_core::Points(content.y + event.y as f32),
+                        ),
+                        nsh_core::Size::new(
+                            nsh_core::Points(event.width as f32),
+                            nsh_core::Points(event.height as f32),
+                        ),
+                    )),
+                );
+            }
+            "composition" => {
+                let composing = !event.text.is_empty();
+                owner.emit(
+                    EventKind::CompositionChange,
+                    EventPayload::Map(vec![
+                        ("composing", PayloadValue::Bool(composing)),
+                        ("text", PayloadValue::Str(event.text)),
+                        ("start", PayloadValue::Number(event.start as f64)),
+                        ("end", PayloadValue::Number(event.end as f64)),
+                    ]),
+                );
+                if self.state.borrow_mut().composition(composing) {
+                    self.update();
+                }
+            }
+            "scroll" => {
+                if self.config.borrow().replaced {
+                    let content = self.content.get();
+                    owner.control.input_scroll(
+                        owner.id,
+                        nsh_core::Point::new(
+                            nsh_core::Points(event.x as f32),
+                            nsh_core::Points(event.y as f32),
+                        ),
+                        nsh_core::Size::new(
+                            nsh_core::Points(event.width as f32),
+                            nsh_core::Points(event.height as f32),
+                        ),
+                        nsh_core::Size::new(
+                            nsh_core::Points(content.width),
+                            nsh_core::Points(content.height),
+                        ),
+                    );
+                }
+            }
             "change" => {
                 {
                     let mut state = self.state.borrow_mut();
@@ -257,6 +315,8 @@ impl Input {
             }),
             selection_color: argb(selection),
             editable: config.editable,
+            auto_correct: config.auto_correct,
+            report_paste: config.paste_behavior == nsh_core::PasteBehavior::Report,
             scrollbar_visible: config.scrollbar_visible && !config.replaced,
             hit_test: self.hit_test.get(),
             align: match config.align {
@@ -351,6 +411,21 @@ impl Input {
                 kind: kind.into(),
                 start,
                 end,
+                ..Default::default()
+            });
+        }
+    }
+    pub(crate) fn scroll_to(&self, x: f32, y: f32, animated: bool) {
+        if let Some(owner) = self.owner.upgrade().filter(|_| !self.closed.get())
+            && let Some(target_id) = self.target_id()
+        {
+            owner.editor_command(EditorCommand {
+                target_id,
+                kind: "scroll".into(),
+                x: x.max(0.0) as f64,
+                y: y.max(0.0) as f64,
+                animated,
+                ..Default::default()
             });
         }
     }

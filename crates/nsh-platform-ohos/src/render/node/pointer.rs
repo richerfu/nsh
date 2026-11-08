@@ -132,24 +132,28 @@ impl Node {
     ) -> (nsh_core::Point<Points>, nsh_core::Point<Points>) {
         let position = nsh_core::Point::new(Points(x), Points(y));
         let mut page_position = position;
-        if self.id != nsh_core::ROOT_ID
-            && self.kind != ViewKind::Modal
-            && let Ok(node_pos) = self.mounted().borrow().layout_position_in_window()
-        {
+        if self.id != nsh_core::ROOT_ID && self.kind != ViewKind::Modal {
             let mut top = self.parent_node.borrow().upgrade();
-            let mut root_origin = None;
-            while let Some(parent) = top {
-                if parent.id == nsh_core::ROOT_ID || parent.kind == ViewKind::Modal {
-                    root_origin = parent.mounted().borrow().layout_position_in_window().ok();
+            while let Some(root) = top {
+                if root.id == nsh_core::ROOT_ID || root.kind == ViewKind::Modal {
+                    let mapped =
+                        self.input_in_root(&root).ok().flatten().and_then(|matrix| {
+                            crate::render::geometry::page_point(&matrix.0, (x, y))
+                        });
+                    if let Some((x, y)) = mapped {
+                        page_position = nsh_core::Point::new(Points(x), Points(y));
+                    } else if let (Ok(node), Ok(origin)) = (
+                        self.mounted().borrow().layout_position_in_window(),
+                        root.mounted().borrow().layout_position_in_window(),
+                    ) {
+                        page_position = nsh_core::Point::new(
+                            Points((node.x - origin.x) as f32 / self.scale.get() + x),
+                            Points((node.y - origin.y) as f32 / self.scale.get() + y),
+                        );
+                    }
                     break;
                 }
-                top = parent.parent_node.borrow().upgrade();
-            }
-            if let Some(origin) = root_origin {
-                page_position = nsh_core::Point::new(
-                    Points((node_pos.x - origin.x) as f32 / self.scale + x),
-                    Points((node_pos.y - origin.y) as f32 / self.scale + y),
-                );
+                top = root.parent_node.borrow().upgrade();
             }
         }
         (position, page_position)

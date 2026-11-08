@@ -8,6 +8,8 @@ use nsh_engine::{ColorScheme, Environment, Idiom, Locale};
 #[napi(object)]
 #[derive(Clone, Default, PartialEq)]
 pub struct NshEnvironment {
+    /// Physical pixels per vp (0.25 through 8).
+    pub pixel_ratio: Option<f64>,
     /// Safe inset at the top, in vp.
     pub safe_top: Option<f64>,
     /// Safe inset at the right, in vp.
@@ -46,6 +48,7 @@ impl NshEnvironment {
             if changes.$field.is_some() { self.$field = changes.$field; }
         )* }; }
         merge!(
+            pixel_ratio,
             safe_top,
             safe_right,
             safe_bottom,
@@ -65,6 +68,7 @@ impl NshEnvironment {
     }
     pub(crate) fn snapshot(env: Environment) -> Self {
         Self {
+            pixel_ratio: Some(env.pixel_ratio as f64),
             safe_top: Some(env.safe_area.top.0 as f64),
             safe_right: Some(env.safe_area.right.0 as f64),
             safe_bottom: Some(env.safe_area.bottom.0 as f64),
@@ -126,6 +130,7 @@ impl NshEnvironment {
             0.0,
             10_000.0,
         )?;
+        number(self.pixel_ratio, &mut env.pixel_ratio, 0.25, 8.0)?;
         number(self.font_scale, &mut env.font_scale, 0.25, 8.0)?;
         if let Some(value) = self.color_scheme {
             env.color_scheme = match value.as_str() {

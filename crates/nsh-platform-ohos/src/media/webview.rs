@@ -98,6 +98,13 @@ impl Drop for RouteRegistration {
     }
 }
 
+#[derive(PartialEq)]
+struct DocumentSettings {
+    javascript: bool,
+    shared_cookies: bool,
+    script: Option<Arc<str>>,
+}
+
 pub(crate) struct WebView {
     node: Weak<Node>,
     native: NativeNode,
@@ -106,7 +113,7 @@ pub(crate) struct WebView {
     frame: Cell<Size>,
     props: RefCell<Option<WebProps>>,
     applied_source: RefCell<Option<WebSource>>,
-    applied_document: RefCell<Option<(bool, Option<Arc<str>>)>>,
+    applied_document: RefCell<Option<DocumentSettings>>,
     load_generation: Cell<u32>,
     ready: Cell<bool>,
     closed: Cell<bool>,
@@ -365,13 +372,21 @@ impl WebView {
             );
             return Ok(());
         }
-        let document = (props.javascript_enabled, props.injected_js_before.clone());
+        let document = DocumentSettings {
+            javascript: props.javascript_enabled,
+            shared_cookies: props.shared_cookies,
+            script: props.injected_js_before.clone(),
+        };
         let document_changed = self
             .applied_document
             .borrow()
             .as_ref()
             .is_some_and(|old| old != &document);
-        let target_id = if document_changed || self.target.borrow().is_none() {
+        let new_document = document_changed || self.target.borrow().is_none();
+        // The initial native target can already exist when the first props
+        // arrive. Its private store still needs clearing before navigation.
+        let first_document = self.applied_document.borrow().is_none();
+        let target_id = if new_document {
             self.replace_target(node)?
         } else {
             self.target.borrow().as_ref().unwrap().id()
@@ -399,6 +414,8 @@ impl WebView {
             .map_or_else(|| BRIDGE.to_owned(), |script| format!("{BRIDGE}\n{script}"));
         node.web_update(WebSettings {
             target_id,
+            shared_cookies: props.shared_cookies,
+            clear_cookies: !props.shared_cookies && (first_document || new_document),
             url,
             html,
             html_base_url,

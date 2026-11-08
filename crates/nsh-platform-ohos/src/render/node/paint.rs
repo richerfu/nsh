@@ -25,18 +25,30 @@ impl Node {
         }
         let weak = self.weak.clone();
         self.native.borrow_mut().on_custom_draw(move |event| {
-            if let Some(node) = weak.upgrade() {
-                node.draw(event);
-            }
+            callback(|| {
+                if let Some(node) = weak.upgrade() {
+                    node.draw(event);
+                }
+                Ok(())
+            });
         });
     }
     pub(crate) fn scene_active(&self) -> bool {
-        self.scene
-            .borrow()
-            .as_ref()
-            .is_some_and(|scene| scene.active())
+        self.scene_prepared.get()
+    }
+    pub(crate) fn invalidate_composites(&self) {
+        self.shaders.invalidate_visibility();
+        self.composite_dirty.set(true);
+        self.capture_cache.set(None);
+        let mut at = self.parent_node.borrow().upgrade();
+        while let Some(node) = at {
+            node.composite_dirty.set(true);
+            node.capture_cache.set(None);
+            at = node.parent_node.borrow().upgrade();
+        }
     }
     pub(crate) fn invalidate_scene(&self) {
+        self.shaders.invalidate_visibility();
         if let Some(scene) = self.scene.borrow().as_ref() {
             scene.invalidate();
         }
@@ -50,6 +62,7 @@ impl Node {
     pub(crate) fn has_native_paint(&self) -> bool {
         let style = self.style.borrow();
         self.id == nsh_core::ROOT_ID
+            || self.scene_root.get()
             || self.kind != ViewKind::View
             || self.shaders.contains(self.id)
             || !style.background_color.is_transparent()
@@ -69,8 +82,13 @@ impl Node {
                 "compositor hierarchy exceeds 256 levels",
             ));
         }
+        if let Some(bounds) = self.capture_cache.get() {
+            return Ok(bounds);
+        }
         let frame = self.frame.get();
-        let mut bounds = Bounds::new(frame.width, frame.height).own(&self.style.borrow());
+        let mut bounds = Bounds::new(frame.width, frame.height)
+            .shaders(self.shaders.overflow(self.id), &self.shader_layers.borrow())
+            .own(&self.style.borrow());
         if !self.clips_children() {
             for child in self.children.borrow().iter().filter_map(Weak::upgrade) {
                 if child.kind == ViewKind::Modal || child.style.borrow().hidden {
@@ -103,6 +121,7 @@ impl Node {
                 bounds.union(child);
             }
         }
+        self.capture_cache.set(Some(bounds));
         Ok(bounds)
     }
     pub(crate) fn paint_visible(&self) -> bool {
@@ -136,6 +155,30 @@ impl Node {
         let same_placement =
             self.content.get() == content && self.raster_origin_y.get() == raster.origin_y;
         if !same_layout {
+            let change = self
+                .raster
+                .borrow()
+                .as_ref()
+                .and_then(|old| old.0.downcast_ref::<NativeText>())
+                .map(|old| {
+                    nsh_core::transition::recolor(
+                        &old.source,
+                        &raster.source,
+                        &self.style.borrow(),
+                        self.platform.get().reduce_motion,
+                    )
+                });
+            if let Some(change) = change {
+                if change.starts() {
+                    self.live
+                        .borrow_mut()
+                        .get_or_insert_with(Default::default)
+                        .recolor(change);
+                    self.animator.track(self);
+                } else if let Some(live) = self.live.borrow_mut().as_mut() {
+                    live.recolor(change);
+                }
+            }
             self.selection.range.take();
             *self.text_drawing.borrow_mut() = raster.drawing.lock().expect("text drawing").take();
         }
@@ -159,10 +202,51 @@ impl Node {
     /// Re-record custom paint after a native visibility or render-target change.
     pub(crate) fn invalidate_subtree_paint(&self) -> Result<()> {
         self.native.borrow().mark_dirty(NodeDirtyFlag::NeedRender)?;
+        if let Some(wrapper) = self.wrapper.borrow().as_ref() {
+            wrapper
+                .outer
+                .borrow()
+                .mark_dirty(NodeDirtyFlag::NeedRender)?;
+        }
+        if let Some(screen) = self.screen.borrow().as_ref() {
+            screen.invalidate_paint()?;
+        }
+        if let Some(layer) = self.shadow_layer.borrow().as_ref() {
+            layer.invalidate()?;
+        }
         for child in self.children.borrow().iter().filter_map(Weak::upgrade) {
             child.invalidate_subtree_paint()?;
         }
+        for child in self
+            .retained_children
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+        {
+            if child.retained.get() {
+                child.invalidate_subtree_paint()?;
+            }
+        }
         Ok(())
+    }
+    pub(crate) fn schedule_subtree_paint(&self, frames: u8) -> Result<()> {
+        self.invalidate_subtree_paint()?;
+        Self::defer_subtree_paint(self.weak.clone(), frames);
+        Ok(())
+    }
+    fn defer_subtree_paint(weak: Weak<Self>, remaining: u8) {
+        if remaining == 0 {
+            return;
+        }
+        let Some(owner) = weak.upgrade() else {
+            return;
+        };
+        let _ = owner.native.borrow().post_frame_callback(move |_, _| {
+            if let Some(owner) = weak.upgrade() {
+                callback(|| owner.invalidate_subtree_paint());
+                Self::defer_subtree_paint(weak, remaining - 1);
+            }
+        });
     }
 
     pub(crate) fn draw_outer_shadows(&self, canvas: &Canvas) {
@@ -171,7 +255,7 @@ impl Node {
             canvas,
             &self.style.borrow(),
             Size::new(frame.width, frame.height),
-            self.scale,
+            self.scale.get(),
             false,
         );
     }
@@ -203,7 +287,7 @@ impl Node {
                     &canvas,
                     &self.style.borrow(),
                     Size::new(frame.width, frame.height),
-                    self.scale,
+                    self.scale.get(),
                 );
             }
             if let Some(drawing) = self.canvas.borrow().as_ref() {
@@ -215,6 +299,12 @@ impl Node {
                 let brush = self
                     .tint
                     .get()
+                    .or_else(|| {
+                        self.live
+                            .borrow()
+                            .as_ref()
+                            .and_then(|live| live.text_color())
+                    })
                     .and_then(|color| {
                         ohos_drawing_binding::ColorFilter::blend(
                             argb(color),
@@ -233,10 +323,10 @@ impl Node {
                     .borrow()
                     .as_ref()
                     .and_then(|layout| layout.0.downcast_ref::<NativeText>())
-                    .map_or(self.scale, |raster| raster.scale);
-                let tx = content.x * self.scale;
-                let ty = (content.y + self.raster_origin_y.get()) * self.scale;
-                let scale_mismatch = (self.scale - raster_scale).abs() > f32::EPSILON;
+                    .map_or(self.scale.get(), |raster| raster.scale);
+                let tx = content.x * self.scale.get();
+                let ty = (content.y + self.raster_origin_y.get()) * self.scale.get();
+                let scale_mismatch = (self.scale.get() - raster_scale).abs() > f32::EPSILON;
                 let needs_save = tx != 0.0 || ty != 0.0 || scale_mismatch;
                 if needs_save {
                     canvas.save();
@@ -244,7 +334,10 @@ impl Node {
                         canvas.translate(tx, ty);
                     }
                     if scale_mismatch {
-                        canvas.scale(self.scale / raster_scale, self.scale / raster_scale);
+                        canvas.scale(
+                            self.scale.get() / raster_scale,
+                            self.scale.get() / raster_scale,
+                        );
                     }
                 }
                 if let Some(brush) = &brush {

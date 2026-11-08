@@ -100,6 +100,8 @@ pub(crate) fn bind_session(env: &Env, ui_context: &Object<'_>) -> Result<Arc<Ser
         .ok_or_else(|| Error::from_reason("@nsh/ohos session binder is not registered"))?;
     let arg = ui_context.raw();
     let mut raw_result = std::ptr::null_mut();
+    // SAFETY: all handles belong to this UI-thread environment and remain live
+    // for the synchronous call; raw_result receives its owned N-API value.
     let status = unsafe {
         napi_ohos::sys::napi_call_function(
             env.raw(),
@@ -113,6 +115,8 @@ pub(crate) fn bind_session(env: &Env, ui_context: &Object<'_>) -> Result<Arc<Ser
     if status != napi_ohos::sys::Status::napi_ok {
         return Err(Error::from_status(Status::from(status)));
     }
+    // SAFETY: a successful call initialized raw_result in this environment;
+    // FromNapiValue checks the binder's session ID before converting it.
     let session_id = unsafe { u32::from_napi_value(env.raw(), raw_result) }?;
     crate::app::session::get(session_id)
 }
@@ -194,15 +198,18 @@ pub(crate) fn nsh_update_config(
     language: String,
     rtl: bool,
     device_type: Option<String>,
+    pixel_ratio: Option<f64>,
 ) -> Result<()> {
     if let Ok(host) = crate::app::session::get(session_id) {
-        host.update(crate::app::session::environment_from_config(
+        let mut environment = crate::app::session::environment_from_config(
             color_mode,
             font_size_scale,
             language,
             device_type.as_deref(),
             rtl,
-        ))?;
+        );
+        environment.pixel_ratio = pixel_ratio;
+        host.update(environment)?;
     }
     Ok(())
 }
@@ -249,13 +256,22 @@ pub(crate) fn nsh_open_url_result(session_id: u32, open_id: u32, opened: bool) {
 }
 
 #[napi]
-pub(crate) fn nsh_pick_images_result(session_id: u32, pick_id: u32, paths: Vec<String>) {
+pub(crate) fn nsh_pick_images_result(
+    session_id: u32,
+    pick_id: u32,
+    files: Vec<crate::services::system::PickedDescriptor>,
+) {
+    let files = files
+        .into_iter()
+        .take(nsh_core::picker::MAX_PICKED as usize)
+        .filter_map(|file| {
+            file.retain()
+                .map_err(|error| log::warn!("OHOS picked file: {error}"))
+                .ok()
+        })
+        .collect();
     if let Ok(host) = crate::app::session::get(session_id) {
-        host.complete_pick_images(pick_id, paths);
-    } else {
-        for path in &paths {
-            let _ = std::fs::remove_file(path);
-        }
+        host.complete_pick_images(pick_id, files);
     }
 }
 
@@ -275,7 +291,11 @@ pub(crate) fn on_back_press_intercept(
 }
 
 #[napi]
-pub(crate) fn nsh_service_event(session_id: u32, key: u32, value: serde_json::Value) {
+pub(crate) fn nsh_service_event(
+    session_id: u32,
+    key: u32,
+    value: crate::services::system::SystemEvent,
+) {
     if let Ok(host) = crate::app::session::get(session_id) {
         host.system.complete(key, value);
     }

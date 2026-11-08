@@ -87,14 +87,18 @@ pub(crate) struct Registry {
 #[derive(Clone, Default)]
 pub(crate) struct Components(Rc<RefCell<Registry>>);
 impl Components {
-    pub(crate) fn register(&self, name: String, factory: Factory) {
+    pub(crate) fn register(&self, name: String, factory: Factory) -> napi_ohos::Result<()> {
+        check_name(&name)?;
         self.0
             .borrow_mut()
             .factories
             .insert(name.into(), Rc::new(factory));
+        Ok(())
     }
-    pub(crate) fn unregister(&self, name: &str) {
+    pub(crate) fn unregister(&self, name: &str) -> napi_ohos::Result<()> {
+        check_name(name)?;
         self.0.borrow_mut().factories.remove(name);
+        Ok(())
     }
     pub(crate) fn clear(&self) {
         self.0.borrow_mut().factories.clear();
@@ -306,4 +310,13 @@ impl Drop for Instance {
             }
         }
     }
+}
+
+pub(crate) fn check_name(name: &str) -> napi_ohos::Result<()> {
+    if name.starts_with("Nsh") {
+        return Err(napi_ohos::Error::from_reason(
+            "Component names starting with 'Nsh' are reserved",
+        ));
+    }
+    Ok(())
 }

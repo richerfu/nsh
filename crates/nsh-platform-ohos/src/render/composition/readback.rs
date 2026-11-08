@@ -20,7 +20,7 @@ fn failed(operation: &'static str) -> Error {
 fn egl_error(error: egl::Error) -> Error {
     Error {
         operation: "EGL",
-        code: error as i32,
+        code: error.into(),
     }
 }
 
@@ -88,14 +88,14 @@ impl Context {
         let display =
             unsafe { egl.get_display(egl::DEFAULT_DISPLAY) }.ok_or(failed("EGL display"))?;
         egl.initialize(display).map_err(egl_error)?;
-        let config = egl
-            .choose_first_config(
+        let choose = |renderable| {
+            egl.choose_first_config(
                 display,
                 &[
                     egl::SURFACE_TYPE,
                     egl::PBUFFER_BIT | egl::WINDOW_BIT,
                     egl::RENDERABLE_TYPE,
-                    egl::OPENGL_ES2_BIT,
+                    renderable,
                     egl::RED_SIZE,
                     8,
                     egl::GREEN_SIZE,
@@ -107,8 +107,13 @@ impl Context {
                     egl::NONE,
                 ],
             )
-            .map_err(egl_error)?
-            .ok_or(failed("EGL RGBA config"))?;
+            .map_err(egl_error)
+        };
+        // EGL_KHR_create_context's ES3 bit; some older drivers advertise ES2 only.
+        let config = match choose(0x0040)? {
+            Some(config) => config,
+            None => choose(egl::OPENGL_ES2_BIT)?.ok_or(failed("EGL RGBA config"))?,
+        };
         let context = egl
             .create_context(
                 display,
@@ -190,6 +195,8 @@ pub(crate) struct TextureContext {
     pub(super) context: Rc<Context>,
     pub(super) gl: Rc<glow::Context>,
     max_texture_size: u32,
+    pub(super) programs:
+        Rc<std::cell::RefCell<rustc_hash::FxHashMap<u64, Rc<super::gles::Compiled>>>>,
 }
 impl TextureContext {
     pub(super) fn window(
@@ -207,13 +214,17 @@ impl TextureContext {
                 None,
             )
         }
-        .map_err(egl_error)?;
+        .map_err(|error| Error {
+            operation: "eglCreateWindowSurface",
+            code: error.into(),
+        })?;
         drop(current);
         Ok(Window {
             context: self.context.clone(),
             surface,
             native,
             size: std::cell::Cell::new((0, 0)),
+            waiting: std::cell::Cell::new(false),
         })
     }
     /// Creates an offscreen GLES context on the calling rendering worker.
@@ -241,6 +252,7 @@ impl TextureContext {
             context,
             gl: Rc::new(gl),
             max_texture_size,
+            programs: Rc::default(),
         })
     }
 }
@@ -251,6 +263,7 @@ pub(super) struct Window {
     surface: egl::Surface,
     native: ohos_native_window_binding::NativeWindow,
     size: std::cell::Cell<(u32, u32)>,
+    pub(super) waiting: std::cell::Cell<bool>,
 }
 impl Window {
     pub(super) fn raw(&self) -> usize {
@@ -272,18 +285,27 @@ impl Window {
                 Some(self.surface),
                 Some(self.context.context),
             )
-            .map_err(egl_error)?;
+            .map_err(|error| Error {
+                operation: "eglMakeCurrent(window)",
+                code: error.into(),
+            })?;
         self.context
             .egl
             .swap_interval(self.context.display, 0)
-            .map_err(egl_error)?;
+            .map_err(|error| Error {
+                operation: "eglSwapInterval",
+                code: error.into(),
+            })?;
         Ok(current)
     }
     pub(super) fn present(&self) -> Result<(), Error> {
         self.context
             .egl
             .swap_buffers(self.context.display, self.surface)
-            .map_err(egl_error)
+            .map_err(|error| Error {
+                operation: "eglSwapBuffers",
+                code: error.into(),
+            })
     }
 }
 impl Drop for Window {
@@ -477,6 +499,7 @@ impl TextureReader {
     }
     /// Updates future dimensions within native signed and GLES texture limits.
     pub(super) fn resize(&mut self, width: u32, height: u32) -> Result<(), Error> {
+        let (width, height, _) = super::geometry::target_size(width as f32, height as f32, 1.0);
         self.layout(width, height)?;
         self.surface
             .as_mut()
@@ -573,14 +596,24 @@ impl TextureReader {
         if !self.update_texture()? {
             return Ok(None);
         }
+        self.read_texture(self.texture().unwrap()).map(Some)
+    }
+    pub(super) fn read_texture(&self, picture: super::gles::Picture) -> Result<RgbaFrame, Error> {
         let _current = self.context.enter()?;
-        let (width, height) = self.allocated;
+        let (_, width, height) = picture;
         let mut pixels = self.layout(width, height)?.allocate()?;
         // SAFETY: the framebuffer and exact-size RGBA storage belong to this
         // current context; the resolved texture is attached by update_texture.
         unsafe {
             let gl = &self.gl;
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.framebuffer));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(picture.0),
+                0,
+            );
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
             gl.read_pixels(
                 0,
@@ -599,11 +632,11 @@ impl TextureReader {
                 });
             }
         }
-        Ok(Some(RgbaFrame {
+        Ok(RgbaFrame {
             width,
             height,
             pixels,
-        }))
+        })
     }
 }
 impl Drop for TextureReader {
@@ -622,6 +655,9 @@ impl Drop for TextureReader {
                 self.gl.delete_texture(self.texture);
             }
         } else if let Some(surface) = self.surface.take() {
+            log::warn!(
+                "OHOS readback cleanup could not enter EGL context; retaining native image and GL owners"
+            );
             // The SDK image belongs to its creating EGL context. If entering
             // fails, retain that complete owner rather than destroy it in an
             // unrelated context. Retire Rust delivery before quarantining it.
@@ -634,6 +670,15 @@ impl Drop for TextureReader {
 pub(crate) struct Error {
     operation: &'static str,
     code: i32,
+}
+impl Error {
+    pub(super) fn output_unavailable(&self) -> bool {
+        matches!(self.operation, "eglMakeCurrent(window)" | "eglSwapBuffers")
+            && matches!(
+                self.code,
+                egl::BAD_ALLOC | egl::BAD_SURFACE | egl::BAD_NATIVE_WINDOW
+            )
+    }
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

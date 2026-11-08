@@ -38,7 +38,43 @@ impl MountTarget {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct Theme {
+    pub(crate) tokens: Option<Arc<nsh_core::element::Tokens>>,
+}
+impl Theme {
+    pub(crate) fn color(&self, name: &str, dark: bool) -> u32 {
+        let names: &[&str] = match name {
+            "popover" => &["popover", "card", "background"],
+            "popover-foreground" => &["popover-foreground", "card-foreground", "foreground"],
+            "card" => &["card", "background"],
+            _ => &[name],
+        };
+        if let Some(value) = self
+            .tokens
+            .as_ref()
+            .and_then(|tokens| names.iter().find_map(|name| tokens.color(name)))
+        {
+            return crate::text::typography::argb(
+                if dark { value.dark } else { value.light }.into(),
+            );
+        }
+        match (name, dark) {
+            ("foreground" | "popover-foreground" | "primary", true) => 0xfffafafa,
+            ("foreground" | "popover-foreground" | "primary", false) => 0xff171717,
+            ("border", true) => 0xff404040,
+            ("border", false) => 0xffe5e5e5,
+            ("destructive", true) => 0xfff87171,
+            ("destructive", false) => 0xffdc2626,
+            ("card" | "popover", true) => 0xff171717,
+            (_, true) => 0xff0a0a0a,
+            (_, false) => 0xffffffff,
+        }
+    }
+}
+
 pub(crate) struct UiContext {
+    pub(crate) theme: std::cell::RefCell<Theme>,
     pub(crate) cursor: crate::input::cursor::State,
     pub(crate) shaders: super::shader::Shaders,
     /// The video whose native Stack is temporarily the root's last child.
@@ -63,7 +99,8 @@ pub(crate) struct UiContext {
     pub(crate) host: Arc<crate::app::session::Services>,
     pub(crate) dispatcher: std::sync::Weak<crate::app::runtime::Dispatcher>,
     pub(crate) env: napi_ohos::Env,
-    pub(crate) scale: f32,
+    pub(crate) scale: std::cell::Cell<f32>,
+    pub(crate) text_scale: Arc<std::sync::atomic::AtomicU32>,
     pub(crate) control: EngineControl,
     pub(crate) animator: Rc<crate::render::animation::Animator>,
     pub(crate) images: Arc<crate::media::image::Loader>,
@@ -116,7 +153,7 @@ impl Mounter {
         if let Some(Some(node)) = self.slots.get(id as usize) {
             node.composite_ready(generation)?;
         }
-        Ok(())
+        self.flush_arkui()
     }
     pub(crate) fn text_selection(
         &self,
@@ -147,8 +184,13 @@ impl Mounter {
     }
 
     pub(crate) fn environment(&self, environment: nsh_engine::Environment) -> Result<()> {
+        let density_changed =
+            self.scale.replace(environment.pixel_ratio) != environment.pixel_ratio;
         self.platform.set(environment);
         for node in self.slots.iter().flatten() {
+            if density_changed {
+                node.density_changed()?;
+            }
             if let Some(screen) = node.screen.borrow().as_ref() {
                 screen.update_environment()?;
             }
@@ -157,6 +199,12 @@ impl Mounter {
                     .borrow()
                     .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedMeasure)?;
             }
+        }
+        if density_changed {
+            if let Some(scene) = self.scene.borrow().as_ref() {
+                scene.invalidate();
+            }
+            self.animator.request_frame();
         }
         self.system_appearance()
     }
@@ -231,7 +279,7 @@ impl Mounter {
         }
         Ok(())
     }
-    pub(crate) fn scroll_to(&self, id: NodeId, _x: f32, _y: f32, _animated: bool) -> Result<()> {
+    pub(crate) fn flush_scroll_layout(&self, id: NodeId) -> Result<()> {
         if let Ok(node) = self.node(id)
             && let Some(scroll) = node.scroll.borrow().as_ref()
         {
@@ -367,6 +415,51 @@ impl Mounter {
         for modal in self.modals.iter().filter_map(std::rc::Weak::upgrade) {
             modal.present_if_pending()?;
         }
+        self.reconcile_navigation_capture()
+    }
+    fn reconcile_navigation_capture(&self) -> Result<()> {
+        let mut wanted = rustc_hash::FxHashSet::default();
+        for node in self.slots.iter().flatten() {
+            if node.navigation_shader.borrow().is_none() {
+                continue;
+            }
+            if node.kind == ViewKind::Modal {
+                wanted.insert(nsh_core::ROOT_ID);
+                for modal in self.modals.iter().filter_map(std::rc::Weak::upgrade) {
+                    if let Some(id) = modal.node_id() {
+                        wanted.insert(id);
+                    }
+                }
+            } else {
+                let mut root = nsh_core::ROOT_ID;
+                let mut ancestor = node.parent_node.borrow().upgrade();
+                while let Some(current) = ancestor {
+                    if current.kind == ViewKind::Modal {
+                        root = current.id;
+                        break;
+                    }
+                    ancestor = current.parent_node.borrow().upgrade();
+                }
+                wanted.insert(root);
+            }
+        }
+        let mut candidates = vec![nsh_core::ROOT_ID];
+        for modal in self.modals.iter().filter_map(std::rc::Weak::upgrade) {
+            if let Some(id) = modal.node_id() {
+                candidates.push(id);
+            }
+        }
+        for id in candidates {
+            let Some(Some(root)) = self.slots.get(id as usize) else {
+                continue;
+            };
+            let capture = wanted.contains(&id);
+            if root.navigation_capture.replace(capture) != capture {
+                root.invalidate_composites();
+                root.ensure_wrapper()?;
+                root.restore_style()?;
+            }
+        }
         Ok(())
     }
     pub(crate) fn dialog_result(&mut self, id: u32, index: i32) -> Result<()> {
@@ -385,7 +478,7 @@ impl Mounter {
         // attached texture wrapper may not have propagated its window origin yet.
         let origin = viewport.borrow().layout_position_in_window()?;
         let frame = root.frame.get();
-        let scale = self.scale as f64;
+        let scale = self.scale.get() as f64;
         let viewport = super::geometry::WindowRect {
             x: origin.x as f64,
             y: origin.y as f64,
@@ -501,6 +594,7 @@ impl Mounter {
                 .position(|entry| entry.upgrade().is_some_and(|child| child.id == id))
                 .ok_or(Error::InvalidNode(id))?;
             parent.children.borrow_mut().remove(index);
+            parent.invalidate_composites();
             if retain {
                 // Keep a removed-but-live FrameNode reachable for the next export
                 // reconciliation. Visibility None removes it from layout and RS.
@@ -594,6 +688,8 @@ impl Mounter {
         }
         if let Ok(node) = self.node(id) {
             self.animator.remove(id);
+            self.shaders.remove(id);
+            *node.navigation_shader.borrow_mut() = None;
             node.deactivate();
             *node.text_drawing.borrow_mut() = None;
             *node.raster.borrow_mut() = None;
@@ -610,6 +706,9 @@ impl Mounter {
                 self.stacks.remove(index);
             }
             self.removed.push(node);
+        }
+        while self.slots.last().is_some_and(Option::is_none) {
+            self.slots.pop();
         }
         Ok(())
     }
@@ -672,19 +771,17 @@ impl Mounter {
         let mut removed = rustc_hash::FxHashSet::default();
         for item in &batch.items {
             match item {
-                MountItem::LayoutAnimation(animation) if layout.is_none() => {
-                    layout = Some(*animation)
-                }
+                MountItem::LayoutAnimation(animation) => layout = Some(*animation),
                 MountItem::Delete { id } => {
                     if deleted.insert(*id) {
                         deletions.push(*id);
                     }
                     if removed.insert(*id) {
-                        removals.push(*id);
+                        removals.push((*id, layout));
                     }
                 }
                 MountItem::Remove { id } if removed.insert(*id) => {
-                    removals.push(*id);
+                    removals.push((*id, layout));
                 }
                 _ => {}
             }
@@ -723,26 +820,27 @@ impl Mounter {
                 Self::attribute(modal.close(true));
             }
         }
-        if layout
-            .as_ref()
-            .is_some_and(|animation| animation.delete.is_some())
-        {
-            for id in removals {
-                let Ok(node) = self.node(id) else { continue };
-                let mut parent = node.parent_node.borrow().upgrade();
-                let mut enclosed = false;
-                while let Some(ancestor) = parent {
-                    if removed.contains(&ancestor.id) {
-                        enclosed = true;
-                        break;
-                    }
-                    parent = ancestor.parent_node.borrow().upgrade();
+        for (id, animation) in removals {
+            if !animation.is_some_and(|animation| animation.delete.is_some()) {
+                continue;
+            }
+            let Ok(node) = self.node(id) else { continue };
+            let mut parent = node.parent_node.borrow().upgrade();
+            let mut enclosed = false;
+            while let Some(ancestor) = parent {
+                if removed.contains(&ancestor.id) {
+                    enclosed = true;
+                    break;
                 }
-                if !enclosed {
-                    Self::attribute(node.removing(layout.as_ref()).map(|_| ()));
-                }
+                parent = ancestor.parent_node.borrow().upgrade();
+            }
+            if !enclosed {
+                Self::attribute(node.removing(animation.as_ref()).map(|_| ()));
             }
         }
+        // Each frame uses the most recent marker. Batch-local state also keeps
+        // an unclosed scope from leaking into a later commit or deferred replay.
+        let mut layout = None;
         self.batches += 1;
         let items = batch.items.len();
         for (at, item) in batch.items.into_iter().enumerate() {
@@ -751,6 +849,13 @@ impl Mounter {
                 continue;
             }
 
+            let creating_root = matches!(
+                item,
+                MountItem::Create {
+                    id: nsh_core::ROOT_ID,
+                    ..
+                }
+            );
             let result = (|| -> Result<()> {
                 match item {
                     MountItem::Component { id, name } => {
@@ -873,6 +978,7 @@ impl Mounter {
                         parent.accessibility_state.changed(parent);
                         node.parent.set(Some(parent.id));
                         *node.parent_node.borrow_mut() = Rc::downgrade(parent);
+                        node.invalidate_composites();
                         node.accessibility_state.changed(node);
                         Self::attribute(
                             node.interaction
@@ -916,7 +1022,7 @@ impl Mounter {
                                 .animated_frame(frame.into(), layout.as_ref())?;
                         }
                     }
-                    MountItem::LayoutAnimation(_) => {}
+                    MountItem::LayoutAnimation(animation) => layout = Some(animation),
                     MountItem::ViewStyle { id, style } => {
                         if !self.frozen(id) {
                             self.node(id)?.style(&style)?;
@@ -1087,7 +1193,16 @@ impl Mounter {
                                 == nsh_engine::ColorScheme::Dark,
                         )?,
                         Command::Desktop(_) => {}
-                        Command::Tokens(tokens) => self.dialogs.tokens(tokens),
+                        Command::Tokens(tokens) => {
+                            self.theme.borrow_mut().tokens = Some(tokens);
+                            for node in self.slots.iter().flatten() {
+                                if let Some(screen) = node.screen.borrow().as_ref() {
+                                    screen.update_environment()?;
+                                } else if node.modal.borrow().is_some() {
+                                    node.restore_style()?;
+                                }
+                            }
+                        }
                         Command::Announce(text) => self.host.accessibility_event(
                             self.dispatcher.clone(),
                             Some(text),
@@ -1208,6 +1323,8 @@ impl Mounter {
                         Command::ScrollTo { x, y, animated } => {
                             if let Some(scroll) = self.node(id)?.scroll.borrow().as_ref() {
                                 scroll.command_to(x.0, y.0, animated)?;
+                            } else if let Some(input) = self.node(id)?.input.borrow().as_ref() {
+                                input.scroll_to(x.0, y.0, animated);
                             }
                         }
                         command @ Command::Seek(_) => {
@@ -1268,6 +1385,7 @@ impl Mounter {
                     MountItem::Overflow { id, extent } => {
                         let node = self.node(id)?;
                         node.overflow.set(extent.map(Rect::from));
+                        node.invalidate_composites();
                         node.apply_clip()?;
                         node.interaction.hit_region(node)?;
                         node.invalidate_scene();
@@ -1276,7 +1394,7 @@ impl Mounter {
                 Ok(())
             })();
             if let Err(error) = result {
-                if matches!(error, Error::Tree(_)) {
+                if creating_root {
                     return Err(error);
                 }
                 // Attribute and resource failures affect this item only. Later
@@ -1289,6 +1407,8 @@ impl Mounter {
             }
         }
         Self::attribute(self.reconcile_navigation());
+        Self::attribute(self.animator.flush());
+        Self::attribute(self.shaders.frame().map(|_| ()));
         let selected = self
             .selected_text
             .borrow()
@@ -1355,22 +1475,37 @@ impl Mounter {
     pub(crate) fn frame(&mut self, timestamp: Option<u64>) -> Result<bool> {
         let mut animating = self.animator.tick(timestamp)?;
         animating |= self.shaders.frame()?;
+        let mut settled_leaving = false;
         for id in self.animator.take_removals() {
-            if self.node(id).is_ok() {
-                self.node(id)?.finish_removal()?;
-                self.unlink(id, true)?;
+            if let Ok(node) = self.node(id) {
+                settled_leaving = true;
+                if node.pending_delete.get() {
+                    node.set_leaving(false);
+                } else {
+                    node.finish_removal()?;
+                    self.unlink(id, true)?;
+                }
             }
         }
         self.modals.retain(|modal| modal.strong_count() > 0);
         for modal in self.modals.iter().filter_map(std::rc::Weak::upgrade) {
             animating |= modal.frame(self.animator.frame_time())?;
         }
-        let pending = std::mem::take(&mut self.pending_delete);
-        for id in pending {
-            if self.frozen(id) {
-                self.pending_delete.push(id);
-            } else {
-                self.delete_now(id)?;
+        if settled_leaving && !self.pending_delete.is_empty() {
+            animating = true;
+        } else {
+            let pending = std::mem::take(&mut self.pending_delete);
+            let mut deleted_any = false;
+            for id in pending {
+                if self.frozen(id) {
+                    self.pending_delete.push(id);
+                } else {
+                    self.delete_now(id)?;
+                    deleted_any = true;
+                }
+            }
+            if deleted_any {
+                self.reconcile_navigation_capture()?;
             }
         }
         self.finish_deferred()?;
@@ -1379,6 +1514,18 @@ impl Mounter {
     }
 
     pub(crate) fn resize(&self, size: Size) -> Result<()> {
+        let mut platform = self.platform.get();
+        platform.window = size.into();
+        self.platform.set(platform);
+        for modal in self.modals.iter().filter_map(std::rc::Weak::upgrade) {
+            modal.sync_metrics();
+            if let Some(id) = modal.node_id() {
+                self.node(id)?
+                    .native
+                    .borrow()
+                    .mark_dirty(ohos_arkui_binding::types::advanced::NodeDirtyFlag::NeedMeasure)?;
+            }
+        }
         self.node(1)?.set_frame(Rect {
             x: 0.0,
             y: 0.0,
@@ -1408,9 +1555,14 @@ impl Mounter {
         self.pending_delete.clear();
         self.deferred.clear();
         for id in (0..self.slots.len()).rev() {
-            if self.slots[id].is_some() {
+            if self.slots.get(id).is_some_and(Option::is_some) {
                 self.delete_now(id as NodeId)?;
             }
+        }
+        self.shaders.close()?;
+        if let Some(worker) = self.compositor.borrow().as_ref() {
+            worker.collect();
+            worker.drain();
         }
         self.flush_arkui()
     }

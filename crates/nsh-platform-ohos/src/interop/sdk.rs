@@ -32,6 +32,8 @@ pub(crate) struct EditorSettings {
     pub caret_color: u32,
     pub selection_color: u32,
     pub editable: bool,
+    pub auto_correct: bool,
+    pub report_paste: bool,
     pub scrollbar_visible: bool,
     pub hit_test: u32,
     pub align: u32,
@@ -57,20 +59,25 @@ pub(crate) struct EditorAccessibility {
     pub disabled: bool,
 }
 
-/// Focus and selection operations ordered after this batch's state updates.
-#[derive(Clone, Debug, PartialEq)]
+/// Focus, selection and scrolling operations ordered after this batch's state updates.
+#[derive(Clone, Debug, Default, PartialEq)]
 #[napi(object)]
 pub(crate) struct EditorCommand {
     pub target_id: u32,
     pub kind: String,
     pub start: u32,
     pub end: u32,
+    pub x: f64,
+    pub y: f64,
+    pub animated: bool,
 }
 
 #[derive(Default)]
 #[napi(object)]
 pub(crate) struct EditorEvent {
     pub kind: String,
+    pub x: f64,
+    pub y: f64,
     pub text: String,
     pub count: u32,
     pub start: u32,
@@ -150,6 +157,8 @@ pub(crate) struct ViewOptions {
 #[derive(Clone, Debug, PartialEq)]
 #[napi(object)]
 pub(crate) struct WebSettings {
+    pub shared_cookies: bool,
+    pub clear_cookies: bool,
     pub target_id: u32,
     pub url: Option<String>,
     pub html: Option<String>,
@@ -339,10 +348,11 @@ pub(crate) fn nsh_attach_native_subtree(
     export
         .after_attach(&inner)
         .map_err(|error| Error::from_reason(error.to_string()))?;
-    // Reparenting into a texture export changes the render target. ArkUI's
-    // retained custom draw recordings must be rebuilt on that target too.
+    // Reparenting into or out of a texture export changes the render target
+    // across the attachment and surface-export frames. ArkUI's retained custom
+    // draw recordings must be rebuilt once the destination pipeline is live.
     owner
-        .invalidate_subtree_paint()
+        .schedule_subtree_paint(4)
         .map_err(|error| Error::from_reason(error.to_string()))
 }
 

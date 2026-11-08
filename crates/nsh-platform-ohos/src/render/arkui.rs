@@ -118,7 +118,9 @@ impl crate::render::mount::UiContext {
             nodes.iter().filter_map(std::rc::Weak::upgrade).collect()
         };
         for owner in owners {
-            owner.update_wrapper()?;
+            if owner.composite_dirty.get() {
+                owner.update_wrapper()?;
+            }
         }
         loop {
             let dirty = std::mem::take(&mut *self.accessibility_dirty.borrow_mut());

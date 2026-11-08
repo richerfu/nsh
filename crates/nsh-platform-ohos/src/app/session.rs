@@ -10,7 +10,6 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
 };
 
 use napi_derive_ohos::napi;
@@ -20,8 +19,10 @@ use napi_ohos::{
     threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
 use nsh_core::{EventKind, EventPayload, PayloadValue};
+#[cfg(feature = "dev")]
 use ohos_pasteboard_binding::Pasteboard;
 use ohos_resource_manager_binding::{RawFile, ResourceManager};
+#[cfg(feature = "dev")]
 use ohos_udmf_binding::{UdmfData, UdmfRecord, UdsPlainText};
 use rustc_hash::FxHashMap;
 
@@ -87,6 +88,7 @@ pub(crate) struct HostInit {
 #[napi(object)]
 #[derive(Clone, Debug, Default)]
 pub(crate) struct HostCommand {
+    pub system: Option<crate::services::system::SystemCommand>,
     pub kind: String,
     pub enabled: Option<bool>,
     pub light_content: Option<bool>,
@@ -116,6 +118,33 @@ pub(crate) fn get(session_id: u32) -> Result<Arc<Services>> {
     Ok(services)
 }
 
+/// Resolves an explicit window or the sole active UI session. Multiple active
+/// windows require a context so a package never reads another Ability's resources.
+pub(crate) fn resolve_context(
+    env: &Env,
+    context: Option<&napi_ohos::bindgen_prelude::Object<'_>>,
+) -> Result<Arc<Services>> {
+    if let Some(context) = context {
+        return crate::app::entry::bind_session(env, context);
+    }
+    UI_SESSIONS.with(|sessions| {
+        let sessions = sessions.borrow();
+        let mut active = sessions
+            .values()
+            .filter(|session| session.services.is_foreground());
+        let host = active.next().ok_or_else(|| {
+            Error::from_reason("openResource requires a UIContext or an active NSH session")
+        })?;
+        if active.next().is_some() {
+            return Err(Error::from_reason(
+                "openResource requires UIContext when several windows are active",
+            ));
+        }
+        host.services.check()?;
+        Ok(host.services.clone())
+    })
+}
+
 pub(crate) fn close_ui_session(session_id: u32) {
     let ui_session = UI_SESSIONS.with(|sessions| sessions.borrow_mut().remove(&session_id));
     SESSIONS.lock().unwrap().remove(&session_id);
@@ -138,16 +167,11 @@ enum Operation {
         revision: u64,
         text: String,
     },
-    Clipboard {
-        route: Weak<Dispatcher>,
-        text: Option<String>,
-        request: Option<(u32, bool)>,
-    },
     PickImages {
         route: Weak<Dispatcher>,
         id: u32,
         request: nsh_core::picker::PickRequest,
-        paths: Vec<PathBuf>,
+        files: Vec<crate::services::system::PickedHandle>,
     },
     Stop,
 }
@@ -158,7 +182,7 @@ pub(crate) struct Services {
     pub(crate) speech_available: bool,
     id: u32,
     active: AtomicBool,
-    pixel_ratio: f32,
+    pixel_ratio: AtomicU32,
     loads: AtomicUsize,
     resource_lock: Mutex<()>,
     resource_manager: Arc<ResourceManager>,
@@ -341,10 +365,11 @@ impl Services {
     }
 
     pub(crate) fn apply_selected_status(&self) {
-        let Some(selected) = self
-            .selected_route()
-            .filter(|route| route.manages_status_bar)
-        else {
+        let Some(selected) = self.selected_route().filter(|route| {
+            route.manages_status_bar
+                && (route.status_bar_configured.load(Ordering::Acquire)
+                    || route.video_fullscreen.load(Ordering::Acquire))
+        }) else {
             if let Err(error) = self.send_host_command(HostCommand {
                 kind: "restore-bars".into(),
                 ..Default::default()
@@ -380,6 +405,7 @@ impl Services {
         dark: bool,
     ) -> Result<()> {
         if let Some(route) = route.upgrade().filter(|route| route.manages_status_bar) {
+            route.status_bar_configured.store(true, Ordering::Release);
             *route.status_bar.lock().unwrap() = Some((config, dark));
             self.apply_selected_status();
         }
@@ -395,6 +421,9 @@ impl Services {
             return Ok(());
         }
         if let Some(dispatcher) = route.upgrade() {
+            dispatcher
+                .status_bar_configured
+                .store(true, Ordering::Release);
             dispatcher
                 .video_fullscreen
                 .store(enabled, Ordering::Release);
@@ -542,8 +571,12 @@ impl Services {
         Ok(LoadPermit(self.clone()))
     }
 
+    pub(crate) fn set_scale(&self, scale: f32) {
+        self.pixel_ratio.store(scale.to_bits(), Ordering::Relaxed);
+    }
+
     pub(crate) fn scale(&self) -> Result<f32> {
-        let scale = self.pixel_ratio;
+        let scale = f32::from_bits(self.pixel_ratio.load(Ordering::Relaxed));
         if !scale.is_finite() || !(0.25..=8.0).contains(&scale) {
             return Err(Error::from_reason(
                 "host pixel ratio must be between 0.25 and 8",
@@ -588,7 +621,7 @@ impl Services {
             speech_available: init.speech_available,
             id,
             active: AtomicBool::new(true),
-            pixel_ratio: init.pixel_ratio as f32,
+            pixel_ratio: AtomicU32::new((init.pixel_ratio as f32).to_bits()),
             loads: AtomicUsize::new(0),
             resource_lock: Mutex::new(()),
             resource_manager: Arc::new(resource_manager),
@@ -631,29 +664,14 @@ impl Services {
                             revision,
                             text,
                         } => services.copy_development(route, revision, text),
-                        Operation::Clipboard {
-                            route,
-                            text,
-                            request,
-                        } => services.clipboard(route, text, request),
                         Operation::PickImages {
                             route,
                             id,
                             request,
-                            paths,
+                            files,
                         } => {
-                            let mut raw = nsh_core::picker::read_files(&paths, &request);
-                            for file in &mut raw {
-                                if let Some((_, original)) = file.name.split_once("__")
-                                    && !original.is_empty()
-                                {
-                                    file.name = original.to_owned();
-                                }
-                            }
+                            let raw = crate::services::system::read_picked(files, &request);
                             let files = nsh_core::picker::finish(&request, raw);
-                            for path in &paths {
-                                let _ = std::fs::remove_file(path);
-                            }
                             if services.check().is_ok()
                                 && let Some(route) = route.upgrade()
                             {
@@ -749,7 +767,9 @@ impl Services {
         let snapshot = environment
             .clone()
             .apply(nsh_engine::Environment::default())?;
-        *environment = NshEnvironment::snapshot(changes.clone().apply(snapshot)?);
+        let next = changes.clone().apply(snapshot)?;
+        self.set_scale(next.pixel_ratio);
+        *environment = NshEnvironment::snapshot(next);
         drop(environment);
         self.broadcast(|| Message::HostEnvironment(changes.clone()));
         Ok(())
@@ -781,6 +801,10 @@ impl Services {
     }
 
     pub(crate) fn resource(&self, name: &str) -> Result<Vec<u8>> {
+        self.resource_with_limit(name, MAX_RESOURCE)
+    }
+
+    pub(crate) fn resource_with_limit(&self, name: &str, limit: usize) -> Result<Vec<u8>> {
         resource_name(name)?;
         self.check()?;
         // One manager is shared by every engine and image worker in this host.
@@ -791,7 +815,7 @@ impl Services {
             .open_raw_file(name)
             .map_err(|error| Error::from_reason(error.to_string()))?;
         let bytes = file
-            .read_bounded(MAX_RESOURCE)
+            .read_bounded(limit)
             .map_err(|error| Error::from_reason(error.to_string()))?;
         self.check()?;
         Ok(bytes)
@@ -832,19 +856,6 @@ impl Services {
         }
     }
 
-    pub(crate) fn enqueue_clipboard(
-        &self,
-        route: Weak<Dispatcher>,
-        text: Option<String>,
-        request: Option<(u32, bool)>,
-    ) -> Result<()> {
-        self.enqueue(Operation::Clipboard {
-            route,
-            text,
-            request,
-        })
-    }
-
     pub(crate) fn open_url(&self, route: Weak<Dispatcher>, id: u32, url: String) -> Result<()> {
         self.check()?;
         let open_id = self
@@ -862,15 +873,6 @@ impl Services {
             ..Default::default()
         }) {
             self.open_urls.lock().unwrap().remove(&open_id);
-            if let Some(route) = route.upgrade() {
-                route.send(Message::HostEvent(
-                    EventKind::OpenUrl,
-                    EventPayload::Map(vec![
-                        ("id", PayloadValue::Number(id as f64)),
-                        ("opened", PayloadValue::Bool(false)),
-                    ]),
-                ));
-            }
             return Err(error);
         }
         Ok(())
@@ -929,20 +931,18 @@ impl Services {
         Ok(())
     }
 
-    pub(crate) fn complete_pick_images(&self, pick_id: u32, paths: Vec<String>) {
+    pub(crate) fn complete_pick_images(
+        &self,
+        pick_id: u32,
+        files: Vec<crate::services::system::PickedHandle>,
+    ) {
         if self.check().is_err() {
-            for path in &paths {
-                let _ = std::fs::remove_file(path);
-            }
             return;
         }
         let Some((id, request, route)) = self.pick_images.lock().unwrap().remove(&pick_id) else {
-            for path in &paths {
-                let _ = std::fs::remove_file(path);
-            }
             return;
         };
-        if paths.is_empty() {
+        if files.is_empty() {
             if let Some(route) = route.upgrade() {
                 route.send(Message::HostEvent(
                     EventKind::Pick,
@@ -954,13 +954,12 @@ impl Services {
             }
             return;
         }
-        let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
         if self
             .enqueue(Operation::PickImages {
                 route: route.clone(),
                 id,
                 request,
-                paths,
+                files,
             })
             .is_err()
             && let Some(route) = route.upgrade()
@@ -981,63 +980,9 @@ impl Services {
             .try_send(operation)
             .map_err(|_| Error::from_reason("Ability operation queue is full or closed"))
     }
-
-    fn clipboard(
-        &self,
-        route: Weak<Dispatcher>,
-        text: Option<String>,
-        request: Option<(u32, bool)>,
-    ) {
-        if route.strong_count() == 0 {
-            return;
-        }
-        let result = (|| {
-            if let Some(text) = text {
-                write_clipboard_text(&text)?;
-            }
-            let (has, text) = if request.is_some_and(|(_, has_only)| has_only) {
-                let (reply, response) = mpsc::sync_channel(1);
-                let dispatcher = route
-                    .upgrade()
-                    .ok_or_else(|| Error::from_reason("surface is closed"))?;
-                dispatcher.send(Message::ClipboardProbe(reply));
-                let has = response
-                    .recv_timeout(Duration::from_secs(10))
-                    .map_err(|_| {
-                        Error::from_reason("clipboard presence query cancelled or timed out")
-                    })?
-                    .map_err(Error::from_reason)?;
-                (has, String::new())
-            } else if request.is_some() {
-                let text = read_clipboard_text()?.unwrap_or_default();
-                (!text.is_empty(), text)
-            } else {
-                (false, String::new())
-            };
-            Ok::<_, Error>((has, text))
-        })();
-        if self.check().is_err() {
-            return;
-        }
-        if let Some(route) = route.upgrade() {
-            if let Err(error) = &result {
-                route.send(Message::Error(format!("clipboard: {error}")));
-            }
-            if let Some((id, _)) = request {
-                let (has, text) = result.unwrap_or_default();
-                route.send(Message::HostEvent(
-                    EventKind::Clipboard,
-                    EventPayload::Map(vec![
-                        ("id", PayloadValue::Number(id as f64)),
-                        ("has", PayloadValue::Bool(has)),
-                        ("text", PayloadValue::Str(text)),
-                    ]),
-                ));
-            }
-        }
-    }
 }
 
+#[cfg(feature = "dev")]
 fn write_clipboard_text(text: &str) -> Result<()> {
     if text.contains('\0') {
         return Err(Error::from_reason("clipboard text must not contain NUL"));
@@ -1061,29 +1006,6 @@ fn write_clipboard_text(text: &str) -> Result<()> {
     board
         .set_data(&data)
         .map_err(|error| Error::from_reason(error.to_string()))
-}
-
-fn read_clipboard_text() -> Result<Option<String>> {
-    let board = Pasteboard::new();
-    if !board.has_data() {
-        return Ok(None);
-    }
-    let mut data = board.data().map_err(|error| {
-        Error::from_reason(format!(
-            "native clipboard read failed: {error}; check READ_PASTEBOARD and signing profile ACL"
-        ))
-    })?;
-    let records = data
-        .records()
-        .map_err(|error| Error::from_reason(error.to_string()))?;
-    for record in records {
-        if let Ok(plain) = record.plain_text()
-            && let Ok(text) = plain.get_content()
-        {
-            return Ok(Some(text));
-        }
-    }
-    Ok(None)
 }
 
 pub(crate) fn idiom(device_type: &str) -> &'static str {
@@ -1129,6 +1051,7 @@ fn environment_from_init(init: &HostInit) -> NshEnvironment {
         Some(&init.device_type),
         init.rtl,
     );
+    env.pixel_ratio = Some(init.pixel_ratio);
     env.lifecycle = Some(init.lifecycle.clone());
     env.api_level = u32::try_from(init.sdk_api_version).ok();
     env.screen_reader = Some(init.screen_reader);

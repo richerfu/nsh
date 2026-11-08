@@ -15,7 +15,7 @@ pub struct NshOptions {
     pub storage_directory: Option<String>,
     /// Disk cache policy, from the next load.
     pub cache_options: Option<NshCacheOptions>,
-    /// Allow this surface to manage the host window's system bars. Default false.
+    /// Allow explicit status-bar and fullscreen-video requests to manage window bars. Default true.
     pub manages_status_bar: Option<bool>,
     /// System observations available before the app starts.
     pub environment: Option<NshEnvironment>,
@@ -189,7 +189,7 @@ impl Config {
         Ok(Self {
             storage,
             cache,
-            manages_status_bar: options.manages_status_bar.unwrap_or(false),
+            manages_status_bar: options.manages_status_bar.unwrap_or(true),
             host,
             assets,
             policy,

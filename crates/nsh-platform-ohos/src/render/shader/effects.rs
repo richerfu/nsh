@@ -90,6 +90,10 @@ impl Effects {
                 layers.push((owner.id, layer));
             }
         }
+        target.invalidate_composites();
+        if let Some(scene) = target.scene.borrow().as_ref() {
+            scene.require(target);
+        }
         target.ensure_wrapper()?;
         target.restore_style()?;
         target.animator.request_frame();
@@ -105,6 +109,10 @@ impl Effects {
                 .shader_layers
                 .borrow_mut()
                 .retain(|(owner, _)| *owner != id);
+            target.invalidate_composites();
+            if let Some(scene) = target.scene.borrow().as_ref() {
+                scene.require(&target);
+            }
             target.ensure_wrapper()?;
             target.restore_style()?;
         }
@@ -139,21 +147,32 @@ impl Effects {
         // Pages compose on the root, where the native tree supplies the live
         // destination after push/pop. Dialogs own a separate native surface.
         let target = if page { root.clone() } else { owner.clone() };
-        if target.scene_prepared.get() {
-            return Ok(None);
-        }
         let picture = if page {
             root.clone()
         } else {
             lower.unwrap_or(root)
         };
-        let snapshot = match crate::render::composition::snapshot::Snapshot::capture(&picture) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                log::warn!("shader navigation snapshot: {error}");
-                return Ok(None);
-            }
-        };
+        let has_picture = picture.wrapper.borrow().as_ref().is_some_and(|wrapper| {
+            wrapper
+                .composite
+                .borrow()
+                .as_ref()
+                .is_some_and(|composite| composite.surface().is_some())
+        });
+        if !has_picture {
+            return Ok(None);
+        }
+        let navigation = Rc::new(
+            super::navigation::Navigation::new(owner.id, backwards).ok_or(
+                crate::render::node::Error::Unsupported("navigation generation exhausted"),
+            )?,
+        );
+        // Capture is queued before layer/visibility changes, so interruptions keep the displayed side.
+        if let Some(wrapper) = picture.wrapper.borrow().as_ref()
+            && let Some(composite) = wrapper.composite.borrow().as_ref()
+        {
+            composite.snapshot(navigation.key);
+        }
         let interrupted: Vec<_> = self
             .views
             .borrow()
@@ -169,11 +188,6 @@ impl Effects {
         for key in &interrupted {
             self.navigation_complete(*key);
         }
-        let navigation = Rc::new(
-            super::navigation::Navigation::new(owner.id, backwards).ok_or(
-                crate::render::node::Error::Unsupported("navigation generation exhausted"),
-            )?,
-        );
         self.set_on(owner, &target, spec.layer, Some(navigation.clone()))?;
         for key in interrupted {
             if key.owner != owner.id {
@@ -184,7 +198,6 @@ impl Effects {
             && let Some(composite) = wrapper.composite.borrow().as_ref()
         {
             composite.shader_navigation(
-                snapshot,
                 navigation.key,
                 spec.duration,
                 backwards,
@@ -246,6 +259,7 @@ impl Effects {
 
     pub(super) fn frame(&self) -> Result<bool> {
         let mut due = false;
+        let mut targets: FxHashMap<NodeId, (Rc<Node>, bool)> = FxHashMap::default();
         // Restoring a native style reapplies animated slots, which reads this
         // table again. Keep membership immutable throughout the frame.
         for (&id, state) in self.views.borrow().iter() {
@@ -255,15 +269,7 @@ impl Effects {
             let Some(target) = state.target.upgrade() else {
                 continue;
             };
-            let mut at = Some(owner.clone());
-            let mut attached = false;
-            while let Some(node) = at {
-                if node.id == nsh_core::ROOT_ID {
-                    attached = true;
-                    break;
-                }
-                at = node.parent_node.borrow().upgrade();
-            }
+            let attached = owner.shaders.visibility(&owner).0;
             let active = if state.navigation.is_some() {
                 // Closing dialogs can already be deactivated; their retained
                 // native picture must keep ticking until navigation ends.
@@ -286,10 +292,18 @@ impl Effects {
                         .borrow_mut()
                         .push((id, state.layer.clone()));
                 }
+                target.invalidate_composites();
+                if let Some(scene) = target.scene.borrow().as_ref() {
+                    scene.require(&target);
+                }
                 target.ensure_wrapper()?;
                 target.restore_style()?;
             }
             let shown = active && (state.navigation.is_some() || super::in_sight(&target));
+            let entry = targets.entry(target.id).or_insert((target, false));
+            entry.1 |= shown;
+        }
+        for (_, (target, shown)) in targets {
             due |= target.wrapper.borrow().as_ref().is_some_and(|wrapper| {
                 wrapper
                     .composite

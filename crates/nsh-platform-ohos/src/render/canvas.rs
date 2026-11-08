@@ -195,8 +195,8 @@ impl CanvasView {
         let bounds = Rect::new(
             0.0,
             0.0,
-            frame.width * owner.scale,
-            frame.height * owner.scale,
+            frame.width * owner.scale.get(),
+            frame.height * owner.scale.get(),
         );
         target.save();
         target.clip_rect(&bounds, ClipOperation::Intersect, false);
@@ -214,7 +214,7 @@ impl CanvasView {
         let mut replay = Replay {
             canvas,
             matrix: RefCell::new(Matrix::new()),
-            scale: owner.scale,
+            scale: owner.scale.get(),
             slots: &self.slots.borrow(),
             images: &self.images.borrow(),
             fonts: &owner.fonts,

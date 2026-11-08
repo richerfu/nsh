@@ -1,9 +1,10 @@
+import { SystemReply } from "./NativeSystem";
 import { abilityAccessCtrl, common } from "@kit.AbilityKit";
 import audio from "@ohos.multimedia.audio";
 import i18n from "@ohos.i18n";
 import type speechRecognizer from "@hms.ai.speechRecognizer";
 
-export interface SpeechReply {
+export interface SpeechReply extends SystemReply {
   phase: string;
   text?: string;
   final?: boolean;

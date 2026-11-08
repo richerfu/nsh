@@ -200,8 +200,8 @@ impl State {
         self.snapshot.lock().unwrap().bounds = AccessibleRect {
             left: 0,
             top: 0,
-            right: (frame.width * owner.scale).round() as i32,
-            bottom: (frame.height * owner.scale).round() as i32,
+            right: (frame.width * owner.scale.get()).round() as i32,
+            bottom: (frame.height * owner.scale.get()).round() as i32,
         };
         Ok(())
     }

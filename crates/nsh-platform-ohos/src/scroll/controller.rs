@@ -202,8 +202,8 @@ impl Scroller {
                 {
                     let size = scroll.size.get();
                     event.set_measured_size(
-                        (size.width * owner.scale * scroll.zoom.get()).round() as i32,
-                        (size.height * owner.scale * scroll.zoom.get()).round() as i32,
+                        (size.width * owner.scale.get() * scroll.zoom.get()).round() as i32,
+                        (size.height * owner.scale.get() * scroll.zoom.get()).round() as i32,
                     )?;
                     scroll.measured_size.set(size);
                     owner.measure_children(event)?;
@@ -225,12 +225,7 @@ impl Scroller {
                         || scroll.owed.get() != (0.0, 0.0))
                         && let Some(route) = owner.dispatcher.upgrade()
                     {
-                        route.send(crate::app::runtime::Message::ScrollPosition {
-                            id: owner.id,
-                            x: 0.0,
-                            y: 0.0,
-                            animated: false,
-                        });
+                        route.send(crate::app::runtime::Message::FlushScrollLayout(owner.id));
                     }
                 }
                 Ok(())
@@ -1242,7 +1237,7 @@ impl Scroller {
             let distance = self
                 .owner
                 .upgrade()
-                .map_or(5.0, |owner| 5.0 * owner.scale as f64);
+                .map_or(5.0, |owner| 5.0 * owner.scale.get() as f64);
             let gesture = Gesture::create_pinch_gesture(2, distance)?;
             let weak = Rc::downgrade(self);
             gesture.on_gesture(G::Accept | G::Update | G::End | G::Cancel, move |event| {
@@ -1257,8 +1252,10 @@ impl Scroller {
                             return Ok(());
                         };
                         // Gesture centers remain physical pixels even when node input uses vp.
-                        let (center_x, center_y) =
-                            (pinch.center_x / owner.scale, pinch.center_y / owner.scale);
+                        let (center_x, center_y) = (
+                            pinch.center_x / owner.scale.get(),
+                            pinch.center_y / owner.scale.get(),
+                        );
                         if event.event_action_type == G::Accept {
                             scroll.zoom_motion.set(None);
                             scroll.zoom_start.set(scroll.zoom.get());
