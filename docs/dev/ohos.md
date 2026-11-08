@@ -39,8 +39,8 @@ Features:
   explicitly from the provided `UIContext` (`UIAbilityContext` and `Window`) in a standard `UIAbility` without a custom
   base class or process-global context guessing.
 - **Commits and frames** (`src/render/`): the engine submits each `MountBatch` through a N-API threadsafe function to
-  the ArkUI UI thread. Per-surface `NativeVSync` callbacks drive animations on the UI thread; idle surfaces request no
-  frames.
+  the ArkUI UI thread. Per-surface `NativeVSync` callbacks drive animations on the UI thread (honoring capped animation
+  `frameRate`s through `OH_NativeVSync_SetExpectedFrameRateRange`); idle surfaces request no frames.
 - **Shader fills** (`src/render/shader/`, `src/render/composition/fill.rs`): each fill presents through an XComponent
   first among its children. Fills and effects share the surface's GLES compositor worker (`nsh-compositor`) and
   native VSync, compiling the core's GLSL ES and skipping fills out of sight; pixels stay on the GPU.
@@ -89,7 +89,9 @@ Features:
 
 `loadResource` reads `app.json` and `capabilities.json` beside the selected rawfile, off the UI thread
 (`src/app/chunks.rs`). `app.json` is optional for single-file bundles. Its `entryChunks` array seeds both
-source and bytecode entries; source imports also discover transitive chunks for older artifacts. Chunk ids
+source and bytecode entries, and its `schemes` array populates the custom URL schemes accepted by
+`UrlScheme.on("open")` (delivered from the host via `NshSurface::open_url`); source imports also discover
+transitive chunks for older artifacts. Chunk ids
 are validated as local `.js` file names, deduplicated and bounded to 1024 chunks and 64 MiB total preload
 bytes (entry, companions, chunks and maps). A present malformed companion rejects the load. Declarations
 are read independently of host grants; `Policy::access()` enforces both.
@@ -128,9 +130,9 @@ Native feature support and platform boundaries:
 | Device-verified combinations (Batch 5) | Shader backdrop pictures, overflow and CSS scene composition | Scene groups supply ordered backdrop pictures and run shaders after filters and masks. Logical box sizes stay independent of capture insets; captures and fills scale proportionally above 4096 pixels. Screen effects apply to the embedded root; ArkUI dialogs have their own surface. |
 | Platform service | `Speech.available()`, `Speech.start()` | HarmonyOS SpeechRecognizer supplies offline zh-CN recognition with microphone permission, cancellation and teardown; availability follows its system capability. |
 | Supported | `Notifications` | Native permission, show, cancel, badge and press delivery; hosts forward Ability wants to `onNotificationWant`, including cold starts. |
-| Supported | `ViewProps::continues_text`, selectable views | `src/text/selection/area.rs` adapts mounted text to core `SelectionTexts`, with cross-view ranges and continuation joins. |
+| Supported | `ViewProps::continues_text`, selectable views, `onSelectionChange` | `src/text/selection/area.rs` adapts mounted text to core `SelectionTexts`, with cross-view ranges, continuation joins and UTF-16 selection start offsets. |
 | App-labelled semantics | `Accessibility::has_popup` | Popup controls include the app’s Activate action label in their spoken value. API 20 wrappers supply checked/selected state and adjustable-control semantics; API 23 adds native providers, and API 26 named custom actions. Diagonal resize cursors use the UIContext cursor controller. |
-| Supported | `WebView.sendInput`, `onDownload` | ArkWeb native touch/key dispatch and browser editing commands; scoped download delegates write unique private files and cancel on teardown. |
+| Supported | `WebView.sendInput`, `onDownload`, `load`, `incognito` | ArkWeb native touch/key dispatch and browser editing commands; `loadUrl` with custom request headers; private cookie stores for `incognito` / `sharedCookies: false`; scoped download delegates write unique private files and cancel on teardown. |
 | Supported | System alert/action-sheet colors; TabBar registration | `Command::Tokens` colors native navigation, dialogs and screen backgrounds; OHOS registers a native ArkUI TabBar with selection and tint updates. |
 
 Shared-layer additions need no new platform protocol: `Carousel`, `Tree`, `HoverCard`, `Command`, the new plot
@@ -215,12 +217,15 @@ fallback. Clipboard APIs retain the core’s empty-result contract for unavailab
 subscription replacement releases the old request; a 300-listen host regression covers the cap.
 `BackHandler.exitApp()` reports the embedding boundary; the host Ability owns application termination.
 The app clipboard route is `NativeClipboard.ets`; development error-copy support alone uses the native
-pasteboard helper. Image picking opens read-only descriptors on the UI thread; Rust duplicates ownership
-before ArkTS closes its handles, then bounded reads and decoding run on `nsh-ohos-host` workers.
+pasteboard helper. Image and file picking open read-only descriptors on the UI thread (`PhotoViewPicker` for images,
+`DocumentViewPicker` for arbitrary files); Rust duplicates ownership
+before ArkTS closes its handles, then bounded reads, MIME inference and image decoding run on `nsh-ohos-host` workers.
 
-`WebView`’s OHOS `sharedCookies` platform prop defaults to `true`. With
+`WebView`’s cross-platform `incognito` prop and OHOS `sharedCookies` platform prop (default `true`) control cookie
+isolation. With `incognito` or
 `ohos={{ sharedCookies: false }}`, ArkWeb uses its private cookie store and clears that store before
-controller attachment navigation and subsequent document loads. File inputs select PhotoViewPicker
+controller attachment navigation, subsequent document loads and teardown. `WebViewRef.load({ src, headers })` forwards
+custom request headers to ArkWeb’s `loadUrl`. File inputs select PhotoViewPicker
 for image/video MIME types and DocumentViewPicker for other types; single/multiple/folder modes and
 cancellation are forwarded to ArkWeb’s result callback.
 
