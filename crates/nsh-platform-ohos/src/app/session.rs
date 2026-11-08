@@ -99,6 +99,7 @@ pub(crate) struct HostCommand {
     pub element_id: Option<i64>,
     pub open_id: Option<u32>,
     pub limit: Option<u32>,
+    pub filters: Option<Vec<String>>,
     pub url: Option<String>,
 }
 
@@ -167,16 +168,16 @@ enum Operation {
         revision: u64,
         text: String,
     },
-    PickImages {
+    Pick {
         route: Weak<Dispatcher>,
         id: u32,
-        request: nsh_core::picker::PickRequest,
+        request: nsh_core::picker::Pick,
         files: Vec<crate::services::system::PickedHandle>,
     },
     Stop,
 }
 
-type PendingPick = (u32, nsh_core::picker::PickRequest, Weak<Dispatcher>);
+type PendingPick = (u32, nsh_core::picker::Pick, Weak<Dispatcher>);
 
 pub(crate) struct Services {
     pub(crate) speech_available: bool,
@@ -201,7 +202,7 @@ pub(crate) struct Services {
     command_tsfn: HostCommandCallback,
     next_open_id: AtomicU32,
     open_urls: Mutex<FxHashMap<u32, (u32, Weak<Dispatcher>)>>,
-    pick_images: Mutex<FxHashMap<u32, PendingPick>>,
+    picks: Mutex<FxHashMap<u32, PendingPick>>,
     queue: mpsc::SyncSender<Operation>,
 }
 
@@ -640,7 +641,7 @@ impl Services {
             system: Default::default(),
             next_open_id: AtomicU32::new(1),
             open_urls: Mutex::default(),
-            pick_images: Mutex::default(),
+            picks: Mutex::default(),
             queue,
         });
         let weak = Arc::downgrade(&services);
@@ -664,14 +665,13 @@ impl Services {
                             revision,
                             text,
                         } => services.copy_development(route, revision, text),
-                        Operation::PickImages {
+                        Operation::Pick {
                             route,
                             id,
                             request,
                             files,
                         } => {
-                            let raw = crate::services::system::read_picked(files, &request);
-                            let files = nsh_core::picker::finish(&request, raw);
+                            let files = crate::services::system::read_picked(files, &request);
                             if services.check().is_ok()
                                 && let Some(route) = route.upgrade()
                             {
@@ -779,7 +779,7 @@ impl Services {
         if self.active.swap(false, Ordering::AcqRel) {
             self.keyboard.lock().unwrap().take();
             self.open_urls.lock().unwrap().clear();
-            self.pick_images.lock().unwrap().clear();
+            self.picks.lock().unwrap().clear();
             self.broadcast(|| Message::HostClosed);
             let _ = self.queue.try_send(Operation::Stop);
         }
@@ -895,28 +895,59 @@ impl Services {
         }
     }
 
-    pub(crate) fn pick_images(
+    pub(crate) fn pick(
         &self,
         route: Weak<Dispatcher>,
         id: u32,
-        request: nsh_core::picker::PickRequest,
+        request: nsh_core::picker::Pick,
     ) -> Result<()> {
         self.check()?;
         let pick_id = self
             .next_open_id
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-            .map_err(|_| Error::from_reason("pickImages request IDs exhausted"))?;
-        self.pick_images
+            .map_err(|_| Error::from_reason("picker request IDs exhausted"))?;
+        let command = match &request {
+            nsh_core::picker::Pick::Images(r) => HostCommand {
+                kind: "pick-images".into(),
+                open_id: Some(pick_id),
+                limit: Some(r.limit),
+                ..Default::default()
+            },
+            nsh_core::picker::Pick::Files(r) => {
+                let filters: Vec<String> = r
+                    .filters
+                    .iter()
+                    .filter(|f| !f.extensions.is_empty())
+                    .map(|f| {
+                        let suffixes = f
+                            .extensions
+                            .iter()
+                            .map(|ext| format!(".{ext}"))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let label = f.name.replace('|', " ").trim().to_owned();
+                        if label.is_empty() {
+                            suffixes
+                        } else {
+                            format!("{label}|{suffixes}")
+                        }
+                    })
+                    .collect();
+                HostCommand {
+                    kind: "pick-files".into(),
+                    open_id: Some(pick_id),
+                    limit: Some(r.limit),
+                    filters: (!filters.is_empty()).then_some(filters),
+                    ..Default::default()
+                }
+            }
+        };
+        self.picks
             .lock()
             .unwrap()
             .insert(pick_id, (id, request, route.clone()));
-        if let Err(error) = self.send_host_command(HostCommand {
-            kind: "pick-images".into(),
-            open_id: Some(pick_id),
-            limit: Some(request.limit),
-            ..Default::default()
-        }) {
-            self.pick_images.lock().unwrap().remove(&pick_id);
+        if let Err(error) = self.send_host_command(command) {
+            self.picks.lock().unwrap().remove(&pick_id);
             if let Some(route) = route.upgrade() {
                 route.send(Message::HostEvent(
                     EventKind::Pick,
@@ -931,7 +962,7 @@ impl Services {
         Ok(())
     }
 
-    pub(crate) fn complete_pick_images(
+    pub(crate) fn complete_pick(
         &self,
         pick_id: u32,
         files: Vec<crate::services::system::PickedHandle>,
@@ -939,7 +970,7 @@ impl Services {
         if self.check().is_err() {
             return;
         }
-        let Some((id, request, route)) = self.pick_images.lock().unwrap().remove(&pick_id) else {
+        let Some((id, request, route)) = self.picks.lock().unwrap().remove(&pick_id) else {
             return;
         };
         if files.is_empty() {
@@ -955,7 +986,7 @@ impl Services {
             return;
         }
         if self
-            .enqueue(Operation::PickImages {
+            .enqueue(Operation::Pick {
                 route: route.clone(),
                 id,
                 request,

@@ -271,7 +271,7 @@ pub(crate) fn nsh_pick_images_result(
         })
         .collect();
     if let Ok(host) = crate::app::session::get(session_id) {
-        host.complete_pick_images(pick_id, files);
+        host.complete_pick(pick_id, files);
     }
 }
 

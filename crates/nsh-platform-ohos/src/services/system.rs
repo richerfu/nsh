@@ -468,27 +468,49 @@ impl PickedDescriptor {
 #[cfg(unix)]
 pub(crate) fn read_picked(
     handles: Vec<PickedHandle>,
-    request: &nsh_core::picker::PickRequest,
+    request: &nsh_core::picker::Pick,
 ) -> Vec<nsh_core::picker::PickedFile> {
     use std::{fs::File, io::Read as _};
-    const MAX_BYTES: u64 = 64 << 20;
-    handles
+    let (limit, max_bytes) = match request {
+        nsh_core::picker::Pick::Images(r) => (r.limit, 64 << 20),
+        nsh_core::picker::Pick::Files(r) => (r.limit, nsh_core::picker::MAX_PICKED_FILE_BYTES),
+    };
+    let raw = handles
         .into_iter()
-        .take(request.limit.min(nsh_core::picker::MAX_PICKED) as usize)
+        .take(limit.clamp(1, nsh_core::picker::MAX_PICKED) as usize)
         .filter_map(|handle| {
             let file = File::from(handle.descriptor);
-            let modified = file.metadata().and_then(|m| m.modified()).ok();
+            let metadata = file.metadata().ok();
+            if metadata.as_ref().is_some_and(|m| m.len() > max_bytes) {
+                log::warn!(
+                    "OHOS picked {} is left out: larger than {max_bytes} bytes",
+                    handle.name
+                );
+                return None;
+            }
+            let modified = metadata.and_then(|m| m.modified().ok());
             let mut bytes = Vec::new();
-            if file.take(MAX_BYTES + 1).read_to_end(&mut bytes).is_err()
-                || bytes.len() as u64 > MAX_BYTES
+            if file.take(max_bytes + 1).read_to_end(&mut bytes).is_err()
+                || bytes.len() as u64 > max_bytes
             {
                 return None;
             }
-            let mut picked = nsh_core::picker::PickedFile::new(handle.name, "", bytes.into());
+            let mut picked = match request {
+                nsh_core::picker::Pick::Images(_) => {
+                    nsh_core::picker::PickedFile::new(handle.name, "", bytes.into())
+                }
+                nsh_core::picker::Pick::Files(_) => {
+                    let mut picked = nsh_core::picker::PickedFile::default();
+                    picked.name = handle.name;
+                    picked.data = bytes.into();
+                    picked
+                }
+            };
             picked.last_modified = modified;
             Some(picked)
         })
-        .collect()
+        .collect();
+    request.finish(raw)
 }
 
 #[cfg(test)]
@@ -509,10 +531,37 @@ mod tests {
         .unwrap();
         drop(source);
         std::fs::remove_file(path).unwrap();
-        let files = read_picked(vec![handle], &Default::default());
+        let files = read_picked(
+            vec![handle],
+            &nsh_core::picker::Pick::Images(Default::default()),
+        );
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "photo.jpg");
         assert_eq!(&*files[0].data, b"picked bytes");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn picked_files_preserve_arbitrary_names_and_infer_mime() {
+        use std::{fs::File, os::fd::AsRawFd};
+        let path = std::env::temp_dir().join(format!("nsh-picked-doc-{}", std::process::id()));
+        std::fs::write(&path, b"{\"ok\":true}").unwrap();
+        let source = File::open(&path).unwrap();
+        let handle = PickedDescriptor {
+            fd: source.as_raw_fd(),
+            name: "folder/config.json".into(),
+        }
+        .retain()
+        .unwrap();
+        drop(source);
+        std::fs::remove_file(path).unwrap();
+        let files = read_picked(
+            vec![handle],
+            &nsh_core::picker::Pick::Files(Default::default()),
+        );
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "config.json");
+        assert_eq!(files[0].mime, "application/json");
+        assert_eq!(&*files[0].data, b"{\"ok\":true}");
     }
     #[test]
     fn three_hundred_notification_listens_replace_the_previous_route() {

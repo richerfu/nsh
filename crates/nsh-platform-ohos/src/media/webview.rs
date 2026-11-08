@@ -22,7 +22,7 @@ use crate::{
     app::session::Services,
     interop::{
         attachment::NativeAttachment,
-        sdk::{WebCommand, WebEvent, WebSettings},
+        sdk::{WebCommand, WebEvent, WebHeader, WebSettings},
     },
     render::{
         geometry::Size,
@@ -270,6 +270,36 @@ impl WebView {
                     ..Default::default()
                 }
             }
+            Command::Load(load) => {
+                if !node.access.allows_webviews()
+                    || (!load.src.starts_with("asset:/") && !node.access.allows_webview(&load.src))
+                {
+                    node.control.dispatch_event(
+                        node.id,
+                        EventKind::Error,
+                        EventPayload::Map(vec![(
+                            "message",
+                            PayloadValue::Str("WebView source is not granted".into()),
+                        )]),
+                    );
+                    return Ok(());
+                }
+                WebCommand {
+                    target_id,
+                    kind: "load".into(),
+                    url: Some(asset_url(&load.src)),
+                    headers: Some(
+                        load.headers
+                            .into_iter()
+                            .map(|(header_key, header_value)| WebHeader {
+                                header_key,
+                                header_value,
+                            })
+                            .collect(),
+                    ),
+                    ..Default::default()
+                }
+            }
             Command::SendInput(input) => {
                 use nsh_core::{WebInput, WebKey};
                 let mut command = WebCommand {
@@ -372,9 +402,10 @@ impl WebView {
             );
             return Ok(());
         }
+        let shared_cookies = props.shared_cookies && !props.incognito;
         let document = DocumentSettings {
             javascript: props.javascript_enabled,
-            shared_cookies: props.shared_cookies,
+            shared_cookies,
             script: props.injected_js_before.clone(),
         };
         let document_changed = self
@@ -414,8 +445,8 @@ impl WebView {
             .map_or_else(|| BRIDGE.to_owned(), |script| format!("{BRIDGE}\n{script}"));
         node.web_update(WebSettings {
             target_id,
-            shared_cookies: props.shared_cookies,
-            clear_cookies: !props.shared_cookies && (first_document || new_document),
+            shared_cookies,
+            clear_cookies: !shared_cookies && (first_document || new_document),
             url,
             html,
             html_base_url,

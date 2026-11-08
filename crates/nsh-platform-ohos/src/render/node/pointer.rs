@@ -183,11 +183,12 @@ impl Node {
     }
     pub(crate) fn context_menu_payload(&self, x: f32, y: f32) -> EventPayload {
         let (position, page_position) = self.pointer_positions(x, y);
-        EventPayload::ContextMenu(nsh_core::ContextMenuEvent {
+        EventPayload::ContextMenu(nsh_core::ContextMenuEvent::new(
             position,
             page_position,
-            modifiers: self.host.modifiers(),
-        })
+            self.host.modifiers(),
+            Some(nsh_core::PointerType::Mouse),
+        ))
     }
     pub(crate) fn press_feedback_allowed(&self) -> bool {
         if !self.touches.borrow().press_allowed(self.id) {

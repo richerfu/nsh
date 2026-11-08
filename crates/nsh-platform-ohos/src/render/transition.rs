@@ -27,6 +27,10 @@ impl Live {
         self.text_color
     }
 
+    pub(crate) fn frame_rate(&self) -> Option<f32> {
+        self.inner.frame_rate()
+    }
+
     pub(crate) fn recolor(&mut self, change: transition::Recolor) {
         self.inner.recolor(change);
         self.text_color = self.inner.text_color();

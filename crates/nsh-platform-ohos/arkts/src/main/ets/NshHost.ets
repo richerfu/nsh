@@ -8,7 +8,7 @@ import {
 } from "@kit.AbilityKit";
 import { accessibility } from "@kit.AccessibilityKit";
 import { NodeContent, window } from "@kit.ArkUI";
-import { fileIo as fs } from "@kit.CoreFileKit";
+import { fileIo as fs, picker } from "@kit.CoreFileKit";
 import { photoAccessHelper } from "@kit.MediaLibraryKit";
 import { FrameNode } from "@ohos.arkui.node";
 import { UIContext } from "@ohos.arkui.UIContext";
@@ -71,6 +71,7 @@ interface HostCommandPayload {
   elementId?: number;
   openId?: number;
   limit?: number;
+  filters?: string[];
   url?: string;
 }
 
@@ -939,40 +940,74 @@ class HostSession {
       const pickId = command.openId ?? 0;
       const limit = Math.max(1, Math.min(100, command.limit ?? 1));
       try {
-        const picker = new photoAccessHelper.PhotoViewPicker();
+        const photoPicker = new photoAccessHelper.PhotoViewPicker();
         const options = new photoAccessHelper.PhotoSelectOptions();
         options.MIMEType = photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE;
         options.maxSelectNumber = limit;
-        picker
+        photoPicker
           .select(options)
           .then((result: photoAccessHelper.PhotoSelectResult): void => {
-            const uris = result?.photoUris ?? [];
-            const handles: fs.File[] = [];
-            const files: PickedDescriptor[] = [];
-            try {
-              for (let i = 0; i < uris.length && i < limit; i++) {
-                try {
-                  const file = fs.openSync(uris[i], fs.OpenMode.READ_ONLY);
-                  handles.push(file);
-                  const name = decodeURIComponent(uris[i].split("/").pop() ?? `image_${i}`);
-                  files.push({ fd: file.fd, name });
-                } catch (error) {
-                  console.warn(`NSH picked image: ${String(error)}`);
-                }
-              }
-              // Rust retains independent descriptors synchronously; bytes are read on its worker.
-              this.mod.nshPickImagesResult(this.sessionId, pickId, files);
-            } finally {
-              for (const file of handles) {
-                try { fs.closeSync(file); } catch {}
-              }
-            }
+            this.deliverPickedUris(pickId, result?.photoUris ?? [], limit, "image");
           })
           .catch((): void => {
             this.mod.nshPickImagesResult(this.sessionId, pickId, []);
           });
       } catch {
         this.mod.nshPickImagesResult(this.sessionId, pickId, []);
+      }
+      return;
+    }
+
+    if (command.kind === "pick-files") {
+      const pickId = command.openId ?? 0;
+      const limit = Math.max(1, Math.min(100, command.limit ?? 1));
+      try {
+        const documentPicker = new picker.DocumentViewPicker(this.abilityContext);
+        const options = new picker.DocumentSelectOptions();
+        options.maxSelectNumber = limit;
+        if (command.filters && command.filters.length > 0) {
+          options.fileSuffixFilters = command.filters;
+        }
+        documentPicker
+          .select(options)
+          .then((uris: Array<string>): void => {
+            this.deliverPickedUris(pickId, uris ?? [], limit, "file");
+          })
+          .catch((): void => {
+            this.mod.nshPickImagesResult(this.sessionId, pickId, []);
+          });
+      } catch {
+        this.mod.nshPickImagesResult(this.sessionId, pickId, []);
+      }
+    }
+  }
+
+  private deliverPickedUris(
+    pickId: number,
+    uris: Array<string>,
+    limit: number,
+    prefix: string,
+  ): void {
+    const handles: fs.File[] = [];
+    const files: PickedDescriptor[] = [];
+    try {
+      for (let i = 0; i < uris.length && i < limit; i++) {
+        try {
+          const file = fs.openSync(uris[i], fs.OpenMode.READ_ONLY);
+          handles.push(file);
+          const name = decodeURIComponent(uris[i].split("/").pop() ?? `${prefix}_${i}`);
+          files.push({ fd: file.fd, name });
+        } catch (error) {
+          console.warn(`NSH picked ${prefix}: ${String(error)}`);
+        }
+      }
+      // Rust retains independent descriptors synchronously; bytes are read on its worker.
+      this.mod.nshPickImagesResult(this.sessionId, pickId, files);
+    } finally {
+      for (const file of handles) {
+        try {
+          fs.closeSync(file);
+        } catch {}
       }
     }
   }
