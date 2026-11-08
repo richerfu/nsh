@@ -28,9 +28,14 @@ pub(crate) struct Process;
 impl Process {
     /// The native operating system's name, as Rust's `std::env::consts::OS`
     /// and gpui-shell's say it: `"macos"`, `"windows"`, `"linux"`, `"ios"`,
-    /// `"android"` (not Node's `"darwin"` / `"win32"`).
+    /// `"android"`, with `"ohos"` for the OHOS target environment
+    /// (not Node's `"darwin"` / `"win32"`).
     #[allow(non_upper_case_globals)]
-    pub(crate) const platform: &'static str = std::env::consts::OS;
+    pub(crate) const platform: &'static str = if cfg!(target_env = "ohos") {
+        "ohos"
+    } else {
+        std::env::consts::OS
+    };
     /// The native CPU architecture's name, as Rust's
     /// `std::env::consts::ARCH` and gpui-shell's say it: `"aarch64"`,
     /// `"x86_64"` (not Node's `"arm64"` / `"x64"`).
@@ -544,10 +549,13 @@ mod native {
             cwd: Option<String>,
             timeout: Option<Duration>,
         ) -> Result<Self, JsError> {
-            if !cfg!(any(
-                target_os = "linux",
-                target_os = "macos",
-                target_os = "windows"
+            if !cfg!(all(
+                any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    target_os = "windows"
+                ),
+                not(target_env = "ohos")
             )) || !sys.os.is_desktop()
             {
                 return Err(super::unavailable());
@@ -1645,6 +1653,18 @@ mod native {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ohos_refuses_process_launch_before_capabilities_or_io() {
+        let sys = crate::element::System {
+            os: crate::platform::Os::Ohos,
+            ..Default::default()
+        };
+        let error = super::native::Launch::new(&sys, "sh".into(), Vec::new(), None, None)
+            .err()
+            .expect("OHOS subprocesses are unavailable");
+        assert_eq!(error.code(), Some(crate::element::codes::UNAVAILABLE));
+    }
+
     #[test]
     fn declarations_come_from_the_spec() {
         let registry = crate::runtime::registries()

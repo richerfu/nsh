@@ -17,9 +17,10 @@ impl Os {
 
     /// The native operating system's name, as Rust's `std::env::consts::OS`
     /// and gpui-shell's say it: `"macos"`, `"windows"`, `"linux"`, `"ios"`,
-    /// `"android"` (not Node's `"darwin"` / `"win32"`).
+    /// `"android"`, with `"ohos"` for the OHOS target environment
+    /// (not Node's `"darwin"` / `"win32"`).
     pub(crate) fn platform() -> String {
-        std::env::consts::OS.to_owned()
+        super::process::Process::platform.to_owned()
     }
 
     /// The native CPU architecture's name, as Rust's
@@ -62,7 +63,7 @@ mod tests {
 
     #[test]
     fn metadata_matches_native_values_without_surface_context() {
-        assert_eq!(Os::platform(), std::env::consts::OS);
+        assert_eq!(Os::platform(), super::super::process::Process::platform);
         assert_eq!(Os::arch(), std::env::consts::ARCH);
         assert_eq!(Os::EOL, if cfg!(windows) { "\r\n" } else { "\n" });
         if let Ok(home) = Os::homedir() {

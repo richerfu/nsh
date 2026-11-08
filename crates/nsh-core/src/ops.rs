@@ -2583,6 +2583,9 @@ pub enum NativeProp {
     /// `javaScriptEnabled` (web views): pages run scripts (default true).
     #[prop(js = "javaScriptEnabled", default = true, on = WEBVIEW)]
     JavaScriptEnabled(bool),
+    /// `sharedCookies` (OHOS web views): share ArkWeb cookies (default true).
+    #[prop(ohos = "sharedCookies", default = true, on = WEBVIEW)]
+    SharedCookies(bool),
     /// `allowsBackForwardNavigationGestures` (iOS web views; desktop ones on
     /// macOS, with two-finger trackpad swipes): swipe back and forward.
     #[prop(

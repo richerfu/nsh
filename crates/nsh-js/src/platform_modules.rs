@@ -462,8 +462,11 @@ pub(crate) const HOST_EXPORTS: &[Item] = &[(
 /// `TabBar`).
 pub(crate) const MOBILE_EXPORTS: &[Item] = &[(
     "isAvailable",
-    Export::Value(|cx| boolean(matches!(os(cx), Os::Ios | Os::Android))),
-    Ts::value("True on iOS (and Mac Catalyst) and Android.", "boolean"),
+    Export::Value(|cx| boolean(matches!(os(cx), Os::Ios | Os::Android | Os::Ohos))),
+    Ts::value(
+        "True on iOS (and Mac Catalyst), Android and OHOS.",
+        "boolean",
+    ),
 )];
 
 /// `nsh/ios`.
@@ -510,14 +513,18 @@ pub(crate) const WEBVIEW_EXPORTS: &[Item] = &[(
 /// `WebView`'s types.
 pub(crate) const WEBVIEW_TYPES: &str = r#"export type { WebViewNavigation };
 
-export interface WebViewProps extends Omit<ViewProps, "children" | "ios" | "desktop" | "ref">, WebViewHostProps {
+export interface WebViewProps extends Omit<ViewProps, "children" | "ios" | "ohos" | "desktop" | "ref">, WebViewHostProps {
   ref?: WebViewRef | ((node: WebViewRef) => void);
   ios?: IOSWebViewProps;
+  ohos?: OhosWebViewProps;
   desktop?: DesktopWebViewProps;
 }
 
 /** A web view's iOS-only props: every element's and its own. */
 export interface IOSWebViewProps extends IOSProps, IOSWebViewHostProps {}
+
+/** A web view's OHOS-only props: every element's and its own. */
+export interface OhosWebViewProps extends OhosProps, OhosWebViewHostProps {}
 
 /** A web view's desktop-only props: every element's and its own. */
 export interface DesktopWebViewProps extends DesktopProps, DesktopWebViewHostProps {}

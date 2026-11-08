@@ -21,7 +21,7 @@ sha2.workspace = true
 thiserror.workspace = true
 
 # Replacing the app happens on the desktop only.
-[target.'cfg(any(target_os = "linux", target_os = "macos", windows))'.dependencies]
+[target.'cfg(all(any(target_os = "linux", target_os = "macos", windows), not(target_env = "ohos")))'.dependencies]
 flate2.workspace = true
 tar.workspace = true
 zip.workspace = true

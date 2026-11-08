@@ -17050,11 +17050,17 @@ mod views {
 
     #[test]
     fn a_views_back_press_listener_hears_the_back_button() {
-        let mut c = core();
-        c.mount_root(&Root::new::<Catcher>(|| CatcherProps {}));
-        assert_eq!(texts(&c.commit().unwrap()), ["caught 0"]);
-        assert!(c.component_event(ROOT_ID, EventKind::BackPress, &EventPayload::None));
-        assert_eq!(texts(&c.commit().unwrap()), ["caught 1"]);
+        for os in [crate::platform::Os::Android, crate::platform::Os::Ohos] {
+            let mut c = core();
+            c.set_environment(crate::element::Environment {
+                os,
+                ..Default::default()
+            });
+            c.mount_root(&Root::new::<Catcher>(|| CatcherProps {}));
+            assert_eq!(texts(&c.commit().unwrap()), ["caught 0"]);
+            assert!(c.component_event(ROOT_ID, EventKind::BackPress, &EventPayload::None));
+            assert_eq!(texts(&c.commit().unwrap()), ["caught 1"]);
+        }
     }
 
     /// Its view panics as it is made.
@@ -29933,4 +29939,29 @@ fn only_greedy_lines_without_a_limit_share_measurements() {
     measure_text(&greedy, &mut cache, &mut cx, Some(100.0));
     measure_text(&greedy, &mut cache, &mut cx, Some(90.0));
     assert_eq!(greedy.measures.get(), 2);
+}
+
+#[test]
+fn ohos_tab_bar_mounts_the_native_component_with_its_props() {
+    use crate::{
+        element::{Environment, Root},
+        mobile::{TabBar, TabBarItem, TabBarProps},
+        platform::{Os, TAB_BAR_COMPONENT},
+    };
+    let mut c = core();
+    c.set_environment(Environment {
+        os: Os::Ohos,
+        ..Default::default()
+    });
+    c.mount_root(&Root::new::<TabBar>(|| TabBarProps {
+        items: vec![TabBarItem::new("Home"), TabBarItem::new("Settings")].into(),
+        selected_index: 1u32.into(),
+        hidden: false.into(),
+    }));
+    let batch = c.commit().unwrap();
+    assert!(batch.items.iter().any(|item| matches!(item,
+        MountItem::Component { name, .. } if &**name == TAB_BAR_COMPONENT)));
+    assert!(batch.items.iter().any(|item| matches!(item,
+        MountItem::ComponentProps { props, .. } if props.iter().any(|(name, value)|
+            &**name == "selectedIndex" && value == &Some(serde_json::json!(1))))));
 }

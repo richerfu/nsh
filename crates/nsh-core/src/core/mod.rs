@@ -8514,6 +8514,7 @@ fn apply_native(control: &mut NativeProps, prop: NativeProp) {
         (NativeProps::WebView(p), P::UserAgent(v)) => p.user_agent = v,
         (NativeProps::WebView(p), P::Scrollable(v)) => p.scrollable = v,
         (NativeProps::WebView(p), P::JavaScriptEnabled(v)) => p.javascript_enabled = v,
+        (NativeProps::WebView(p), P::SharedCookies(v)) => p.shared_cookies = v,
         (NativeProps::WebView(p), P::BackForwardGestures(v)) => p.back_forward_gestures = v,
         (NativeProps::Video(p), P::Source(v)) => {
             p.source = match v {

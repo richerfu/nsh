@@ -453,6 +453,17 @@ fn unhandled_back_presses_go_back_natively() {
     unhandled_back_presses_go_back_natively_on(start(BACK));
 }
 
+#[test]
+fn ohos_back_handler_receives_presses_and_falls_back_to_native_navigation() {
+    unhandled_back_presses_go_back_natively_on(start_in(
+        BACK,
+        Environment {
+            os: nsh_core::platform::Os::Ohos,
+            ..Default::default()
+        },
+    ));
+}
+
 fn unhandled_back_presses_go_back_natively_on((engine, rx): (Engine, Receiver<MountBatch>)) {
     until(&rx, |b| shows(b, "presses 0"));
     let backs = |batches: &[MountBatch]| {
@@ -5746,13 +5757,13 @@ fn is_tab_bar(item: &MountItem) -> bool {
         if &**name == nsh_core::platform::TAB_BAR_COMPONENT)
 }
 
-/// `nsh/mobile`'s `TabBar` is the system's component on iOS and Android,
+/// `nsh/mobile`'s `TabBar` is the system's component on iOS, Android and OHOS,
 /// given the tabs as the app wrote them.
 #[test]
-fn the_tab_bar_is_the_systems_component_on_ios_and_android() {
+fn the_tab_bar_is_the_systems_component_on_mobile_platforms() {
     use nsh_core::platform::Os;
 
-    for os in [Os::Ios, Os::Android] {
+    for os in [Os::Ios, Os::Android, Os::Ohos] {
         let (_engine, rx) = start_in(
             TAB_BAR,
             Environment {
@@ -5807,7 +5818,7 @@ fn the_tab_bar_takes_the_themes_primary_color() {
             .rfind(|(name, _)| &**name == "tint")
             .and_then(|(_, value)| value.clone())
     };
-    for os in [Os::Ios, Os::Android] {
+    for os in [Os::Ios, Os::Android, Os::Ohos] {
         let environment = Environment {
             os,
             ..Environment::default()
@@ -5839,7 +5850,7 @@ fn the_tab_bar_renders_nothing_on_the_desktops_and_the_web() {
             "mount(App);",
             "mount(() => <><App /><Text>{`Ready: ${isAvailable}`}</Text></>);",
         );
-    for (os, available) in [(Os::Ios, true), (Os::Android, true)] {
+    for (os, available) in [(Os::Ios, true), (Os::Android, true), (Os::Ohos, true)] {
         let (_engine, rx) = start_in(
             &app,
             Environment {

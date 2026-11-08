@@ -1469,6 +1469,13 @@ impl WebView {
         })
     }
 
+    /// Shares the browser cookie store on OHOS (default true).
+    pub fn shared_cookies(self, enabled: impl IntoReactive<bool>) -> Self {
+        self.bind_prop(enabled, |enabled: bool| {
+            Prop::Native(NativeProp::SharedCookies(enabled))
+        })
+    }
+
     /// Swipes go back and forward (iOS).
     pub fn back_forward_gestures(self, enabled: impl IntoReactive<bool>) -> Self {
         self.bind_prop(enabled, |enabled: bool| {

@@ -76,6 +76,8 @@ pub struct WebProps {
     pub scrollable: bool,
     /// The page may run JavaScript.
     pub javascript_enabled: bool,
+    /// Share the browser cookie store (OHOS); false uses a cleared private store.
+    pub shared_cookies: bool,
     /// Swipes go back and forward (iOS).
     pub back_forward_gestures: bool,
 }
@@ -91,6 +93,7 @@ impl Default for WebProps {
             user_agent: None,
             scrollable: true,
             javascript_enabled: true,
+            shared_cookies: true,
             back_forward_gestures: false,
         }
     }

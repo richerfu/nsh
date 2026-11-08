@@ -18,7 +18,10 @@ use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", windows),
+    not(target_env = "ohos")
+))]
 pub mod install;
 
 /// The name of the manifest, next to the release's assets.
@@ -234,8 +237,11 @@ pub struct Available {
 }
 
 /// This machine's key in [`Manifest::platforms`]: `<os>-<arch>` on the
-/// desktop; `android` or `ios`, which update through a store or a page.
+/// desktop; `android`, `ios` or `ohos`, which update through their host or store.
 pub fn platform() -> String {
+    if cfg!(target_env = "ohos") {
+        return "ohos".to_owned();
+    }
     let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
     match os {
         "android" | "ios" => os.to_owned(),
@@ -396,6 +402,21 @@ mod tests {
             "platforms": { "linux-x86_64": { "url": url, "sha256": "ab", "size": 2 } },
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn ohos_checks_offer_host_managed_updates() {
+        let manifest = br#"{"id":"com.example.app","version":"2.0.0","platforms":{"ohos":{"url":"https://example.com/update"}}}"#;
+        let update = config().check(manifest, None, "ohos").unwrap().unwrap();
+        assert_eq!(update.version, "2.0.0");
+        assert_eq!(update.url, "https://example.com/update");
+        assert!(update.sha256.is_none());
+        assert!(
+            config()
+                .check(manifest, None, "linux-aarch64")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

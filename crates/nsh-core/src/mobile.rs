@@ -1,6 +1,6 @@
-//! Capabilities specific to iOS and Android (TS
+//! Capabilities specific to iOS, Android and OHOS (TS
 //! `nsh/mobile`): the system's tab bar ([`TabBar`]), a native component the
-//! two backends register themselves ([`TAB_BAR_COMPONENT`]). Elsewhere a
+//! mobile backends register themselves ([`TAB_BAR_COMPONENT`]). Elsewhere a
 //! component takes no room and shows nothing. Common controls belong to
 //! `nsh/base`; this module exposes mobile-specific semantics rather than
 //! a parallel set of system-styled controls.
@@ -70,7 +70,7 @@ pub enum TabBarEvent {
 }
 
 /// The system's tab bar: `UITabBar` on iOS (Liquid Glass on iOS 26), a
-/// Material 3 navigation bar on Android, each in the system's look. The app
+/// Material 3 navigation bar on Android and an ArkUI tab bar on OHOS. The app
 /// gives the tabs (`items`), says which is selected (`selectedIndex`), hears
 /// the user's choice (`onChange`), places the bar with its `class` and
 /// `style` and shows the selected tab's content; the bar's height is the
@@ -80,7 +80,7 @@ pub enum TabBarEvent {
 /// nothing, and the app shows its tabs with `nsh/base`'s `Tabs`.
 #[component]
 pub fn TabBar(props: TabBarProps, cx: Scope<TabBarEvent>) -> impl IntoElement {
-    if !matches!(os(), Os::Ios | Os::Android) {
+    if !matches!(os(), Os::Ios | Os::Android | Os::Ohos) {
         return view().hidden().into_element();
     }
     let items = props.items;

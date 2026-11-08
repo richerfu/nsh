@@ -10,6 +10,7 @@ on:
   push:
     branches: [main]
     paths:
+      - "crates/nsh-base/**"
       - "crates/nsh-bundler/**"
       - "crates/nsh-core/**"
       - "crates/nsh-dev/**"
@@ -17,9 +18,9 @@ on:
       - "crates/nsh-js/**"
       - "crates/nsh-macros/**"
       - "crates/nsh-package/**"
-      - "crates/nsh-updater/**"
+      - "crates/nsh-platform-ohos/**"
       - "crates/nsh-testing/**"
-      - "crates/nsh-base/**"
+      - "crates/nsh-updater/**"
       - "examples/counter/**"
       - "examples/gallery/**"
       - "examples/bench/**"
@@ -31,6 +32,7 @@ on:
       - ".github/workflows/core.yml"
   pull_request:
     paths:
+      - "crates/nsh-base/**"
       - "crates/nsh-bundler/**"
       - "crates/nsh-core/**"
       - "crates/nsh-dev/**"
@@ -38,9 +40,9 @@ on:
       - "crates/nsh-js/**"
       - "crates/nsh-macros/**"
       - "crates/nsh-package/**"
-      - "crates/nsh-updater/**"
+      - "crates/nsh-platform-ohos/**"
       - "crates/nsh-testing/**"
-      - "crates/nsh-base/**"
+      - "crates/nsh-updater/**"
       - "examples/counter/**"
       - "examples/gallery/**"
       - "examples/bench/**"
@@ -72,7 +74,7 @@ env:
   # whole pipeline), so its tests all run.
   PACKAGES: >-
     -p nsh-core -p nsh-macros -p nsh-js -p nsh-base -p nsh-engine
-    -p nsh-bundler -p nsh-package -p nsh-testing
+    -p nsh-bundler -p nsh-package -p nsh-testing -p nsh-platform-ohos
     --features nsh-bundler/bundle,nsh-testing/bundle,nsh-testing/agent
 
 jobs:

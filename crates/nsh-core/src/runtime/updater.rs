@@ -50,11 +50,11 @@ pub(crate) struct AppUpdate {
     /// What changed, as the manifest says it.
     pub(crate) notes: Option<String>,
     /// Where the user can get it by hand: the archive, or a store's page on
-    /// iOS and Android. For `openUrl` when `canInstall` is false.
+    /// iOS, Android and OHOS. For `openUrl` when `canInstall` is false.
     pub(crate) url: String,
     /// Whether `downloadUpdate` and `installAndRestart` work here: a package
-    /// on the desktop, installed where the user can write. False on iOS and
-    /// Android, and under a directory only the system writes.
+    /// on the desktop, installed where the user can write. False on iOS,
+    /// Android and OHOS, and under a directory only the system writes.
     pub(crate) can_install: bool,
 }
 
@@ -138,7 +138,10 @@ mod native {
         available: Available,
         dir: PathBuf,
         archive: RefCell<Option<PathBuf>>,
-        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        #[cfg(all(
+            any(target_os = "linux", target_os = "macos", windows),
+            not(target_env = "ohos")
+        ))]
         installation: nsh_updater::install::Installation,
     }
 
@@ -162,7 +165,10 @@ mod native {
                 return Ok(None);
             };
             let config = Config::parse(&bytes).map_err(|e| e.to_string())?;
-            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+            #[cfg(all(
+                any(target_os = "linux", target_os = "macos", windows),
+                not(target_env = "ohos")
+            ))]
             if let Some(installation) =
                 nsh_updater::install::Installation::current(&config.id, &bytes)
             {
@@ -183,14 +189,18 @@ mod native {
         let Some((bytes, config, available)) = checked else {
             return Ok(None);
         };
-        let mut update = AppUpdate {
+        let update = AppUpdate {
             version: available.version.clone(),
             notes: available.notes.clone(),
             url: available.url.clone(),
             can_install: false,
         };
-        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-        {
+        #[cfg(all(
+            any(target_os = "linux", target_os = "macos", windows),
+            not(target_env = "ohos")
+        ))]
+        let update = {
+            let mut update = update;
             let id = config.id.clone();
             let installation = blocking(move || {
                 Ok(nsh_updater::install::Installation::current(&id, &bytes)
@@ -211,8 +221,12 @@ mod native {
                     installation,
                 }));
             }
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+            update
+        };
+        #[cfg(not(all(
+            any(target_os = "linux", target_os = "macos", windows),
+            not(target_env = "ohos")
+        )))]
         let _ = (bytes, config, host, &found);
         Ok(Some(update))
     }
@@ -305,8 +319,20 @@ mod native {
         Ok(())
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     pub(super) async fn install(sys: System) -> Result<(), JsError> {
+        if cfg!(target_env = "ohos") || sys.os == crate::platform::Os::Ohos {
+            return Err(JsError::Error(
+                "self-update installation is not supported on OHOS; update the embedded bundle or HAP through the host app".into(),
+            ).with_code(codes::UNAVAILABLE));
+        }
+        install_supported(sys).await
+    }
+
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        not(target_env = "ohos")
+    ))]
+    async fn install_supported(sys: System) -> Result<(), JsError> {
         let found = sys.locals.get::<Found>();
         let _operation = begin(&found)?;
         let pending = pending(&sys)?;
@@ -327,13 +353,34 @@ mod native {
         std::process::exit(0);
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    pub(super) async fn install(_: System) -> Result<(), JsError> {
+    #[cfg(not(all(
+        any(target_os = "linux", target_os = "macos", windows),
+        not(target_env = "ohos")
+    )))]
+    async fn install_supported(_: System) -> Result<(), JsError> {
         Err(unavailable())
     }
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn ohos_install_reports_host_managed_updates_before_pending_state() {
+            let sys = System {
+                os: crate::platform::Os::Ohos,
+                ..Default::default()
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let error = runtime.block_on(install(sys)).unwrap_err();
+            assert_eq!(error.code(), Some(codes::UNAVAILABLE));
+            assert!(
+                error
+                    .message()
+                    .contains("update the embedded bundle or HAP through the host app")
+            );
+        }
 
         #[test]
         fn operations_are_serial_and_release_on_error_or_cancellation() {

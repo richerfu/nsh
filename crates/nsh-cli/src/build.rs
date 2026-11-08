@@ -333,11 +333,14 @@ pub(crate) fn build(entry: &Path, out: &Path, release: bool, split: bool) -> any
         let path = out.join(name);
         fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
     }
-    // The app's id, which names where it keeps its data (`Bundle::read`).
+    // Identity and the static chunks required before evaluating either entry format.
     let app = out.join("app.json");
     let id = crate::package::app_id(entry)?;
-    fs::write(&app, serde_json::json!({ "id": id }).to_string())
-        .with_context(|| format!("write {}", app.display()))?;
+    let mut manifest = serde_json::json!({ "id": id });
+    if !built.entry_imports.is_empty() {
+        manifest["entryChunks"] = serde_json::json!(built.entry_imports);
+    }
+    fs::write(&app, manifest.to_string()).with_context(|| format!("write {}", app.display()))?;
     let declared = out.join("capabilities.json");
     match built.capabilities_json() {
         Some(json) => {
@@ -381,6 +384,57 @@ pub(crate) fn build(entry: &Path, out: &Path, release: bool, split: bool) -> any
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn split_build_records_static_chunks_for_both_entry_formats() {
+        let dir = std::env::temp_dir().join(format!(
+            "nsh-build-chunks-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, code) in [
+            (
+                "App.ts",
+                "import { a } from './a'; import { b } from './b'; export const values = [a, b]; export const open = () => Promise.all([import('./ScreenA'), import('./ScreenB')]);",
+            ),
+            ("a.ts", "export const a = { value: 1 };"),
+            ("b.ts", "export const b = { value: 2 };"),
+            (
+                "ScreenA.ts",
+                "import { a } from './a'; export const show = () => a;",
+            ),
+            (
+                "ScreenB.ts",
+                "import { b } from './b'; export const show = () => b;",
+            ),
+        ] {
+            std::fs::write(dir.join(name), code).unwrap();
+        }
+        let out = dir.join("out");
+        super::build(&dir.join("App.ts"), &out, true, true).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("app.json")).unwrap()).unwrap();
+        let mut chunks: Vec<String> =
+            serde_json::from_value(manifest["entryChunks"].clone()).unwrap();
+        chunks.sort();
+        assert_eq!(chunks, ["a.js", "b.js"]);
+        for name in &chunks {
+            assert!(out.join(name).is_file());
+            assert!(out.join(name.replace(".js", ".nshc")).is_file());
+        }
+        assert!(out.join("bundle.js").is_file());
+        assert!(out.join("bundle.nshc").is_file());
+        // An unsplit rebuild clears the old declaration rather than retaining stale imports.
+        super::build(&dir.join("App.ts"), &out, true, false).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("app.json")).unwrap()).unwrap();
+        assert!(manifest.get("entryChunks").is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn hosts_must_serve_the_ui_sets_an_app_imports() {
