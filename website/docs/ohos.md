@@ -18,7 +18,7 @@ NSH apps run on OHOS with ArkUI custom nodes and native typography, from API 20,
 
 An existing OHOS app can show NSH apps inside its own UI. The runtime ships as a native shared library (`libnsh_platform_ohos.so`) and its companion ArkTS package (`@nsh/ohos`): create an `NshSurface`, place `surface.content` in a standard `ContentSlot`, and load a TSX bundle or a signed package into it. NSH apps render with native ArkUI nodes alongside your own components.
 
-Every `NshSurface` is an engine of its own with its own JS VM and `NodeContent`; there are no global singletons, so you can run several at once.
+Every `NshSurface` owns its engine, JS VM and `NodeContent`, so you can run several at once. Window services and bounded resource pools coordinate shared system resources.
 
 <div class="diagram-scroll">
 <img class="diagram diagram-light" src="/diagrams/host-app-light.svg" alt="A host app with two nsh views: each is an isolated engine with its own thread, VM, limits and capabilities; the host grants capabilities, sets limits and registers native components like a map.">
@@ -34,7 +34,7 @@ cargo xtask ohos --release          # release: bundles and signed packages
 cargo xtask ohos --release --dev    # also connects to a `nsh dev` server
 ```
 
-This writes `arm64-v8a/libnsh_platform_ohos.so` and generated TypeScript declarations `index.d.ts` to `target/ohos/release/` (or `target/ohos/release-dev/`), and stages the companion `@nsh/ohos` package under `target/ohos/arkts-deps/nsh/`. Optional Cargo features `--features api-23` and `--features api-26` enable higher-API accessibility providers and reduced-motion observation when targeting API 23 or API 26+.
+This writes `arm64-v8a/libnsh_platform_ohos.so` and generated TypeScript declarations `index.d.ts` to `target/ohos/release/` (or `target/ohos/release-dev/`), and stages the companion `@nsh/ohos` package under `target/ohos/<profile>/arkts-deps/nsh/`. Optional Cargo features `--features api-23` and `--features api-26` enable higher-API accessibility providers and reduced-motion observation when targeting API 23 or API 26+.
 
 Place `libnsh_platform_ohos.so` and `libc++_shared.so` (from `$OHOS_NDK_HOME/native/llvm/lib/aarch64-linux-ohos/`) in `entry/libs/arm64-v8a/`, copy `index.d.ts` to `entry/src/main/cpp/types/libnsh_platform_ohos/Index.d.ts`, and reference both packages in `entry/oh-package.json5`:
 
@@ -53,6 +53,10 @@ The SDK includes `Editor`, `DiffView`, rich editing, charts, syntax highlighting
 draws a fill through an XComponent. Shader effects process native content textures on the GPU and present through
 XComponent surfaces; content, screen, page and dialog transitions use shader-driven progress. The native controls keep their input while an effect is shown. Screen
 effects apply to the embedded root, and dialogs use their own `transitionShader` on their native surface.
+
+Shader overflow extends the capture and output around the view's logical box. Large targets render at a
+proportionally lower resolution. Effects can sample the composed backdrop and run with CSS masks and filters;
+navigation retains its outgoing picture on the compositor worker.
 
 Build the TSX app into the module's `rawfile` resources:
 
@@ -131,7 +135,7 @@ The slot's size is the app's window: NSH lays the app out at the slot's size and
 | `setComponentSize(handle: number, width: number, height: number)` | Report a mounted native component's natural size in `vp`. |
 | `setParams(params?: object \| null)` | Launch parameters (`Record<string, Object>`) for the next app loaded: the app reads them as `host.params` at startup ([`nsh/host`](../modules/nsh-host.md)). |
 | `send(name: string, data?: object \| string \| number \| boolean \| null)` | Send an event to the app (`host.on(name, …)`); kept until the app listens, or for the next app when none is running. |
-| `handle(name: string, handler?: ((data: Object \| null, reply: NshHostReply) => void) \| null)` | Handle the app's calls (`host.call`) and posts (`host.post`) for `name` on the UI thread; `null` (or `removeHandler(name)`) removes the handler. Answer once via `reply.resolve(value)` or `reply.reject(message)`. |
+| `handle(name: string, handler?: ((data: object \| string \| number \| boolean \| null, reply: NshHostReply) => void) \| null)` | Handle the app's calls (`host.call`) and posts (`host.post`) for `name` on the UI thread; `null` (or `removeHandler(name)`) removes the handler. Answer once via `reply.resolve(value)` or `reply.reject(message)`. |
 | `setOpenUrlHandler(handler?: ((url: string) => boolean) \| null)` | Intercept URLs the app opens; return `true` if handled by the host, or `false` to let the system open it. |
 | `connectDevServer(url: string)` | Development: load from a `nsh dev` server and reload on every change (requires the `--dev` SDK). |
 | `disconnectDevServer()` | Disconnect from the dev server while keeping the current app running. |
@@ -139,6 +143,14 @@ The slot's size is the app's window: NSH lays the app out at the slot's size and
 | `onBackPress(): boolean` | Route a page `onBackPress()` event to this surface's window session; returns `true` when consumed by the app. |
 | `stop()` | Stop the running app and cancel pending loads while keeping the surface, its options and registered components for later loads. |
 | `dispose()` | Permanently stop the app and release the surface's native resources. |
+| `setStorageDirectory(path?: string \| null)` | Set an absolute storage directory for subsequent loads; omitted or `null` uses the host default. |
+| `setCacheOptions(options?: NshCacheOptions \| null)` | Set disk caching for subsequent loads; omitted or `null` restores host defaults. |
+| `unregisterComponent(name: string)` | Remove a factory for future mounts; mounted components retain their owner. |
+| `removeHandler(name: string)` | Remove a handler registered with `handle`. |
+| `readonly isRunning: boolean` | Whether the current module's engine is running. |
+| `readonly isDisposed: boolean` | Whether the surface has been permanently released. |
+| `readonly isLoading: boolean` | Whether source is being read or awaiting an attached, positive-size slot; evaluation starts asynchronously afterward. |
+| `readonly lastError: string` | The latest load, engine or native mount error; cleared by a newly accepted source. |
 
 ## Talking to the app
 
@@ -215,6 +227,32 @@ const surface = new NshSurface(this.getUIContext(), {
 
 The defaults are: 256 MiB heap, 4 MiB stack, 10 s to load, 2 s per call, 200,000 nodes. See [Sandbox & Capabilities](./sandbox-and-capabilities.md) for what happens when each limit is reached.
 
+## `NshOptions`
+
+Every field is optional.
+
+| Field | Default and purpose |
+|---|---|
+| `assetDirectory?: string` | Directory containing the build's `assets/`; defaults to host rawfiles. |
+| `storageDirectory?: string` | Absolute storage directory for subsequent loads; defaults to the host's `filesDir`. |
+| `cacheOptions?: NshCacheOptions` | Disk caching under host `cacheDir`, with a 256 MiB image cache per app by default. |
+| `managesStatusBar?: boolean` | `true`; explicit status-bar settings or fullscreen video take control of window bars. Passive embedded surfaces preserve the host's settings. |
+| `environment?: NshEnvironment` | Initial system-environment overrides. |
+| `capabilities?: string` | Host grant using the `nsh.json` capabilities JSON format. |
+| `memoryBytes?: number` | 256 MiB; at least 1 MiB. |
+| `stackBytes?: number` | 4 MiB; from 64 KiB through 4 MiB. |
+| `maxNodes?: number` | 200,000; at least one. |
+| `maxOpValues?: number` | 8,000,000 queued operation values; at least one. |
+| `maxCanvasOps?: number` | 1,000,000 operations per canvas drawing; at least one. |
+| `loadBudgetMs?: number` | 10,000 ms; at least one. |
+| `callBudgetMs?: number` | 2,000 ms; at least one. |
+
+`NshCacheOptions` has `directory?: string` (absolute), `disabled?: boolean` (default `false`) and
+`imagesMaxMegabytes?: number` (`0` disables image caching). Set either `disabled: true` or `directory`.
+`NshEnvironment` has `pixelRatio`, `fontScale`, `colorScheme`, `locale`, `rtl`, `reduceMotion`,
+`screenReader`, `idiom`, `lifecycle`, `apiLevel`, `safeTop`, `safeRight`, `safeBottom`, `safeLeft`,
+`keyboardHeight` and `keyboardDuration`; lengths are vp and durations are ms.
+
 ## Capabilities
 
 Pass the host's capability grant in `NshOptions.capabilities` (a JSON string in the same format as `capabilities` in `nsh.json`):
@@ -237,7 +275,7 @@ A request must be allowed by both the app's `nsh.json` (shipped next to the bund
 Verify a downloaded package off the UI thread with `NshTrust`, then run it on the surface:
 
 ```ts
-import { NshTrust } from 'libnsh_platform_ohos.so';
+import { NshTrust } from '@nsh/ohos';
 
 const trust = await NshTrust.open(`${context.filesDir}/nsh-trust`, [rootPublicKey]);
 const pkg = await trust.openPackage(downloadedFilePath);
@@ -246,14 +284,34 @@ surface.runPackage(pkg);
 
 | API | Description |
 |---|---|
-| `NshTrust.open(stateDirectory: string, rootPublicKeys?: string[]): Promise<NshTrust>` | Open or create a trust store. Its state (latest revocation list, highest accepted build per app) persists in that directory, and package assets are extracted under it. |
-| `addRoot(publicKeyBase64: string): void` | Trust a root public key (base64, the contents of a `.pub` file from `nsh keygen`). |
+| `NshTrust.open(stateDirectory: string, rootPublicKeys: string[]): Promise<NshTrust>` | Open or create a trust store. Its state (latest revocation list, highest accepted build per app) persists in that directory, and package assets are extracted under it. |
+| `addRoot(publicKeyBase64: string): Promise<void>` | Trust a root public key (base64, the contents of a `.pub` file from `nsh keygen`). |
 | `updateRevocations(revocationsJson: string): Promise<string>` | Apply a signed revocation list from `nsh revoke` (must be signed by a trusted root and newer than the store's current list). |
 | `openPackage(packagePath: string): Promise<NshPackage>` | Verify the package on a worker thread, extract its assets and accept it (older builds of that app are refused from then on). |
-| `openResource(name: string): Promise<NshPackage>` | Verify and open a signed `.nsh` package bundled in `resources/rawfile/`. |
-| `NshPackage` | `info` (`id`, `name`, `version`, `build`), `isConsumed`. |
+| `openResource(name: string, uiContext?: UIContext): Promise<NshPackage>` | Verify and open a signed `.nshpkg` package bundled in `resources/rawfile/`. |
+| `NshPackage` | `info` (`id`, `name`, `version`, and decimal-string `build`), `isConsumed`. |
 
 See [Signed Packages](./signed-packages.md) for how keys, certificates and revocations work.
+
+`openResource` uses the sole active NSH window session when `uiContext` is omitted. Pass a `UIContext`
+before creating a surface, or when several windows are active.
+
+## Module exports
+
+Import host APIs from `@nsh/ohos`.
+
+| Export | Purpose |
+|---|---|
+| `getCapabilities(): NshCapabilities` | Read the actual runtime API level and compiled enhancements. |
+| `NshCapabilities` | `apiLevel`, `minimumApiLevel`, `compiledApi23`, `compiledApi26`, `api23`, `api26`. |
+| `initLogging(): void` | Route Rust logs to HiLog. |
+| `onBackPressIntercept(uiContext: UIContext): boolean` | Route back to the specified window session; return whether it was consumed. |
+| `onNotificationWant(want: Want): void` | Forward notification presses from Ability `onCreate` and `onNewWant`, including cold starts. |
+| `NshHostReply` | `resolve(value)`, `reject(message)` and `isPost` for host-channel replies. |
+| `NshNativeProperty` | `name`, `value` and `removed` in native-component property batches. |
+
+The package also exports `NshSurface`, `NshTrust`, `NshPackage`, `NshPackageInfo`, `NshOptions`,
+`NshEnvironment` and `NshCacheOptions`.
 
 ## Development
 
@@ -273,10 +331,19 @@ Otherwise use the LAN address `nsh dev` prints.
 
 ## Ability setup
 
-- **Standard `UIAbility`.** `@nsh/ohos` attaches automatically to the active `UIContext`, `UIAbilityContext` and window lifecycle when a surface is created—your `EntryAbility` stays a standard `UIAbility` (`extends UIAbility`) with no custom base class required. If the app uses `<WebView>` or native components, include `nativeShellPlugins()` from `@nsh/ohos` at the root of the page.
+- **Standard `UIAbility`.** `@nsh/ohos` attaches automatically to the active `UIContext`, `UIAbilityContext` and window lifecycle when a surface is created—your `EntryAbility` stays a standard `UIAbility` (`extends UIAbility`) with no custom base class required. The package attaches its WebView, input, accessibility and native-component fragments to each surface automatically.
 - **Back button.** System back targets the active `NshSurface` (dialogs and modals first, then `BackHandler` listeners, then navigation stacks) before falling back to the Ability. When showing multiple surfaces (for example in tabs), call `surface.activate()` on the active surface.
 - **Keyboard and safe area.** `@nsh/ohos` observes system bar, cutout and keyboard avoid areas automatically and reports only the portion overlapping each `NshSurface`. `Input` uses the system `TextInput` / `TextArea` and scrolls the focused field clear of the keyboard.
 - **Lifecycle.** Detaching a `ContentSlot` keeps the surface and its running VM alive; re-mounting it reattaches the native tree. Call `surface.stop()` to clear the running app while keeping the surface, or `surface.dispose()` when the page or component permanently disappears.
+
+Native inputs report text paste, selection, caret bounds and IME composition. Read-only inputs
+support focus, selection and copy. Multiline input refs scroll through a native scroll controller.
+Input-method autocorrection follows the system keyboard's settings.
+
+Window resizing refreshes open dialogs. Hosts can update `pixelRatio` through `setEnvironment`;
+configuration changes refresh native geometry and text density. Rust embedders register additional
+UI sets before loading modules with `nsh_platform_ohos::set_ui_sets(Vec<Registry>)`. Native component
+names beginning with `Nsh` belong to the SDK; host factories use their own prefix.
 
 ## See also
 
@@ -286,3 +353,41 @@ Otherwise use the LAN address `nsh dev` prints.
 - [Native Components](./native-components.md)
 - [Signed Packages](./signed-packages.md)
 - [Sandbox & Capabilities](./sandbox-and-capabilities.md)
+
+## Bundle delivery and host policy
+
+`nsh build --split` writes `app.json` with `entryChunks`, the static dependencies to preload for
+`bundle.js` and `bundle.nshc`. Copy the chunk files and companions beside the entry in rawfile.
+Single-file entries can omit `app.json`; older source entries discover their static imports.
+Preloading accepts up to 1024 chunks and 64 MiB total, including the entry, companions and source maps.
+`capabilities.json` sets the app's declaration even when `NshOptions.capabilities` supplies a host grant;
+each operation must satisfy both.
+
+`NshTrust.openPackage` and `openResource` accept packages up to 256 MiB. A synchronous `runPackage`
+preflight or acceptance failure leaves the verified package available for retry. Acceptance consumes
+it once, including when the surface stages the app until layout.
+
+On OHOS, `nsh/mobile.isAvailable` is `true`, `TabBar` uses ArkUI, and `BackHandler` receives system back
+presses. `process.platform` and `os.platform()` return `"ohos"`. Process launch reports
+`ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`. The embedding host manages bundle and HAP updates;
+`installAndRestart` reports that host responsibility through the same error code.
+
+## System UI and media
+
+Navigation, dialogs and page backgrounds use the app's semantic theme tokens. The back control has a vector
+chevron and a button accessibility role; the title occupies the space between measured side controls.
+Dialog action labels come from the app and text measurement follows the system font scale.
+Explicit status-bar settings and fullscreen video manage system bars by default; `managesStatusBar: false`
+keeps their ownership with the embedding host.
+
+`<WebView ohos={{ sharedCookies: false }}>` uses ArkWeb's private cookie store, cleared before its first
+navigation; cookies are shared by default. HTML file uploads open the system photo or document picker,
+following single or multiple selection. Picked images are read on a worker. Images and core SVG loads use
+system proxy policy and the shared cache budget. Each surface admits up to 32 concurrent fetch requests;
+open response streams use independent reader threads.
+
+API 20 exposes selected and checked states through ArkTS wrappers. `api-23` enables native accessibility
+providers, state descriptions, reduced-motion observation and animated images' per-frame durations;
+API 20 spreads their total duration evenly across frames. `api-26` adds named custom accessibility actions.
+Popup controls can describe their purpose with an app-supplied `activate` action label. Video audio follows
+the embedding host's audio policy. The host owns Ability exit; `BackHandler.exitApp()` records the request in logs.

@@ -106,3 +106,10 @@ has already started.
 
 The `Config`, `Manifest`, `Asset` and `Available` records are non-exhaustive.
 Construct them with `Default::default()` and assign the fields you need.
+
+## OHOS host-managed updates
+
+The shared updater checks manifests under the `ohos` key. The embedding host supplies update configuration
+and transport, and manages delivery of a new bundle or HAP. The default OHOS embedding SDK's
+`checkForUpdate` resolves `null`. `installAndRestart` rejects with `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`
+and directs the app to its host's update flow.

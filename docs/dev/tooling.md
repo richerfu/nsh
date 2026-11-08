@@ -226,8 +226,10 @@ to that file. `C-h e` opens its log/error panel; closing it gives every row back
 ## `nsh build --split`
 
 Writes a split bundle (`native-pipeline.md`, "Split bundles"): `bundle.js` / `.map` / `.nshc` and, per chunk,
-`<id>`, `<id>.map` and `<stem>.nshc` (`build::compile_split`, `Built::chunks`). Without `--split` (and for `nsh
-package`, `publish`, the dev server) the bundle holds the whole app.
+`<id>`, `<id>.map` and `<stem>.nshc` (`build::compile_split`, `Built::chunks`). `app.json` carries the app's
+`id` and, when nonempty, `entryChunks`: the entry's transitive static chunk ids. Hosts preload these before
+linking either the source or bytecode entry. Without `--split` (and for `nsh package`, `publish`, the dev server)
+the bundle holds the whole app.
 
 Hosts serve a chunk the bundle does not hold through `MountSink::load_chunk` (`AppOptions::chunks` on macOS):
 `nsh-macos-host --bundle <path>` reads it from the bundle's directory, the packaged macOS runner from

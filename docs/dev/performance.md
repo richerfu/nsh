@@ -27,6 +27,26 @@ startup, 56 / 60 / 78 on push, 1 / 2 / 78 on pop and 18 / 15 / 60 on retirement.
 13.56 → 8.50 ms, 1.99 → 0.43 ms, 173 → 33 µs and 259 → 120 µs respectively. Those noisy headless samples
 establish unchanged engine work; the native timing above measures the rendering change.
 
+OHOS Batch 5 scene acceptance (ALN-AL00, API 26, 2026-11-06–07): texture notifications now
+coalesce into one CPU scene composition on VSync. In instrumented device runs, the interval from the
+fixture's Push event to starting its navigation shader changed from 2.600 s to 0.760 s. These are single
+observations of command latency under a scene, not presentation-rate measurements; the earlier 120 fps
+result above applies to its separate direct-GLES fixture. Evidence: `.nsh/batch5/runtime.log` at
+22:34:25.782/28.382 and 22:38:26.658/27.418.
+
+The acceptance fixture's headless traces are `.nsh/batch5/trace-before.log` and `trace-after.log`.
+Initial commits were 212 ops / 210 items / 64 nodes in 38.711 ms and 222 / 219 / 67 in 40.663 ms;
+push commits were 235 / 227 / 65 in 12.888 ms and 249 / 240 / 68 in 7.682 ms. The fixture grew
+between those runs, so these establish successful engine execution rather than a controlled speedup.
+The native scene work and SDK teardown do not execute in that headless backend.
+
+The same device's 20-load stress exposed retained NodeContainer edges in exported ArkTS builders.
+Clearing their controllers before builder disposal removed the observed graphics-buffer accumulation:
+Graph memory was 136,016 KiB initially and 113,660 KiB at loads 5, 10 and 20; the previous run reached
+3,472,840 KiB. GL memory was 162,598 → 168,238 KiB over the final run. Total PSS was 605,766 →
+731,746 KiB, so this does not establish return to a cold process baseline. Raw `hidumper --mem`
+samples and callbacks: `.nsh/batch5/reload-final-memory-*.txt`, `reload-final.log`.
+
 Live resize of a real app (Noop, 10 065 nodes, a horizontal corner drag of 6 s, release, `--target macos` package, no
 sampler): window sizes per second 12 → 62-65, gap between sizes p50 86 → 16 ms and p95 about 25 ms, the window's lag
 behind the pointer p50 20 → 3-4 pt. An empty page and TextEdit both do about 87 sizes per second on this machine. Text

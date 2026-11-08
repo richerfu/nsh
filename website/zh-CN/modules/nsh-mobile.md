@@ -6,7 +6,9 @@ order: 12.2
 
 # nsh/mobile
 
-`nsh/mobile` 收录 iOS 和 Android 的专属能力：两者都有的系统标签栏 `TabBar`；iOS 的 [`InputAccessoryView`](#inputaccessoryview)，键盘上方的工具栏；Android 的 [`BackHandler`](#backhandler)，返回键。Rust 代码使用 `nsh_core::mobile` 和 `nsh_core::prelude`；TSX 导入 `nsh/mobile`。这个模块在所有平台上都可以导入，所以同一个 bundle 能在各处运行：在其他平台上，它的组件不占空间、调用立即返回，`isAvailable` 告诉你当前是否在 iOS 或 Android 上（`nsh` 的 `platform.os` 区分具体平台）。桌面的能力在 [nsh/desktop](./nsh-desktop.md) 中。
+`nsh/mobile` serves iOS, Android and OHOS: `TabBar` on all three, `InputAccessoryView` on iOS,
+and `BackHandler` on Android and OHOS. Rust uses `nsh_core::mobile` and `nsh_core::prelude`; TSX
+imports `nsh/mobile`. `isAvailable` identifies these mobile platforms, and `platform.os` identifies the OS.
 
 ```rust tabs
 use nsh_core::mobile::{TabBarItem, tab_bar};
@@ -23,11 +25,15 @@ import type { TabBarItem, TabBarProps } from "nsh/mobile";
 
 ## isAvailable
 
+On OHOS, `isAvailable` is `true`; `TabBar` mounts the native ArkUI tab bar, and `BackHandler.on("press", ...)`
+receives system back presses. The host owns Ability termination and bundle delivery.
+
 ```ts
 const isAvailable: boolean;
 ```
 
-在 iOS、iOS 模拟器、Mac Catalyst 和 Android 上为 `true`，其他平台为 `false`。Rust：`matches!(os(), Os::Ios | Os::Android)`。
+`true` on iOS, the iOS simulator, Mac Catalyst, Android and OHOS. Rust:
+`matches!(os(), Os::Ios | Os::Android | Os::Ohos)`.
 
 ## TabBar
 
@@ -211,7 +217,7 @@ function Note() {
 
 ## BackHandler
 
-在 Android 上可用；在 iOS 上，它的监听器会被保留但不会被调用，`exitApp()` 立即返回。
+System back presses reach listeners on Android and OHOS. The OHOS embedding host owns Ability termination.
 
 ```ts
 const BackHandler: {

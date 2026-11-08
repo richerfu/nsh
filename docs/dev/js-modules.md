@@ -54,7 +54,8 @@ the chunks of a split bundle (`Screen.js`: a name that is no native module, with
 `native-pipeline.md`), which `import()` loads through the global `__nsh_import`.
 
 - **Platform modules** (`nsh/mobile`, `nsh/desktop`) are importable on every platform (one bundle runs everywhere);
-  where an API does not apply its calls do nothing and its components render nothing. Their `isAvailable` and
+  `nsh/mobile` is available on iOS, Android and OHOS. Where an API does not apply its calls do nothing and its
+  components render nothing. Their `isAvailable` and
   `nsh`'s `platform.os` tell which. `nsh/desktop`'s `isAvailable` (`Os::is_desktop`: macOS, Windows, Linux) says
   its window and menu APIs work; it is narrower than desktop behavior, `platform.desktop` (`Environment::desktop()`,
   which browsers in the desktop idiom and terminals have too: "One definition of desktop" in `api-naming.md`).
@@ -140,7 +141,8 @@ and with `nsh-engine`'s `js` (which every native platform enables); a runtime bu
 | `buffer`, `crypto`, `path`, `url`, `zlib` | LLRT, vendored by `quickjs-jit-stdlib` (`standard/mod.rs`) | their LLRT exports, projected by `standard/declarations.rs`; `Buffer` and `crypto` are globals |
 
 `process.platform`, `process.arch`, `os.platform()` and `os.arch()` are Rust's `std::env::consts` values, as
-gpui-shell's are: `"macos"`, `"windows"`, `"linux"`, `"ios"`, `"android"`; `"aarch64"`, `"x86_64"` (not Node's
+gpui-shell's are: `"macos"`, `"windows"`, `"linux"`, `"ios"`, `"android"`, with `"ohos"` for the OHOS target
+environment; `"aarch64"`, `"x86_64"` (not Node's
 `darwin` / `win32` / `arm64` / `x64`); in WebAssembly they are empty strings, and `platform.os` (`nsh`'s environment) is
 `"web"`.
 

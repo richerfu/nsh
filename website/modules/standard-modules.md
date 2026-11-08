@@ -301,3 +301,8 @@ try {
 Open **Standard APIs** in `examples/gallery` to run file operations, child processes, TCP and both WebSocket interfaces, and inspect host metadata and queued jobs. The utilities action demonstrates buffers, hashing, compression and file URLs. Each action displays its result or error. Files stay in a temporary directory under the gallery's own data directory and are removed after the action. The TCP and WebSocket actions connect to local echo servers on ports 9876 and 9877. On web, file actions exercise OPFS, utilities run in WebAssembly, and both WebSocket actions use browser connections; process and TCP actions display the host's typed platform errors.
 
 Gallery's **AI Chat** uses `process.spawn` to chat through a locally installed Claude or Codex CLI on desktop. Sign in through the CLI in a terminal, then choose the provider in the composer. Replies use the conversation as context; Stop and leaving the screen end the child process. Web and mobile run scripted streaming conversations, including reasoning, tool cards and error recovery.
+
+## OHOS metadata and processes
+
+On OHOS, `process.platform` and `os.platform()` return `"ohos"`. `process.run` and `process.spawn`
+report `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`; process execution is a desktop capability.

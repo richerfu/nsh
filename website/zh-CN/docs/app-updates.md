@@ -95,3 +95,10 @@ macOS 上 `nsh package` 用的是 ad hoc 签名，可用于测试，但在其他
 
 `Config`、`Manifest`、`Asset` 和 `Available` 均为非穷尽结构体。
 使用 `Default::default()` 创建，再给所需字段赋值。
+
+## OHOS host-managed updates
+
+The shared updater checks manifests under the `ohos` key. The embedding host supplies update configuration
+and transport, and manages delivery of a new bundle or HAP. The default OHOS embedding SDK's
+`checkForUpdate` resolves `null`. `installAndRestart` rejects with `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`
+and directs the app to its host's update flow.

@@ -48,8 +48,10 @@ or TLS stack, and it works on iOS and Android, where `ureq` is not linked. These
 
 ## Limits
 
-- iOS and Android only check and report a link (`--link`): stores do not allow replacing the binary, and installing an
-  APK needs a permission an SDK must not declare for its hosts.
+- iOS, Android and OHOS check and report a link (`--link`). OHOS uses the `ohos` manifest key; its host
+  updates the embedded bundle or HAP. `installAndRestart` rejects with `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`
+  and a host-update message on OHOS. Desktop installation code excludes `target_env = "ohos"`. The OHOS
+  embedding SDK currently supplies no updater host, so its default `checkForUpdate` resolves `null`.
 - `installAndRestart` waits 300 ms for storage's writer thread, then exits the process with no further teardown.
 - Downgrades are refused by the version check; a signed manifest of an older version is therefore harmless.
 - `nsh#914`: desktop TLS uses the webpki roots, so a custom host on a certificate chain they lack fails to connect.

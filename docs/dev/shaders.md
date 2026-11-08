@@ -150,12 +150,13 @@ OHOS effects compile through the core's `Shader::glsl_es`, as on the web. The co
 through an XComponent Surface with alpha. The same EGL context owns input and output textures. Continuous frames
 stay on the GPU; the UI updates presentation geometry only when bounds change. The worker follows the window's
 native VSync while visible effects need frames, independently of the UI callback cadence.
-Content transitions retain their previous GPU input. Navigation takes one outgoing ArkUI snapshot before native
-hiding and combines it with the live destination export. Pages compose on the root; ArkUI dialogs use their own
+Content transitions retain their previous GPU input. Navigation queues a copy of the outgoing GPU picture before
+native hiding and combines it with the live destination export. Pages compose on the root; ArkUI dialogs use their own
 surface. The compositor clock drives progress; generation-scoped completion releases the navigation layer after
 its terminal frame is presented. Screen shaders remain on the embedded root.
-Shader backdrop capture, expanded
-overflow capture and integration with the CSS scene compositor remain separate work (see [ohos.md](ohos.md)).
+Shader captures include the layers' overflow. Each pass receives the logical view box as `nsh.size`, reframes
+pictures around that box and uses the bounded target's scale. The CSS scene compositor supplies ordered backdrop
+pictures and applies shader layers after its filters and masks (see [ohos.md](ohos.md)).
 
 ### Effects and transitions
 

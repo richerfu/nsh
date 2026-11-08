@@ -1,16 +1,16 @@
 ---
 title: nsh/mobile
-description: "What iOS and Android have: TabBar, the system's tab bar, InputAccessoryView on iOS, BackHandler on Android, and isAvailable."
+description: "What iOS, Android and OHOS have: TabBar, the system's tab bar, InputAccessoryView on iOS, BackHandler on Android and OHOS, and isAvailable."
 order: 12.2
 ---
 
 # nsh/mobile
 
-`nsh/mobile` holds the capabilities specific to iOS and Android: the system's tab bar, `TabBar`, on both;
+`nsh/mobile` holds the capabilities specific to iOS, Android and OHOS: the system's tab bar, `TabBar`, on all three;
 [`InputAccessoryView`](#inputaccessoryview), a bar over the keyboard, on iOS; and [`BackHandler`](#backhandler), the
-back button, on Android. Rust code uses `nsh_core::mobile` and `nsh_core::prelude`; TSX imports `nsh/mobile`. The
+back button, on Android and OHOS. Rust code uses `nsh_core::mobile` and `nsh_core::prelude`; TSX imports `nsh/mobile`. The
 module can be imported on every platform, so one bundle runs everywhere: on the other platforms its components take no
-room and its calls return at once, and `isAvailable` tells you whether you are on iOS or Android (`platform.os` from
+room and its calls return at once, and `isAvailable` tells you whether you are on iOS, Android or OHOS (`platform.os` from
 `nsh` tells which). What desktops have is in [nsh/desktop](./nsh-desktop.md).
 
 ```rust tabs
@@ -28,12 +28,15 @@ This module exposes capabilities specific to mobile platforms, such as the syste
 
 ## isAvailable
 
+On OHOS, `isAvailable` is `true`; `TabBar` mounts the native ArkUI tab bar, and `BackHandler.on("press", ...)`
+receives system back presses. The host owns Ability termination and bundle delivery.
+
 ```ts
 const isAvailable: boolean;
 ```
 
-`true` on iOS, the iOS simulator, Mac Catalyst and Android; `false` elsewhere. Rust:
-`matches!(os(), Os::Ios | Os::Android)`.
+`true` on iOS, the iOS simulator, Mac Catalyst, Android and OHOS; `false` elsewhere. Rust:
+`matches!(os(), Os::Ios | Os::Android | Os::Ohos)`.
 
 ## TabBar
 
@@ -234,7 +237,7 @@ See also [Forms and keyboard](../docs/forms-and-keyboard.md).
 
 ## BackHandler
 
-On Android; on iOS its listeners are kept and never called, and `exitApp()` returns at once.
+System back presses reach listeners on Android and OHOS. The OHOS embedding host owns Ability termination.
 
 ```ts
 const BackHandler: {

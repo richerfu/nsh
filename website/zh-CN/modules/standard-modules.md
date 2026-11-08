@@ -301,3 +301,8 @@ try {
 打开 `examples/gallery` 中的 **Standard APIs**，可以运行文件操作、子进程、TCP 和两种 WebSocket 接口，并查看主机信息和排队任务。Utilities 操作展示缓冲区、哈希、压缩和文件 URL。每项操作都会显示结果或错误。文件操作使用 gallery 数据目录下的临时目录，并在操作后清理。TCP 和 WebSocket 操作分别连接本机 9876 和 9877 端口的回显服务。在 Web 上，文件操作使用 OPFS，工具函数在 WebAssembly 中运行，两种 WebSocket 操作使用浏览器连接；进程与 TCP 操作显示宿主返回的带类型的平台错误。
 
 Gallery 的 **AI Chat** 在桌面上通过 `process.spawn` 调用本机安装的 Claude 或 Codex CLI。先在终端通过 CLI 登录，再在输入区选择提供方。回复使用对话记录作为上下文；停止生成或离开页面都会结束子进程。Web 和移动端运行模拟流式对话，展示推理、工具卡片和错误恢复。
+
+## OHOS metadata and processes
+
+On OHOS, `process.platform` and `os.platform()` return `"ohos"`. `process.run` and `process.spawn`
+report `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`; process execution is a desktop capability.

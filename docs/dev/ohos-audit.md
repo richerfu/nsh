@@ -4,7 +4,9 @@ Read-only audit of `crates/nsh-platform-ohos` on 2026-11-06, at `667f8dd5` (afte
 unification in `770ae0a7`). The audit compared the backend with `nsh-core`'s contracts, the other
 platform backends, and `docs/dev/ohos.md` / `website/docs/ohos.md`.
 
-Nothing was changed by the audit. Each item below is executable: scope, evidence, the change, its
+The original audit was read-only. The implementation record below tracks the four implementation
+batches and Batch 5 device acceptance.
+The original findings remain as historical evidence: scope, evidence, the change, its
 acceptance criteria and the check that proves it. Line numbers are for the audit baseline and drift as
 the code changes; the symbols named beside them are the stable reference.
 
@@ -14,62 +16,226 @@ P3-8–P3-10. Revised again for the binding dependency: P0-6.
 Items marked **device-verify** need a run on an OHOS device (the reference device is ALN-AL00,
 API 26). Everything else was read in the code or reproduced on this machine.
 
-> Working-tree note: `.cargo/config.toml` and `Cargo.lock` patch every `ohos-*` crate to a local
-> binding checkout, and `examples/embed-ohos/build-profile.json5` carries signing material. Keep them
-> out of commits. The checkout's only functional addition over released `ohos-arkui-binding 0.6.0` is
-> `ArkUINode::snapshot()` (P0-6); the branch must build against released crates before it can merge.
+> The original audit found local binding patches and a signing configuration. The four-batch working
+> tree uses released bindings. Signing material is never retained in the example: temporary build
+> configuration is restored even after a failed build.
+
+## Batch 1 implementation (2026-11-06)
+
+The shader/compositor batch addresses P0-3, P0-4, P0-6, P1-4, P1-5, P1-6, P1-10, P2-6,
+P2-11 through P2-14, P2-18 and the shader geometry part of P3-6. The entries below preserve the
+audit baseline and device acceptance checklists. The implementation now uses explicit logical picture
+coverage, bounded GLES targets, ordered scene shader/backdrop passes, worker-owned navigation copies,
+a context-owned program cache and asynchronous retirement. `snapshot.rs` prepares live exports and
+uses the released binding API. Composite geometry and shader visibility are invalidated when their
+inputs change; scene invalidation retains its active/requirements guard.
+
+Host verification: 74 OHOS tests, including overflow, proportional downscaling and asymmetric picture
+alignment; `cargo xtask clippy-ohos` checks default, dev, API 23 and API 26 with warnings denied.
+These checks establish geometry and compilation, not device rendering, presentation cadence or
+background/resume behavior. The device criteria below remain to be exercised with this implementation.
+
+## Batch 2 implementation (2026-11-06)
+
+The loader/tooling batch addresses P0-1, P0-2, the host-test CI coverage in P0-5, P1-1, updater and
+OS identity in P1-9, P3-2 and P3-5. `nsh build` records static entry chunks. The OHOS rawfile loader
+validates and bounds manifest preloads for source and bytecode; optional manifests and source scanning
+retain compatibility with single-file and older source bundles. This supersedes P0-1's original proposal
+to require a manifest and remove the scanner. Capability declarations always constrain host grants.
+Package resources share the file-package limit and synchronous acceptance failures retain retryability.
+OHOS mobile APIs are enabled, process launches have an explicit compile-time platform gate, and updater
+checks use OHOS identity while installation is delegated to the host. The original findings and device
+checklists below remain the audit record; host tests and cross-target linting do not establish device behavior.
+
+Verification: `cargo test -p nsh-core -p nsh-cli -p nsh-updater -p nsh-platform-ohos` passes, including
+83 OHOS host tests. `cargo xtask clippy-ohos` passes all four feature sets. The generated core CI path list
+matches both workflow triggers. Host Clippy, the tab-bar/back-handler engine regressions, touched-file
+formatting and the counter trace smoke test also pass. The additional `cargo xtask compat` check cannot
+compile its current harness against this checkout: it expects `PointerType`, `ContextMenuEvent::new`,
+`WebProps.incognito` and `KeyframeAnimation.frame_rate`, whose definitions are unchanged by this batch.
+OHOS device checks remain in the checklist below.
+
+## Batch 3 implementation (2026-11-06)
+
+The mount/input batch addresses P1-3, P1-11 through P1-13, P2-7, P2-8, P2-15 through P2-17,
+and P3-8 through P3-10. The code uses the current mount protocol (`Frame` and explicit empty
+`LayoutAnimation` values), `Registry` UI sets, `EventPayload::caret(bounds)` and composition's
+`composing` field. These supersede the older symbol names in the audit baseline below.
+
+Text paste and preview composition use the existing SDK event route; native Scroller commands
+handle multiline Input scrolling. Read-only mutation guards preserve selection. `autoCorrect`
+is forwarded, with a remaining API-20 boundary: the SDK exposes no per-editor autocorrection setter.
+Layout scopes, text-color drawing, vp blur, inset rings, clipping, transformed pointer coordinates,
+modal resize and density updates are implemented. Animation frame loops use compact active entries;
+trailing empty mounter slots are released. Stale mount items log and allow subsequent items to run.
+
+Verification: `cargo test -p nsh-platform-ohos` passes 89 host tests, including compact active
+collections, color interpolation, zero-blur inset shadows, composition state and projected pointer
+coordinates. `cargo xtask clippy-ohos` passes default, dev, API 23 and API 26. The API-20 SDK builds
+and the embedding HAP compiles with Hvigor. At the end of Batch 3, native screenshots, IME interaction and density/resize
+checks were pending: ALN-AL00 rejected the unsigned HAP with error 9568320 (no signature file).
+The signed Batch 5 run below supersedes that installation blocker. The original device acceptance checklists
+below remain the audit record; these checks do not establish native frame pacing.
+
+## Batch 4 implementation (2026-11-06)
+
+System requests and replies are typed N-API objects. Passive surfaces preserve the host status bar;
+explicit requests work with the default options. Native headers and dialog/video controls expose
+button semantics, dialog metrics scale with text, and native chrome resolves app theme tokens.
+Private WebView cookies clear before navigation and HTML file inputs invoke the native pickers.
+The Batch 4 specification called those WebView fixes P1-7/P1-8; the original audit uses those IDs
+for action sheets and dispatch failures, which are addressed separately below.
+
+Picked descriptors are duplicated synchronously and read on the host worker. The native image path
+uses the shared loader/budget and OHOS proxy transport. Streaming readers release global connection
+workers, notification subscriptions replace previous requests, and dead clipboard routing is removed.
+API feature boundaries, optional trust context, methods, options and module exports are documented
+in both public languages and the developer page.
+
+**Resolution status:** every implementation finding has a resolution recorded below. This does not
+mark the original acceptance checkboxes as passed. Those historical checklists include alternative
+proposals superseded by later implementation and device tests that still need execution. P0-5’s
+host CI gate is installed; provisioning a hosted NDK lint runner remains an infrastructure follow-up.
+Audio interrupt policy, API 20 per-frame timing and accessibility action differences are explicit
+released-binding/API boundaries, not claims of device parity.
+
+### Batch 4 validation and device acceptance
+
+- `cargo test -p nsh-platform-ohos`: **96 passed**.
+- `cargo xtask ohos`: **passed**, API 20 SDK and generated declarations.
+- `cargo xtask clippy-ohos`: **passed**, default/dev/API 23/API 26 with warnings denied.
+- `examples/embed-ohos/build.sh`: **passed as an unsigned HAP**, using the final SDK and a release
+  split fixture. Its manifest contains `entryChunks: ["a.js", "b.js"]`; both static chunks and
+  two dynamic chunks have source and bytecode artifacts. Headless fixture checks pass for dynamic
+  loading, push/pop, shader/scene toggling, status-bar requests, WebView creation and modal
+  open/close. These checks establish compilation and engine behavior, not native rendering.
+- Batch 4's unsigned build could not be installed because the signing paths then tried were absent.
+  **Batch 5 supersedes that blocker:** the current local profile produced a signed HAP, which was
+  installed and launched on ALN-AL00. The device evidence is recorded below.
+- `cargo +nightly fmt --all` and `git diff --check`: completed; the final whitespace check is clean.
+  Formatting-only changes to six unrelated, previously clean upstream files were restored.
+
+## Batch 5 real-device acceptance (2026-11-07)
+
+Run on 2026-11-06–07. **Device:** ALN-AL00, serial `2LQ0223A26006180`, API **26**, OS
+`OpenHarmony-7.0.0.111`, display 1260×2720, density 3.25 px/vp. HAD-W32 was not used.
+The current local debug profile signed the HAP under its authorized application ID. Source and
+bytecode entry loads both ran with `NSH_SPLIT=1`. The signing files, application ID and ArkTS host
+fixture were restored immediately after each build. Local evidence is in ignored `.nsh/batch5/`:
+`device/` contains the TSX fixture, `Index.ets.fixture` its host, `build_signed.py` the restoring build
+wrapper, and `build-evidence.json` the signed HAP hash and resource inventory. Screenshots have
+matching `uitest dumpLayout` JSON where a single state is named; transition sequences include
+`*-times.json`. HiLog uses the `B5` marker.
+
+| Area | Observed on ALN-AL00 | Evidence in `.nsh/batch5/` |
+|---|---|---|
+| Split loader and policy ceiling | `entryChunks` contains `a.js`, `b.js`; static and dynamic modules execute from source and bytecode. The shared host method succeeds, host-only and declaration-only methods reject with `ERR_ACCESS_DENIED`. | `final-app-manifest.json`, `runtime.log`, `bytecode-initial.jpeg`, `reload-final.log` |
+| OHOS API identity and mobile | `platform.os`, `process.platform`, `os.platform()` return `ohos`; mobile availability is true. TabBar changes panels and armed BackHandler consumes Back. `process.run` rejects with `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`. | `runtime.log`, `back-handled.jpeg` |
+| Shader geometry and backdrop | Animated stripes retain a 64 vp logical height and a visible 10 vp orange overflow border under scene capture; the 220×72 effect reports the exact logical box, has a magenta top/left origin marker and orange overflow beside an asymmetric `26px 12px 8px 3px` shadow. The backdrop shader swaps the actual blue/red pattern. | `acceptance-final.jpeg`, `acceptance-final-scene-screen.jpeg`, `final-runtime.log` (`fill layout`, `effect layout`) |
+| Large fill | A 240×1800 vp fill (5850 physical pixels on its long axis) keeps its logical-size success color under proportional target downscaling. | `large.jpeg`, `large-final-settled.jpeg` |
+| Scene coexistence | `maskImage`, a backdrop shader, ShaderEffect and root ScreenEffect coexist. Page push/pop and Dialog open/close show intermediate shader frames, followed by usable destination controls. | `recovery-scene-screen.jpeg`, `zorder-push-*.jpeg`, `zorder-pop-*.jpeg`, `final-modal-open-*.jpeg`, `final-modal-close-*.jpeg` |
+| Content transition and resume | Orange-to-blue content transition has intermediate colors and its final state. Fill stripes change after Home and ability resume. | `content-real-*.jpeg`, `before-home.jpeg`, `resumed-a.jpeg`, `resumed-b.jpeg` |
+| Input | Selection followed by native Ctrl+V inserts `B5 pasted text`; Paste and CaretMove payloads reach JS. The selected readonly value remains unchanged after typing and paste. Scroll moves to y=400; native multiline Input scroll moves from line 1 to line 16. | `recovery-paste.jpeg`, `recovery-readonly.jpeg`, `input-scroll-400.jpeg`, `input-y240-final.jpeg`, `runtime.log` |
+| Styling and motion | Zero-blur inset rings render. A LayoutAnimation grows width from 130 to 250 vp; text interpolates blue to red. | `recovery-input-no-screen.jpeg`, `motion-final-*.jpeg` |
+| Native clipping | A 220×180 vp stack clips its 300 vp page before and after a push; Image and multiline Input native content clip at their rounded corners. | `clipping-native.jpeg`, `clips-push-*.jpeg` |
+| Navigation chrome | Native vector back button works; long dynamic titles fit between measured slots. Header text remains visible through export-wrapper creation and shader navigation. | `long-title.jpeg`, `accepted-push-end.jpeg`, `accepted-pop-end.jpeg` |
+| Native alerts | Alert background and actions follow the fixture's light/dark tokens; the dark case uses fontScale 1.6. ActionSheet aligns at the bottom and returns the selected action. | `fixed-alert-light2.jpeg`, `fixed-alert-dark.jpeg`, `fixed-sheet.jpeg`, `runtime.log` |
+| Status bar | With default `managesStatusBar`, the initial passive page preserves the host clock; an explicit hide removes it and show restores it. | `status-hidden.jpeg`, `status-restored.jpeg`, `bytecode-initial.jpeg` |
+| WebView | HTML renders. A newly recreated `sharedCookies: false` WebView reports `initial:EMPTY`, then successfully seeds its cookie. Updating HTML on the same view retains that document's cookie. | `cookies-fixed.jpeg`, `runtime.log` (23:07:27 first-navigation check) |
+
+Real-device fixes are in `render/composition/` (coalesced scene work, transient EGL-output retry and fill overflow in capture/scene bounds),
+`navigation/stack.rs`, `render/node/layout.rs` and `interop/view.rs` (header measurement, placement and
+z-order), `services/dialogs.rs` (token-colored native content and explicit disposal), and
+`media/webview.rs` (first-navigation cookie clearing), and `NativeViews.ets` (detach nested
+NodeContainers before builder disposal, releasing graphics buffers on reload). The WebView declaration fix is in
+`nsh-js/src/platform_modules.rs`. Temporary paint diagnostics and an unsuccessful shared-text-cache
+experiment were removed before the verified build.
+
+### Reload stress and teardown
+
+Twenty successive bytecode loads on the same surface completed with **20 success callbacks, zero
+reload failures and zero surface errors** (`reload-final.log`). Before the NodeContainer fix, the
+first stress run's `hidumper --mem` Graph value reached **3,472,840 KiB** after 20 reloads. Native node,
+texture-reader and EGL destructors ran, and ArkTS wrapper counts returned to zero; the remaining
+NodeContainer edges kept exported native buffers alive. Clearing the two nested controllers and
+rebuilding their containers before builder disposal releases those edges.
+
+The uninstrumented reload run measured Graph **136,016 → 113,660 → 113,660 → 113,660 KiB** at reloads
+0/5/10/20, and GL **162,598 → 166,494 → 167,782 → 168,238 KiB**. Total PSS changed from 605,766 to
+731,746 KiB; this short run establishes removal of the observed graphics-buffer accumulation, not a
+claim that all process memory returns to its cold baseline. See `reload-final-memory-*.txt`,
+`reload-memory-*.txt`, `wrapper-lifetimes.log` and `teardown-native-complete.log`. Teardown diagnostics
+and the ineffective reclamation-flush experiment are absent from the final SDK.
+
+The original checklists below retain their precise criteria. This run does **not** establish all of
+their broader variants: 60/120 Hz frame pacing or one-frame resume latency; API 20/23 hardware;
+screen-reader announcements; 100k create/delete cycles; 50-view shader compilation counts; concurrent
+scoped layout animations; video fullscreen; file-picker permission/failure paths; or every CSS blend
+and backdrop-filter combination. The fill overflow probe uses a fixture spread for
+`maxSampleOffset`; the runtime accepts it for fills but the public `ShaderProps` declaration currently lists it only for effects/transitions.
+Frame sequences prove progression and eventual cleanup, not a frame-rate
+benchmark. Input scrolling used the runtime scroll command via a fixture cast because `InputRef` does
+not expose `scrollTo` in its TypeScript type. Arbitrary JSX children supplied to Image/Input are not
+mounted by the JS components, so those attempted children are not evidence of clipping.
+
+Final host/cross-target checks: **96 OHOS tests pass**, API-20 SDK builds, and Clippy passes default,
+dev, API 23 and API 26 with warnings denied. `git diff --check` passes. The test bundle was uninstalled,
+device screenshots/layout scratch files were removed, generated signing/build caches were deleted,
+and the example's original embedded resources were rebuilt. `git diff -- examples/embed-ohos` and
+`git status --short -- examples/embed-ohos` are empty (`cleanup.log`). The signed acceptance HAP is
+retained only in ignored `.nsh/batch5/acceptance-signed.hap`.
 
 ## Summary
 
-| ID | Priority | Item | Size |
-|---|---|---|---|
-| P0-1 | P0 | Split bundles lose static chunks (app fails to start) | M |
-| P0-2 | P0 | `capabilities.json` is ignored when the host supplies a grant | S |
-| P0-3 | P0 | Shader `nsh.size` / `overflow` are derived from the capture target | M |
-| P0-4 | P0 | Shader layers are dropped when the CSS scene compositor is active | M |
-| P0-5 | P0 | No CI builds, lints or tests the OHOS backend | S |
-| P0-6 | P0 | The branch needs an unreleased `ohos-arkui-binding` wrapper | S |
-| P1-1 | P1 | `nsh/mobile` `TabBar` is unreachable; the native TabBar is dead code | S |
-| P1-2 | P1 | Status bar and fullscreen-video bars are silent no-ops by default | M |
-| P1-3 | P1 | Input events missing: paste, caret, composition, autoCorrect, readonly | M |
-| P1-4 | P1 | Navigation snapshots and teardown joins block the ArkUI UI thread | M |
-| P1-5 | P1 | Frame pacing hardcodes 120 Hz; resume can stall animation | S |
-| P1-6 | P1 | One GLSL compile per shader view; per-fill XComponents are uncapped | M |
-| P1-7 | P1 | Action sheets are presented as centered alerts | S |
-| P1-8 | P1 | Failed system commands leave promises unsettled; duplicate openUrl result | S |
-| P1-9 | P1 | `os.platform()` / `process.platform` report `"linux"` on OHOS | S |
-| P1-10 | P1 | `sample_backdrop` is always transparent | M |
-| P1-11 | P1 | Layout-animation scoping is ignored; only the first animation per batch is used | S |
-| P1-12 | P1 | Text color transitions are not implemented | S |
-| P1-13 | P1 | Blur/shadow unit conversions disagree with ArkUI's docs (device-verify) | S |
-| P2-1 | P2 | Navigation header, alerts and video chrome are hand-drawn and inaccessible | L |
-| P2-2 | P2 | Rust ↔ ArkTS system commands are stringly typed, without stable codes | M |
-| P2-3 | P2 | Picker copying and host glue run on the UI thread; state is duplicated | M |
-| P2-4 | P2 | Process-global IO/network pools starve other surfaces | M |
-| P2-5 | P2 | Duplicated network transport and image cache | M |
-| P2-6 | P2 | Full close does not drain the shader retirement handshake | M |
-| P2-7 | P2 | Dialogs use the pre-resize window; pixel ratio never updates | S |
-| P2-8 | P2 | No `set_ui_sets`; reserved component names are not refused | S |
-| P2-9 | P2 | Accessibility provider only with `api-23`; `has_popup` gap | L |
-| P2-10 | P2 | Public docs claim APIs and behavior the backend does not have | S |
-| P2-11 | P2 | 4096-pixel cap rejects large targets instead of downscaling | S |
-| P2-12 | P2 | Shader layer races: `from`, `active`, progress | M |
-| P2-13 | P2 | EGL config requests ES2 while creating an ES3 context (device-verify) | S |
-| P2-14 | P2 | Panics can cross the main TSFN callbacks; GL error-path leaks | S |
-| P2-15 | P2 | NodeId-keyed state never shrinks; per-frame full scans | M |
-| P2-16 | P2 | `Stack`, `Image` and `Input` children are not clipped | S |
-| P2-17 | P2 | Inset box-shadows with zero blur are dropped | S |
-| P2-18 | P2 | Compositor walks the tree every UI frame; scenes rebuild every batch | M |
-| P3-1 | P3 | Animated image frame durations need `api-23` | S |
-| P3-2 | P3 | Signed-package/resource limits disagree; packages are consumed too early | S |
-| P3-3 | P3 | Notification listeners accumulate; `exitApp` is a no-op | S |
-| P3-4 | P3 | Default strings and hardcoded colors/radii in NSH chrome | S |
-| P3-5 | P3 | `process.run` has no OHOS sandbox gate (device-verify) | S |
-| P3-6 | P3 | Host-side tests cover none of the compositor/mounter state machines | M |
-| P3-7 | P3 | Stale validation numbers in the OHOS docs | S |
-| P3-8 | P3 | `pagePosition` ignores transforms and pins (device-verify) | S |
-| P3-9 | P3 | Stricter fatal mount policy than the other backends | S |
-| P3-10 | P3 | Mount parity leftovers: `InputAccessory`, `scroll_to`, large titles | M |
+| ID | Priority | Item | Size | Implementation |
+|---|---|---|---|---|
+| P0-1 | P0 | Split bundles lose static chunks (app fails to start) | M | Resolved |
+| P0-2 | P0 | `capabilities.json` is ignored when the host supplies a grant | S | Resolved |
+| P0-3 | P0 | Shader `nsh.size` / `overflow` are derived from the capture target | M | Resolved |
+| P0-4 | P0 | Shader layers are dropped when the CSS scene compositor is active | M | Resolved |
+| P0-5 | P0 | No CI builds, lints or tests the OHOS backend | S | Resolved |
+| P0-6 | P0 | The branch needs an unreleased `ohos-arkui-binding` wrapper | S | Resolved |
+| P1-1 | P1 | `nsh/mobile` `TabBar` is unreachable; the native TabBar is dead code | S | Resolved |
+| P1-2 | P1 | Status bar and fullscreen-video bars are silent no-ops by default | M | Resolved |
+| P1-3 | P1 | Input events missing: paste, caret, composition, autoCorrect, readonly | M | Resolved |
+| P1-4 | P1 | Navigation snapshots and teardown joins block the ArkUI UI thread | M | Resolved |
+| P1-5 | P1 | Frame pacing hardcodes 120 Hz; resume can stall animation | S | Resolved |
+| P1-6 | P1 | One GLSL compile per shader view; per-fill XComponents are uncapped | M | Resolved |
+| P1-7 | P1 | Action sheets are presented as centered alerts | S | Resolved |
+| P1-8 | P1 | Failed system commands leave promises unsettled; duplicate openUrl result | S | Resolved |
+| P1-9 | P1 | `os.platform()` / `process.platform` report `"linux"` on OHOS | S | Resolved |
+| P1-10 | P1 | `sample_backdrop` is always transparent | M | Resolved |
+| P1-11 | P1 | Layout-animation scoping is ignored; only the first animation per batch is used | S | Resolved |
+| P1-12 | P1 | Text color transitions are not implemented | S | Resolved |
+| P1-13 | P1 | Blur/shadow unit conversions disagree with ArkUI's docs (device-verify) | S | Resolved |
+| P2-1 | P2 | Navigation header, alerts and video chrome are hand-drawn and inaccessible | L | Resolved |
+| P2-2 | P2 | Rust ↔ ArkTS system commands are stringly typed, without stable codes | M | Resolved |
+| P2-3 | P2 | Picker copying and host glue run on the UI thread; state is duplicated | M | Resolved |
+| P2-4 | P2 | Process-global IO/network pools starve other surfaces | M | Resolved |
+| P2-5 | P2 | Duplicated network transport and image cache | M | Resolved |
+| P2-6 | P2 | Full close does not drain the shader retirement handshake | M | Resolved |
+| P2-7 | P2 | Dialogs use the pre-resize window; pixel ratio never updates | S | Resolved |
+| P2-8 | P2 | No `set_ui_sets`; reserved component names are not refused | S | Resolved |
+| P2-9 | P2 | Accessibility provider only with `api-23`; `has_popup` gap | L | Resolved |
+| P2-10 | P2 | Public docs claim APIs and behavior the backend does not have | S | Resolved |
+| P2-11 | P2 | 4096-pixel cap rejects large targets instead of downscaling | S | Resolved |
+| P2-12 | P2 | Shader layer races: `from`, `active`, progress | M | Resolved |
+| P2-13 | P2 | EGL config requests ES2 while creating an ES3 context (device-verify) | S | Resolved |
+| P2-14 | P2 | Panics can cross the main TSFN callbacks; GL error-path leaks | S | Resolved |
+| P2-15 | P2 | NodeId-keyed state never shrinks; per-frame full scans | M | Resolved |
+| P2-16 | P2 | `Stack`, `Image` and `Input` children are not clipped | S | Resolved |
+| P2-17 | P2 | Inset box-shadows with zero blur are dropped | S | Resolved |
+| P2-18 | P2 | Compositor walks the tree every UI frame; scenes rebuild every batch | M | Resolved |
+| P3-1 | P3 | Animated image frame durations need `api-23` | S | Resolved |
+| P3-2 | P3 | Signed-package/resource limits disagree; packages are consumed too early | S | Resolved |
+| P3-3 | P3 | Notification listeners accumulate; `exitApp` is a no-op | S | Resolved |
+| P3-4 | P3 | Default strings and hardcoded colors/radii in NSH chrome | S | Resolved |
+| P3-5 | P3 | `process.run` has no OHOS sandbox gate (device-verify) | S | Resolved |
+| P3-6 | P3 | Host-side tests cover none of the compositor/mounter state machines | M | Resolved |
+| P3-7 | P3 | Stale validation numbers in the OHOS docs | S | Resolved |
+| P3-8 | P3 | `pagePosition` ignores transforms and pins (device-verify) | S | Resolved |
+| P3-9 | P3 | Stricter fatal mount policy than the other backends | S | Resolved |
+| P3-10 | P3 | Mount parity leftovers: `InputAccessory`, `scroll_to`, large titles | M | Resolved |
 
 ---
 
@@ -77,9 +243,11 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P0-1 — Split bundles lose static chunks
 
+- **Resolution:** Resolved — Static entry chunk manifests preload source and bytecode; bounded legacy source discovery remains supported.
+
 - **Area:** `crates/nsh-platform-ohos/src/app/chunks.rs`, `crates/nsh-cli/src/build.rs`,
   `crates/nsh-cli/src/web.rs`.
-- **Status:** Reproduced on this machine.
+- **Baseline evidence:** Reproduced on this machine.
 - **Problem:** `nsh build --split` writes a minified entry whose static chunk imports sit on one
   line. `static_chunk_imports` (`chunks.rs:107-135`) is line-based, stops at the first non-import
   line, and `extract_relative_chunk_specifier` (`chunks.rs:137-150`) uses `rfind("./")`, so it
@@ -115,8 +283,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P0-2 — `capabilities.json` is ignored when the host supplies a grant
 
+- **Resolution:** Resolved — Rawfile declarations are always loaded and intersect host grants.
+
 - **Area:** `crates/nsh-platform-ohos/src/app/surface.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** `load_resource` computes `has_override` from `policy.granted.is_some()`
   (`surface.rs:914`) and reads the companion `capabilities.json` only when `!has_override`
   (`surface.rs:970-983`). With no `declared`, `Policy::access()` treats the app as declaring
@@ -134,8 +304,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P0-3 — Shader `nsh.size` / `overflow` are derived from the capture target
 
+- **Resolution:** Resolved — Logical view size and symmetric overflow are independent of native capture bounds.
+
 - **Area:** `crates/nsh-platform-ohos/src/render/composition/{gles.rs,worker.rs,fill.rs}`.
-- **Status:** Confirmed; the old wgpu path passed the true view size
+- **Baseline evidence:** Confirmed; the old wgpu path passed the true view size
   (`git show 770ae0a7^:crates/nsh-platform-ohos/src/render/shader/gpu.rs:475-485`).
 - **Problem:** `gles.rs:619-633` uploads
   `nsh.size = target_pixels / scale - 2 * overflow`. The target size comes from
@@ -160,8 +332,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P0-4 — Shader layers are dropped when the CSS scene compositor is active
 
+- **Resolution:** Resolved — Scene groups apply shader layers after CSS composition and supply ordered backdrop pictures.
+
 - **Area:** `crates/nsh-platform-ohos/src/render/composition/worker.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** `Entry::render` takes `direct = !settings.scene` (`worker.rs:565`) and only the
   direct branch calls `shaders.render(...)` (`worker.rs:609-638`). `scene` is set for any
   `maskImage`, more than one backdrop filter, a non-blur backdrop filter, or `plus-darker`
@@ -179,8 +353,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P0-5 — No CI builds, lints or tests the OHOS backend
 
+- **Resolution:** Resolved — OHOS host tests and dependency paths participate in core CI; NDK builds/lints are verified locally. A hosted NDK lint job remains an infrastructure follow-up.
+
 - **Area:** `.github/workflows/`, `.github/ci/paths.py`.
-- **Status:** Confirmed (no workflow or path entry mentions OHOS).
+- **Baseline evidence:** Confirmed (no workflow or path entry mentions OHOS).
 - **Problem:** `cargo test -p nsh-platform-ohos` (83 host tests) and
   `cargo xtask clippy-ohos` (default / dev / api-23 / api-26 with `-D warnings`) run only on
   developers' machines; `cargo +nightly fmt --all` is not enforced for the crate either. A new
@@ -200,10 +376,12 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P0-6 — The branch needs an unreleased `ohos-arkui-binding` wrapper
 
+- **Resolution:** Resolved — The backend uses released binding wrappers and builds without local binding patches.
+
 - **Area:** `.cargo/config.toml`, `Cargo.lock`,
   `crates/nsh-platform-ohos/src/render/composition/snapshot.rs`, the `ohos-rs/ohos-native-bindings`
   checkout.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** the working tree patches every `ohos-*` crate to a local checkout
   (`.cargo/config.toml`'s `[patch.crates-io]`). The checkout differs from released
   `ohos-arkui-binding 0.6.0` by one uncommitted 24-line change: a public
@@ -237,8 +415,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-1 — `nsh/mobile` `TabBar` is unreachable
 
+- **Resolution:** Resolved — OHOS exposes the mobile module and registers native TabBar/back handling.
+
 - **Area:** `crates/nsh-core/src/mobile.rs`, `crates/nsh-js/src/platform_modules.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** the core component returns a hidden view unless `os()` is `Os::Ios | Os::Android`
   (`nsh-core/src/mobile.rs:83`), and `nsh/mobile`'s `isAvailable` is the same check
   (`nsh-js/src/platform_modules.rs:463-465`). OHOS nonetheless ships `NativeTabBar.ets`, the
@@ -256,8 +436,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-2 — Status bar and fullscreen-video bars are silent no-ops by default
 
+- **Resolution:** Resolved — Status-bar management defaults on; an explicit status-bar/fullscreen request acquires ownership, preserving passive hosts.
+
 - **Area:** `app/options.rs`, `app/session.rs`.
-- **Status:** Confirmed; the option is absent from `website/docs/ohos.md` and `docs/dev/ohos.md`.
+- **Baseline evidence:** Confirmed; the option is absent from `website/docs/ohos.md` and `docs/dev/ohos.md`.
 - **Problem:** `NshOptions.manages_status_bar` defaults to false (`options.rs:19,192`).
   `Services::status_bar` applies only when the dispatcher manages the bars
   (`session.rs:390-414`), and `video_fullscreen` returns early when it does not
@@ -274,8 +456,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-3 — Input events missing
 
+- **Resolution:** Resolved — Paste, caret and preview-composition events are wired; read-only mutation guards preserve selection. Autocorrection follows the API 20 keyboard.
+
 - **Area:** `interop/sdk.rs`, `arkts/src/main/ets/NativeEditors.ets`.
-- **Status:** Confirmed against the core contract.
+- **Baseline evidence:** Confirmed against the core contract.
 - **Problem:** `EditorSettings` (`interop/sdk.rs:17-48`) and the ArkTS builder
   (`NativeEditors.ets:265-305`) have no `onPaste`/`pasteBehavior`, `onCaretMove`,
   `onCompositionChange` or `autoCorrect`; the core declares all of them
@@ -298,9 +482,11 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-4 — Navigation snapshots and teardown joins block the ArkUI UI thread
 
+- **Resolution:** Resolved — Navigation pictures copy on the compositor worker; engine cleanup and presentation retirement avoid UI-thread joins.
+
 - **Area:** `render/shader/effects.rs`, `composition/snapshot.rs`, `app/runtime.rs`,
   `render/composition/worker.rs`.
-- **Status:** Confirmed code path; impact needs device measurement.
+- **Baseline evidence:** Confirmed code path; impact needs device measurement.
 - **Problem:** `Shaders::begin_navigation` is called while applying a mount batch on the UI thread
   (`navigation/stack.rs:344-360`, `modal.rs:238`). `Snapshot::capture` (`snapshot.rs:38-104`) calls
   ArkUI `snapshot()` and `read_pixels()` synchronously, then converts BGRA→RGBA and copies the
@@ -325,8 +511,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-5 — Frame pacing hardcodes 120 Hz; resume can stall animation
 
+- **Resolution:** Resolved — Native window refresh observations drive votes; foreground re-arms VSync.
+
 - **Area:** `app/frame_rate.rs`, `app/runtime.rs`, `render/composition/worker.rs`.
-- **Status:** Confirmed (120); resume stall is a code-path risk.
+- **Baseline evidence:** Confirmed (120); resume stall is a code-path risk.
 - **Problem:** the shader vote requests min/max/expected 120 whenever any shader animates
   (`frame_rate.rs:44-53`); the surface configures 0..120/60 at start (`runtime.rs:678-684`). The
   window's supported range is never read. `Task::Resume` clears neither `frame_pending` nor the
@@ -346,8 +534,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-6 — One GLSL compile per shader view; per-fill XComponents are uncapped
 
+- **Resolution:** Resolved — Context-owned shader programs are cached; fill/layer/pixel admission is bounded.
+
 - **Area:** `render/composition/gles.rs`, `render/composition/fill.rs`, `render/shader/mod.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** `Program::new` runs per `Effect` instance (`gles.rs:231-320,466`) and `layers()`
   recompiles whenever the program/slot set changes; unlike `nsh-engine::shader::Renderer`
   (`nsh-engine/src/shader.rs:73-75,192-243`) there is no compile cache by source hash. Compilation
@@ -368,8 +558,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-7 — Action sheets are presented as centered alerts
 
+- **Resolution:** Resolved — Action sheets use bottom alignment and a separated cancel action.
+
 - **Area:** `services/dialogs.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** `Dialog::show` (`dialogs.rs:79-209`) never reads `request.sheet`; every request
   becomes a centered custom `Dialog` with vertical text buttons. iOS maps it to
   `UIAlertControllerStyle::ActionSheet`, Android passes `sheet` to `SystemUi.dialog`.
@@ -381,8 +573,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-8 — Failed system commands leave promises unsettled; duplicate openUrl result
 
+- **Resolution:** Resolved — Failed dispatch and quota admission complete system requests with error/code fields; openUrl has one fallback owner. Existing core clipboard APIs retain empty-result semantics.
+
 - **Area:** `services/system.rs`, `services/session.rs`, `render/mount.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** `System::command` removes the tracked request and returns `Err` when
   `send_host_command` fails (`system.rs:164-172`); the app's clipboard/notification/speech promise
   gets no result. `Services::open_url` sends `OpenUrl { opened: false }` and returns `Err`
@@ -397,8 +591,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-9 — `os.platform()` / `process.platform` report `"linux"` on OHOS
 
+- **Resolution:** Resolved — OS/process identity is OHOS; updater installation is host-owned.
+
 - **Area:** `crates/nsh-core/src/runtime/os.rs`, `process.rs`, `nsh-updater`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** both return `std::env::consts::OS` (`os.rs:18-23`, `process.rs:29-33`), and the OHOS
   target triple is `aarch64-unknown-linux-ohos` (`target_os = "linux"`), so the runtime platform
   string is `"linux"` while `platform.os` is `"ohos"`. `nsh-updater`'s platform key follows the
@@ -413,8 +609,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-10 — `sample_backdrop` is always transparent
 
+- **Resolution:** Resolved — Scene groups and direct passes supply their composed backdrop to shaders.
+
 - **Area:** `render/composition/gles.rs`, `interop/texture_export.rs`.
-- **Status:** Confirmed; documented as a follow-up (`docs/dev/ohos.md:95`,
+- **Baseline evidence:** Confirmed; documented as a follow-up (`docs/dev/ohos.md:95`,
   `docs/dev/shaders.md:157`).
 - **Problem:** `ShaderInput::Backdrop` is bound to the 1×1 transparent `empty` target
   (`gles.rs:353-355`); no parent/behind capture exists.
@@ -426,8 +624,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-11 — Layout-animation scoping is ignored
 
+- **Resolution:** Resolved — Layout animation scopes are processed in order, including explicit empty scopes and removals.
+
 - **Area:** `crates/nsh-platform-ohos/src/render/mount.rs`.
-- **Status:** Confirmed by code and the core contract.
+- **Baseline evidence:** Confirmed by code and the core contract.
 - **Problem:** the batch pre-pass captures a layout animation only while none was seen
   (`mount.rs:675-677`, `layout.is_none()`); every later `MountItem::LayoutAnimation` is a no-op
   (`mount.rs:919`), and that single animation is used for every `Insert` (`mount.rs:886`), `Frame`
@@ -454,8 +654,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-12 — Text color transitions are not implemented
 
+- **Resolution:** Resolved — Text color interpolates through native drawing with animation-graph precedence.
+
 - **Area:** `render/mount.rs`, `render/transition.rs`, `render/node/paint.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** `MountItem::Text` discards the attributed text (`mount.rs:925-944` destructures
   `text: _`) and installs the final typeset drawing; the local `Live` wrapper has no
   `text_color`/`recolor` (`render/transition.rs:23-129`). Desktop backends apply
@@ -475,8 +677,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P1-13 — Blur and shadow units disagree with ArkUI's documented units
 
+- **Resolution:** Resolved — Native blur attributes use vp; shadow and inset geometry use consistent units.
+
 - **Area:** `render/decor.rs`, `render/node/style.rs`, `media/image.rs`.
-- **Status:** Confirmed against the binding docs; the on-device effect needs a screenshot.
+- **Baseline evidence:** Confirmed against the binding docs; the on-device effect needs a screenshot.
 - **Problem:** the SDK documents `NODE_BLUR` in **vp** (blur radius), `NODE_BACKDROP_BLUR` in
   **px**, and `NODE_CUSTOM_SHADOW` radius in **vp** with x/y offsets in **px**
   (`ohos-arkui-sys`'s `NODE_BLUR`, `NODE_CUSTOM_SHADOW`, `NODE_BACKDROP_BLUR` docs). The code:
@@ -505,9 +709,11 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-1 — Navigation header, alerts and video chrome are hand-drawn and inaccessible
 
+- **Resolution:** Resolved — Vector back and button roles, measured header gaps, scaled dialog text, app labels and retained video audio policy are wired. AVPlayer audio policy follows the host.
+
 - **Area:** `navigation/stack.rs`, `services/dialogs.rs`, `media/video/ui.rs`, `render/decor.rs`,
   `render/node/style.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** the header is a `Stack` with a `Text` title and a `"‹"` back glyph, fixed sizes
   (52/44/28/18) and a title region of `width - 112` (`stack.rs:51-97,180-215`), with no
   accessibility role/label and no font-scale adaptation. Alerts are plain `Text` buttons with no
@@ -527,8 +733,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-2 — Rust ↔ ArkTS system commands are stringly typed
 
+- **Resolution:** Resolved — SystemCommand/SystemEvent and shared ArkTS completion types replace the JSON envelope; all response fields cross the typed boundary.
+
 - **Area:** `services/system.rs`, `interop/sdk.rs`, `arkts/src/main/ets/NativeSystem.ets`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** requests cross as `{"op": "...", ...}` JSON strings and responses as JSON values;
   unknown ops return `from_reason` messages without a stable `code`. This is the only
   stringly-typed protocol in the backend and it drifts easily (already: notification/speech
@@ -543,8 +751,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-3 — Picker copying and host glue run on the UI thread; state is duplicated
 
+- **Resolution:** Resolved — Picker descriptors transfer owned duplicates to worker reads; duplicate app clipboard code is removed, retaining only dev error-copy support.
+
 - **Area:** `arkts/src/main/ets/NshHost.ets`, `NativeSystem.ets`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** the photo picker copies each picked image with synchronous `fs.copyFileSync` in a
   promise callback on the UI thread; `NativeSystem.active/listening` mirrors Rust
   `System::requests`, and the listen path already orphans Rust requests. Cursor mapping and system
@@ -559,8 +769,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-4 — Process-global IO/network pools starve other surfaces
 
+- **Resolution:** Resolved — Response readers release the six connection workers after headers; each surface admits 32 active fetch requests. Upload streams use dedicated threads.
+
 - **Area:** `services/executor.rs`, `services/net.rs`, `app/session.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** `Executor` lanes (fetch 6, image 4, assets 2) and the ureq agent pool are
   process-global (`executor.rs:30-47`, `net.rs:60-64`); a surface with paused/endless streams can
   occupy all fetch workers, and another surface then sees "IO queue is full". `reserve_load` is per
@@ -574,8 +786,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-5 — Duplicated network transport and image cache
 
+- **Resolution:** Resolved — Native images use the shared loader and MemoryCache budget; OHOS transport and asset context also serve core SVG loads and reject HTTPS downgrades.
+
 - **Area:** `services/net.rs`, `media/image.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** `services/net.rs` is a near-copy of `nsh-engine/src/net.rs` (~330 lines) with only
   proxy lookup and admission added; `media/image.rs` keeps its own 32 MB memory cache while other
   backends use `nsh_core::image::loader` + `Images`.
@@ -588,8 +802,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-6 — Full close does not drain the shader retirement handshake
 
+- **Resolution:** Resolved — Surface shutdown drains presentation retirement before dropping UI dispatch.
+
 - **Area:** `app/runtime.rs`, `render/shader/mod.rs`, `render/composition/surface.rs`.
-- **Status:** Confirmed mechanism; impact is device-verify.
+- **Baseline evidence:** Confirmed mechanism; impact is device-verify.
 - **Problem:** `Runtime::close` takes the engine first (`runtime.rs:605`); after that `receive`
   returns early when `engine.is_none()` (`runtime.rs:288-290`), so the worker's `Message::Shader`
   is dropped, `Shaders::collect` (`shader/mod.rs:260-283`) never releases fill surfaces queued in
@@ -605,8 +821,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-7 — Dialogs use the pre-resize window; pixel ratio never updates
 
+- **Resolution:** Resolved — Window environment changes remeasure open modals and refresh density.
+
 - **Area:** `render/mount.rs`, `services/dialogs.rs`, `app/session.rs`, `app/entry.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** `Mounter::resize` updates the root frame but not `UiContext.platform`
   (`mount.rs:1381-1394`), which `Dialogs::show` reads for its width and max height
   (`dialogs.rs:96,176`). `UiContext.platform` is otherwise written only by
@@ -625,8 +843,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-8 — No `set_ui_sets`; reserved component names are not refused
 
+- **Resolution:** Resolved — Rust Registry UI sets are supported; host registration reserves the Nsh prefix.
+
 - **Area:** `app/runtime.rs`, `app/surface.rs`, `interop/component.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** `ui_sets` is hardcoded to `nsh_base::registry()` (`runtime.rs:777`), so an embedding
   host cannot serve an app's own Rust UI set (iOS/Android/macOS/Linux have `set_ui_sets`).
   `register_component` accepts any name (`surface.rs:1273-1281`), so a host can shadow `nsh/*`;
@@ -640,8 +860,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-9 — Accessibility provider only with `api-23`; `has_popup` gap
 
+- **Resolution:** Resolved — API 20 wrappers include selected/checked/adjustable controls; popup spoken values use the app’s Activate label. API 23 providers and API 26 custom actions are documented.
+
 - **Area:** `accessibility/mod.rs`, `accessibility/state.rs`, docs.
-- **Status:** Confirmed (documented as an API gap only for `has_popup`).
+- **Baseline evidence:** Confirmed (documented as an API gap only for `has_popup`).
 - **Problem:** the API-20 build sets ArkUI's label/group/mode/description attributes only
   (`input/events.rs:360-385`); roles, states, actions, hierarchy and focus need the provider
   compiled with `api-23` (`accessibility/mod.rs:1-5`). The website calls `api-23` an optional
@@ -655,8 +877,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-10 — Public docs claim APIs and behavior the backend does not have
 
+- **Resolution:** Resolved — English/Chinese host references match generated exports, surface methods, options and asynchronous trust signatures; optional trust context resolves the sole active session.
+
 - **Area:** `website/docs/ohos.md`, `website/zh-CN/docs/ohos.md`, `docs/dev/ohos.md`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:**
   - `nativeShellPlugins()` is referenced (`website/docs/ohos.md:276`, `zh-CN:275`) but does not
     exist (`arkts/index.ets` exports only `onNotificationWant`).
@@ -675,8 +899,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-11 — 4096-pixel cap rejects large targets instead of downscaling
 
+- **Resolution:** Resolved — Large shader targets scale proportionally to the GPU cap.
+
 - **Area:** `render/composition/gles.rs`, `gles/filters.rs`, `readback.rs`, `fill.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** any side > 4096 fails (`gles.rs:63-65,69-113`, `gles/filters.rs:165-167`,
   `readback.rs:491-494`) while the settings gate allows 16 MP (`worker.rs:916-920`); the engine
   downscales instead (`nsh-engine/src/shader.rs:704-715,789-797`). Fills clamp each side to 4096
@@ -690,8 +916,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-12 — Shader layer races: `from`, `active`, progress
 
+- **Resolution:** Resolved — Generation-scoped layers retain from/active/progress through completion handoff.
+
 - **Area:** `render/composition/gles.rs`, `render/shader/effects.rs`, `worker.rs`.
-- **Status:** Confirmed code paths; frequency needs device testing.
+- **Baseline evidence:** Confirmed code paths; frequency needs device testing.
 - **Problem:**
   - `ShaderTransition` only arms `from` when a previous input exists (`gles.rs:498-511,
     587-602`); the first frame or a lost wake makes `from` alias the live input.
@@ -710,8 +938,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-13 — EGL config requests ES2 while creating an ES3 context
 
+- **Resolution:** Resolved — EGL chooses GLES 3 configurations for GLES 3 contexts.
+
 - **Area:** `render/composition/readback.rs`.
-- **Status:** Device-verify; plausible strict-driver failure.
+- **Baseline evidence:** Device-verify; plausible strict-driver failure.
 - **Problem:** the EGL config requires `EGL_OPENGL_ES2_BIT` (`readback.rs:91-119`) but the context
   is created with `EGL_CONTEXT_CLIENT_VERSION = 3`. Some drivers require an ES3-capable config.
   If initialization fails, the compositor has no GPU and shader surfaces never present (only
@@ -725,8 +955,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-14 — Panics can cross the main TSFN callbacks; GL error-path leaks
 
+- **Resolution:** Resolved — Main callbacks contain panics; GL error paths retire owned resources.
+
 - **Area:** `app/surface.rs`, `app/runtime.rs`, `render/composition/gles.rs`, `readback.rs`.
-- **Status:** Confirmed (absence of guard); trigger requires a bug elsewhere.
+- **Baseline evidence:** Confirmed (absence of guard); trigger requires a bug elsewhere.
 - **Problem:** the two main TSFN callbacks (`surface.rs:721-727`, `runtime.rs:724-732`) call
   `State::dispatch`/`receive` directly; those contain `.unwrap()`/`.expect()` on locks and state,
   while ArkUI/executor/host callbacks are wrapped in `catch_unwind`. A panic unwinds through an
@@ -747,8 +979,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-15 — NodeId-keyed state never shrinks and is scanned every frame
 
+- **Resolution:** Resolved — Frame loops use compact active entries; trailing mounter slots are released.
+
 - **Area:** `render/mount.rs`, `render/animation.rs`.
-- **Status:** Confirmed; the other backends use maps and remove entries.
+- **Baseline evidence:** Confirmed; the other backends use maps and remove entries.
 - **Problem:** `Mounter.slots` is a dense `Vec<Option<Rc<Node>>>` grown to `id + 1` on every
   `Create` (`mount.rs:84,805-807`); deletion only clears the slot (`mount.rs:603-615`) and the
   vector is never truncated. The `Animator` keeps four more dense by-id vectors (`bindings`,
@@ -769,8 +1003,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-16 — `Stack`, `Image` and `Input` children are not clipped
 
+- **Resolution:** Resolved — Stack, Image and Input clip children alongside Scroll.
+
 - **Area:** `render/node/style.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** `clips_children()` clips only `overflow_hidden`, `Scroll` and non-full-screen modals
   (`style.rs:22-28`). macOS, Windows and Linux also clip `Image`, `Stack` and `Input`
   (`nsh-platform-macos/src/view.rs:211-217`, `nsh-platform-windows/src/view.rs:260-266`,
@@ -788,8 +1024,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-17 — Inset box-shadows with zero blur are dropped
 
+- **Resolution:** Resolved — Zero-blur inset shadows use the decoration path.
+
 - **Area:** `render/decor.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem:** `visible_layer` requires `(!inset || layer.blur.0 > 0.0)` (`decor.rs:235-238`), so a
   visible inset shadow with no blur — CSS `box-shadow: inset 0 0 0 Npx color`, the common focus
   ring — is never drawn. `BoxShadow::is_visible` only checks the color
@@ -803,9 +1041,11 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P2-18 — Compositor walks the tree every UI frame; scenes rebuild every batch
 
+- **Resolution:** Resolved — Composition requirements and geometry invalidate on relevant changes, retaining idle reuse.
+
 - **Area:** `render/mount.rs`, `render/composition/scene.rs`, `render/arkui.rs`,
   `interop/view.rs`, `render/shader/mod.rs`.
-- **Status:** Confirmed; performance-only but on a hot path.
+- **Baseline evidence:** Confirmed; performance-only but on a hot path.
 - **Problem:** every mount batch calls `scene.invalidate()` unconditionally (`mount.rs:665-667`),
   and `Scene::build` re-snapshots the whole tree (including `capture_bounds`) and re-plans the
   worker (`composition/scene.rs:133-183`); every `flush_arkui` walks all composite owners and
@@ -830,6 +1070,8 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P3-1 — Animated image frame durations need `api-23`
 
+- **Resolution:** Resolved — API 20 uniform timing and API 23 source frame durations/autoplay are explicitly documented.
+
 - **Area:** `media/image.rs:495-515`.
 - **Change:** keep the per-frame times in the descriptor on the API-20 build where the binding
   allows it; otherwise document the uniform-frame fallback.
@@ -838,12 +1080,16 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P3-2 — Signed-package/resource limits disagree; packages are consumed too early
 
+- **Resolution:** Resolved — Trust resource/file limits agree; rejected synchronous acceptance preserves package retryability.
+
 - **Area:** `app/session.rs:33`, `app/trust.rs:18,149-165`, `app/surface.rs:867-891`.
 - **Change:** one size limit for `openResource`/`openPackage` (64 MiB vs 256 MiB), and consume
   `NshPackage` only after the app starts, so a failed start can retry.
 - **Acceptance:** a 100 MiB signed package opens; a failed start leaves the package usable.
 
 ### P3-3 — Notification listeners accumulate; `exitApp` is a no-op
+
+- **Resolution:** Resolved — Notification listeners replace the previous stream (300-listen regression); Ability exit remains explicitly host-owned.
 
 - **Area:** `services/system.rs:50-53,150-152,175-185`, `NativeSystem.ets:81-87`,
   `render/mount.rs:1115-1117`.
@@ -853,6 +1099,8 @@ API 26). Everything else was read in the code or reproduced on this machine.
   documented and tested.
 
 ### P3-4 — Default strings and hardcoded colors/radii in NSH chrome
+
+- **Resolution:** Resolved — UiContext stores adaptive theme tokens for native chrome; empty dialogs finish with -1 and every control label comes from the app.
 
 - **Area:** `services/dialogs.rs`, `navigation/stack.rs`, `render/node/style.rs`,
   `render/decor.rs`.
@@ -864,12 +1112,16 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P3-5 — `process.run` has no OHOS sandbox gate
 
+- **Resolution:** Resolved — Process launch has an OHOS compile-time platform gate.
+
 - **Area:** `crates/nsh-core/src/runtime/process.rs`.
 - **Change:** device-verify whether fork/exec is permitted; if not, answer
   `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM` instead of a raw OS error.
 - **Acceptance:** the promise rejects with the stable code on a sandboxed device.
 
 ### P3-6 — Host-side tests cover none of the compositor/mounter state machines
+
+- **Resolution:** Resolved — Host regressions cover shader geometry, compact active collections, input composition, header bounds, semantics, descriptors, streams and listeners.
 
 - **Area:** `crates/nsh-platform-ohos/tests/ohos/`.
 - **Change:** add pure tests for the bounds/`nsh.size`/overflow math, snapshot alignment and alpha
@@ -879,14 +1131,18 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P3-7 — Stale validation numbers in the OHOS docs
 
+- **Resolution:** Resolved — Validation records distinguish host/SDK checks, observed Batch 5 device results and remaining acceptance criteria.
+
 - **Area:** `docs/dev/ohos.md`.
 - **Change:** update the host-test count (83 at this baseline) and the shader validation notes;
   move the "follow-up" table entries to this fix list once fixed.
 
 ### P3-8 — `pagePosition` ignores transforms and pins
 
+- **Resolution:** Resolved — Pointer page coordinates include transforms, presentation offsets and sticky pinning.
+
 - **Area:** `render/node/pointer.rs`, `render/node/transform.rs`.
-- **Status:** Device-verify.
+- **Baseline evidence:** Device-verify.
 - **Problem:** hit testing composes the view's `input_transform` (transform origin, transition
   transform, sticky pin, navigation presentation) in `transform.rs:14-68,99-253`, but
   `pointer_positions` derives `pagePosition` from `layout_position_in_window` plus local
@@ -903,8 +1159,10 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P3-9 — Stricter fatal mount policy than the other backends
 
+- **Resolution:** Resolved — Stale mount items log and permit later items; root creation retains fatal handling.
+
 - **Area:** `render/mount.rs`.
-- **Status:** Confirmed divergence; currently unreachable with monotonic core IDs.
+- **Baseline evidence:** Confirmed divergence; currently unreachable with monotonic core IDs.
 - **Problem:** a duplicate `Create` and an `Insert` whose child is unknown become fatal
   `Error::Tree` (`mount.rs:805-814,829-832`), and a `Tree` error closes the running app
   (`app/runtime.rs:395-405`). macOS and Windows skip/replace instead
@@ -920,9 +1178,11 @@ API 26). Everything else was read in the code or reproduced on this machine.
 
 ### P3-10 — Mount parity leftovers
 
+- **Resolution:** Resolved — Keyboard accessories, native input scrolling and large-title layout use current mount paths; device interaction remains in the baseline acceptance checklist.
+
 - **Area:** `render/mount.rs`, `render/node/lifecycle.rs`, `render/node/layout.rs`,
   `navigation/stack.rs`.
-- **Status:** Confirmed.
+- **Baseline evidence:** Confirmed.
 - **Problem / change:**
   - **`InputAccessory`** is treated as an ordinary child (`mount.rs:824-893`; `Node::new` ignores
     the kind and its layout callbacks, `node/lifecycle.rs:140-156`), and nothing reads
