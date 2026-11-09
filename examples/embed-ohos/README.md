@@ -2,6 +2,9 @@
 
 This is a minimal OHOS `UIAbility` app that embeds `examples/embedded/App.tsx` using `@nsh/ohos` and `NshSurface`, below its own native toolbar.
 
+For development on `richerfu/nsh`'s `ohos` branch, follow [OHOS development from the fork](../../docs/dev/ohos-development.md)
+to build and select the matching CLI (`NSH_CLI`), SDK (`NSH_PROFILE`), ArkTS package and generated declarations.
+
 1. Build the SDK (requires DevEco Studio or `OHOS_NDK_HOME` with the API 20+ OpenHarmony NDK, and the `aarch64-unknown-linux-ohos` Rust target):
 
    ```sh
