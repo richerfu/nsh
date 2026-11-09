@@ -1,5 +1,6 @@
 import { cleanup, Image, type JSX, List, Scroll, signal, Text, View, type ViewStyle } from "nsh";
 import { Animated, createAnimatedValue, Easing, platform } from "nsh";
+import sourceSerif from "../fonts/SourceSerif4-Regular.ttf";
 import { alpha, Badge, Button, Caption, Card, colors, DemoPage, finish, hint, isDark, mono, Press, radius, Segmented, tints, Toggle } from "../ui";
 
 /** The stage every specimen stands on: the card's light, without its drop shadow. */
@@ -505,25 +506,25 @@ function Transforms() {
 }
 
 function Numerals() {
-  const figure = () => ({ fontSize: 22, color: colors.text, fontWeight: "500" }) as const;
+  const figure = () => ({ fontFamily: sourceSerif, fontSize: 22, color: colors.text, fontWeight: "400" }) as const;
   return (
-    <Card icon="text" title="Numerals" subtitle="fontVariant">
+    <Card icon="text" title="Numerals" subtitle="fontVariant · Source Serif 4">
       <View style={{ flexDirection: "row", gap: 12 }}>
         <View style={{ flex: 1, gap: 4 }}>
           <Text style={{ fontSize: 12, color: colors.muted }}>Proportional</Text>
-          <Text style={figure()}>1,111.11</Text>
-          <Text style={figure()}>8,888.88</Text>
+          <Text style={[figure(), { fontVariant: ["proportional-nums", "lining-nums"] }]}>1,111.11</Text>
+          <Text style={[figure(), { fontVariant: ["proportional-nums", "lining-nums"] }]}>8,888.88</Text>
         </View>
         <View style={{ width: 1, backgroundColor: colors.line }} />
         <View style={{ flex: 1, gap: 4 }}>
           <Text style={{ fontSize: 12, color: colors.accent, fontFamily: mono }}>tabular-nums</Text>
-          <Text style={[figure(), { fontVariant: ["tabular-nums"] }]}>1,111.11</Text>
-          <Text style={[figure(), { fontVariant: ["tabular-nums"] }]}>8,888.88</Text>
+          <Text style={[figure(), { fontVariant: ["tabular-nums", "lining-nums"] }]}>1,111.11</Text>
+          <Text style={[figure(), { fontVariant: ["tabular-nums", "lining-nums"] }]}>8,888.88</Text>
         </View>
       </View>
       <View style={{ height: 1, backgroundColor: colors.line }} />
-      <Caption label={<Text style={{ fontSize: 18, color: colors.text, fontVariant: ["small-caps"] }}>Small Caps</Text>} note={<Text style={{ fontFamily: mono }}>small-caps</Text>} />
-      <Caption label={<Text style={{ fontSize: 18, color: colors.text, fontVariant: ["oldstyle-nums"] }}>Oldstyle 1234567890</Text>} note={<Text style={{ fontFamily: mono }}>oldstyle-nums</Text>} />
+      <Caption label={<Text style={{ fontFamily: sourceSerif, fontSize: 18, color: colors.text, fontVariant: ["small-caps"] }}>Small Caps</Text>} note={<Text style={{ fontFamily: mono }}>small-caps</Text>} />
+      <Caption label={<Text style={{ fontFamily: sourceSerif, fontSize: 18, color: colors.text, fontVariant: ["oldstyle-nums"] }}>Oldstyle 1234567890</Text>} note={<Text style={{ fontFamily: mono }}>oldstyle-nums</Text>} />
     </Card>
   );
 }

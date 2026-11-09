@@ -4,6 +4,9 @@
 and lays text out with native `OH_Drawing_Typography`. Each `NshSurface` owns one `NodeContent`, one engine thread and
 one QuickJS VM. User-facing page: [website/docs/ohos.md](../../website/docs/ohos.md).
 
+For the fork checkout, CLI replacement, matching SDK artifacts and the embedding build workflow, start with
+[OHOS development from the fork](ohos-development.md).
+
 ## Building and checking
 
 Building requires the OpenHarmony NDK (discovered from `OHOS_NDK_HOME`, `DEVECO_SDK_HOME` or DevEco Studio's default

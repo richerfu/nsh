@@ -16,6 +16,9 @@ pub(crate) const SPINNER: ImageAsset = asset!("spinner.webp");
 /// A script font (registered before the first render).
 pub(crate) const PACIFICO: FontAsset = asset!("fonts/Pacifico-Regular.ttf");
 
+/// A serif font with proportional/tabular figures, small caps and oldstyle figures.
+pub(crate) const SOURCE_SERIF: FontAsset = asset!("fonts/SourceSerif4-Regular.ttf");
+
 #[cfg(test)]
 mod tests {
     use nsh_core::element::{px, size};

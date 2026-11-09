@@ -9,9 +9,12 @@ use nsh_core::{
     prelude::*,
 };
 
-use crate::ui::{
-    Badge, Button, ButtonVariant, Card, DemoPage, Finish, Finished, IconName, MONO, Segment,
-    caption, colors, hint, inset_shadow, press, radius, rgb_a, segmented, tints, toggle,
+use crate::{
+    assets::SOURCE_SERIF,
+    ui::{
+        Badge, Button, ButtonVariant, Card, DemoPage, Finish, Finished, IconName, MONO, Segment,
+        caption, colors, hint, inset_shadow, press, radius, rgb_a, segmented, tints, toggle,
+    },
 };
 
 /// A black box shadow at `x`, `y`, blurred by `blur` points: its color
@@ -770,15 +773,16 @@ fn transforms() -> Card {
 fn numerals() -> Card {
     let figure = |n: &'static str| {
         text(n)
+            .font_family(SOURCE_SERIF.family)
             .text_size(px(22.0))
             .text_color(colors::TEXT)
-            .font_weight(FontWeight::MEDIUM)
+            .font_weight(FontWeight::NORMAL)
     };
     let rule = || view().h(px(1.0)).bg(colors::LINE);
     Card::new()
         .icon(IconName::Text)
         .title("Numerals")
-        .subtitle("fontVariant")
+        .subtitle("fontVariant · Source Serif 4")
         .child(
             view()
                 .flex_row()
@@ -792,8 +796,8 @@ fn numerals() -> Card {
                                 .text_size(px(12.0))
                                 .text_color(colors::MUTED),
                         )
-                        .child(figure("1,111.11"))
-                        .child(figure("8,888.88")),
+                        .child(figure("1,111.11").proportional_nums().lining_nums())
+                        .child(figure("8,888.88").proportional_nums().lining_nums()),
                 )
                 .child(view().w(px(1.0)).bg(colors::LINE))
                 .child(
@@ -806,13 +810,14 @@ fn numerals() -> Card {
                                 .text_color(colors::ACCENT)
                                 .font_family(MONO),
                         )
-                        .child(figure("1,111.11").tabular_nums())
-                        .child(figure("8,888.88").tabular_nums()),
+                        .child(figure("1,111.11").tabular_nums().lining_nums())
+                        .child(figure("8,888.88").tabular_nums().lining_nums()),
                 ),
         )
         .child(rule())
         .child(caption_spans(
             text("Small Caps")
+                .font_family(SOURCE_SERIF.family)
                 .text_size(px(18.0))
                 .text_color(colors::TEXT)
                 .small_caps(),
@@ -820,6 +825,7 @@ fn numerals() -> Card {
         ))
         .child(caption_spans(
             text("Oldstyle 1234567890")
+                .font_family(SOURCE_SERIF.family)
                 .text_size(px(18.0))
                 .text_color(colors::TEXT)
                 .oldstyle_nums(),
