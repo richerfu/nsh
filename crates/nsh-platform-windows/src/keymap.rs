@@ -17,7 +17,10 @@ use nsh_core::{
     keymap::{Key, Keymap, Keystroke, Modifiers},
     platform::Os,
 };
-use windows::Win32::UI::WindowsAndMessaging::{MSG, PM_REMOVE, PeekMessageW, WM_CHAR, WM_SYSCHAR};
+use windows::Win32::UI::{
+    Input::KeyboardAndMouse::GetFocus,
+    WindowsAndMessaging::{MSG, PM_REMOVE, PeekMessageW, WM_CHAR, WM_SYSCHAR},
+};
 
 use crate::{input::KeyEvent, surface::Surface};
 
@@ -52,7 +55,9 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
         return false;
     }
     let editing = crate::text_input::focused(surface).is_some();
-    let found = table.find(keystroke, editing, event.repeat);
+    // Only the bindings of the window the key is in (and JS's) take it.
+    let window = surface.input_root().id();
+    let found = table.find_in(window, keystroke, editing, event.repeat);
     if let Some(id) = found.fired() {
         surface.event(
             ROOT_ID,
@@ -66,13 +71,23 @@ pub(crate) fn key(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
     found.consumed()
 }
 
-/// Removes the character `TranslateMessage` queued for the consumed key.
+/// Removes the character `TranslateMessage` queued for the consumed key:
+/// in the window that has the keyboard (the main one or a window of the
+/// app's own; every window's keys go through the app's keymap).
 fn drop_char(surface: &Surface) {
+    // SAFETY: a plain query of this thread's focus.
+    let focus = unsafe { GetFocus() };
+    let hwnd = if focus.is_invalid() {
+        surface.hwnd()
+    } else {
+        focus
+    };
     let mut msg = MSG::default();
     for kind in [WM_CHAR, WM_SYSCHAR] {
-        // SAFETY: a plain call with a local out value, for our own window.
+        // SAFETY: a plain call with a local out value, for a window of
+        // this thread.
         unsafe {
-            let _ = PeekMessageW(&mut msg, Some(surface.hwnd()), kind, kind, PM_REMOVE);
+            let _ = PeekMessageW(&mut msg, Some(hwnd), kind, kind, PM_REMOVE);
         }
     }
 }

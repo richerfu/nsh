@@ -823,6 +823,7 @@ impl Runtime {
             app: app.app,
             viewport: size.into(),
             trace: false,
+            content_culling: true,
             network: Some(crate::services::net::network()),
             websocket: None,
             refuse_connections: None,
@@ -845,6 +846,8 @@ impl Runtime {
             host: config.channel.clone(),
             picker: None,
             speech: None,
+            audio: None,
+            windows: None,
         };
         let host_tokens = config.host_tokens.clone();
         let fonts = crate::text::fonts::Fonts::new();

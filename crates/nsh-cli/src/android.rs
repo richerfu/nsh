@@ -11,8 +11,8 @@ use std::{
 
 use anyhow::{Context as _, bail};
 
-/// Minimum Android version (API 28, Android 9), as the runtime is built.
-pub(crate) const MIN_SDK: u32 = 28;
+/// Minimum Android version (API 26, Android 8.0), as the runtime is built.
+pub(crate) const MIN_SDK: u32 = 26;
 /// The Android version apps target unless `nsh.json` `android.targetSdk`
 /// names another (API 35, Android 15: what Google Play requires).
 pub(crate) const DEFAULT_TARGET_SDK: u32 = 35;
@@ -84,6 +84,34 @@ impl Sdk {
         };
         let clang = bin.join(format!("{clang_target}{MIN_SDK}-clang{script}"));
         let env_triple = triple.replace('-', "_");
+        // New NDKs keep the C standard headers their clang carries (stdbool.h
+        // &c.) out of the sysroot: whatever libclang bindgen of the C
+        // dependencies (quickjs-jit-sys) loads, give it that directory to
+        // search as well. Last (`-idirafter`), so the libclang's own headers
+        // still win and `#include_next` reaches the sysroot (#1282: `'stdbool.h'
+        // file not found`, `unknown type name 'uint32_t'` on Windows).
+        let clang_include = fs::read_dir(toolchain.join("lib/clang"))
+            .ok()
+            .and_then(|versions| {
+                versions
+                    .filter_map(|version| version.ok().map(|version| version.path()))
+                    .map(|version| version.join("include"))
+                    .find(|include| include.is_dir())
+            });
+        // bindgen splits this variable like a shell: quoted, with forward slashes,
+        // so that the backslashes and spaces of a Windows path survive.
+        let mut extra = format!(
+            "--target={clang_target}{MIN_SDK} --sysroot=\"{}\"",
+            toolchain
+                .join("sysroot")
+                .display()
+                .to_string()
+                .replace('\\', "/")
+        );
+        if let Some(include) = clang_include {
+            let include = include.display().to_string().replace('\\', "/");
+            extra.push_str(&format!(" -idirafter \"{include}\""));
+        }
         let mut cmd = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
         cmd.env(format!("CC_{env_triple}"), &clang)
             .env(format!("AR_{env_triple}"), bin.join("llvm-ar"))
@@ -91,19 +119,17 @@ impl Sdk {
                 format!("CARGO_TARGET_{}_LINKER", env_triple.to_uppercase()),
                 &clang,
             )
-            // bindgen splits this variable like a shell: quoted, with forward slashes,
-            // so that the backslashes and spaces of a Windows path survive.
-            .env(
-                format!("BINDGEN_EXTRA_CLANG_ARGS_{env_triple}"),
-                format!(
-                    "--sysroot=\"{}\"",
-                    toolchain
-                        .join("sysroot")
-                        .display()
-                        .to_string()
-                        .replace('\\', "/")
-                ),
-            );
+            .env(format!("BINDGEN_EXTRA_CLANG_ARGS_{env_triple}"), extra);
+        // Use the NDK's own libclang when it carries one (r27+ do not);
+        // setting LIBCLANG_PATH otherwise would cut clang-sys's discovery off.
+        let ndk_libclang = bin.join(if cfg!(windows) {
+            "libclang.dll"
+        } else {
+            "libclang.so"
+        });
+        if ndk_libclang.exists() {
+            cmd.env("LIBCLANG_PATH", &bin);
+        }
         Ok(cmd)
     }
 
@@ -249,14 +275,19 @@ pub(crate) fn build(sdk: &Sdk, apk: &Apk<'_>, format: Format, out: &Path) -> any
     // Resources: only the launcher icon.
     let mut flat = Vec::new();
     if let Some(icon) = apk.icon {
-        let res = work.join("res/mipmap-xxxhdpi");
+        // aapt2 parses the file's path itself: the components joined in one
+        // go (`join("res/mipmap-xxxhdpi")`) leave a mix of `/` and `\` on
+        // Windows, which it calls no valid file path. Joined by component
+        // the path comes out uniform.
+        let res = work.join("res").join("mipmap-xxxhdpi");
         fs::create_dir_all(&res)?;
-        resize_png(icon, &res.join("ic_launcher.png"), 192)?;
+        let icon_path = res.join("ic_launcher.png");
+        resize_png(icon, &icon_path, 192)?;
         let compiled = work.join("compiled");
         fs::create_dir_all(&compiled)?;
         run(Command::new(sdk.tool("aapt2"))
             .arg("compile")
-            .arg(res.join("ic_launcher.png"))
+            .arg(&icon_path)
             .arg("-o")
             .arg(&compiled))?;
         for entry in fs::read_dir(&compiled)? {
@@ -366,6 +397,13 @@ fn manifest_xml(apk: &Apk<'_>) -> String {
         android:enableOnBackInvokedCallback="true"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material{theme}.NoActionBar">{rust}
+        <!-- Serves the app's own files to the apps that open them
+            (`SystemUi.openPath`): the authority matches what
+            `FilesProvider.uriFor` builds. -->
+        <provider android:name="com.longbridge.nsh.FilesProvider"
+            android:authorities="{package}.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
         <activity android:name="{activity}" android:exported="true"{launch_mode}
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection">
@@ -541,7 +579,7 @@ fn add_files(
     let mut zip = ZipWriter::new(fs::File::create(out)?);
     for i in 0..input.len() {
         let file = input.by_index_raw(i)?;
-        let name = file.name().to_owned();
+        let name = file.name()?.into_owned();
         if layout.linked.is_empty() {
             zip.raw_copy_file(file)?;
         } else if name == "AndroidManifest.xml" {
@@ -793,6 +831,28 @@ mod tests {
         let at = manifest.find(flag).unwrap();
         assert!(application < at && at < activity, "{manifest}");
         assert!(!super::manifest_xml(&apk(false, false)).contains("com.longbridge.nsh.RUST"));
+    }
+
+    #[test]
+    fn a_packaged_app_declares_the_files_provider() {
+        // `SystemUi.openPath` hands the system's viewer a `content:` URI
+        // of this authority; without the declaration the provider is not
+        // resolved and the file cannot be opened.
+        let manifest = super::manifest_xml(&apk(false, false));
+        let provider = "<provider android:name=\"com.longbridge.nsh.FilesProvider\"";
+        assert!(manifest.contains(provider), "{manifest}");
+        assert!(
+            manifest.contains("android:exported=\"false\""),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains("android:grantUriPermissions=\"true\""),
+            "{manifest}"
+        );
+        let application = manifest.find("<application").unwrap();
+        let activity = manifest.find("<activity").unwrap();
+        let at = manifest.find(provider).unwrap();
+        assert!(application < at && at < activity, "{manifest}");
     }
 
     #[test]

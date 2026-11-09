@@ -63,6 +63,7 @@ fn start() -> (Engine, Receiver<MountBatch>) {
         app: nsh_engine::App::Js(unsafe { Bundle::bytecode(bytecode) }),
         viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -83,6 +84,8 @@ fn start() -> (Engine, Receiver<MountBatch>) {
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -228,6 +231,7 @@ fn start_app_with(app: &str, header_heights: (Points, Points)) -> (Engine, Recei
         app: nsh_engine::App::Js(unsafe { Bundle::bytecode(bytecode) }),
         viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -248,6 +252,8 @@ fn start_app_with(app: &str, header_heights: (Points, Points)) -> (Engine, Recei
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),

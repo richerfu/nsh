@@ -23,6 +23,7 @@ import BaseHoverCard from "./base-hover-card";
 import BaseLink from "./base-link";
 import BaseNavPage from "./base-nav-page";
 import BaseNavStack from "./base-nav-stack";
+import BaseNavStackChange from "./base-nav-stack-change";
 import BaseNumberInput from "./base-number-input";
 import BaseOtpInput from "./base-otp-input";
 import BasePagination from "./base-pagination";
@@ -30,6 +31,7 @@ import BasePopups from "./base-popups";
 import BaseMenuChecked from "./base-menu-checked";
 import BasePlot from "./base-plot";
 import BaseProgress from "./base-progress";
+import BaseTerminal from "./base-terminal";
 import BaseTable from "./base-table";
 import BaseRadio from "./base-radio";
 import BaseResizable from "./base-resizable";
@@ -42,6 +44,7 @@ import BaseSafeAreaKeyboard from "./base-safe-area-keyboard";
 import BaseCombobox from "./base-combobox";
 import BaseCommand from "./base-command";
 import BaseDatePicker from "./base-date-picker";
+import BaseEmojiPicker from "./base-emoji-picker";
 import BaseScrollbar from "./base-scrollbar";
 import BaseSelect from "./base-select";
 import BaseSelectableView from "./base-selectable-view";
@@ -54,6 +57,7 @@ import BaseToggle from "./base-toggle";
 import BaseToolbar from "./base-toolbar";
 import BaseTree from "./base-tree";
 import BaseToken from "./base-token";
+import BaseSetTheme from "./base-set-theme";
 import BaseTransitionShader from "./base-transition-shader";
 
 const cases: Record<string, () => JSX.Element> = {
@@ -73,6 +77,7 @@ const cases: Record<string, () => JSX.Element> = {
   "base-link": BaseLink,
   "base-nav-page": BaseNavPage,
   "base-nav-stack": BaseNavStack,
+  "base-nav-stack-change": BaseNavStackChange,
   "base-number-input": BaseNumberInput,
   "base-otp-input": BaseOtpInput,
   "base-pagination": BasePagination,
@@ -99,15 +104,18 @@ const cases: Record<string, () => JSX.Element> = {
   "base-collapsible-reveal": BaseCollapsibleReveal,
   "base-plot": BasePlot,
   "base-progress": BaseProgress,
+  "base-terminal": BaseTerminal,
   "base-combobox": BaseCombobox,
   "base-command": BaseCommand,
   "base-date-picker": BaseDatePicker,
+  "base-emoji-picker": BaseEmojiPicker,
   "base-scrollbar": BaseScrollbar,
   "base-select": BaseSelect,
   "base-slider": BaseSlider,
   "base-table": BaseTable,
   "base-toast": BaseToast,
   "base-token": BaseToken,
+  "base-set-theme": BaseSetTheme,
   "base-transition-shader": BaseTransitionShader,
 };
 const shown = signal("");

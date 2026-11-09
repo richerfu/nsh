@@ -70,6 +70,7 @@ pub(crate) fn start(app: &str) -> (Engine, crossbeam_channel::Receiver<MountBatc
         app: nsh_engine::App::Js(app),
         viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -90,6 +91,8 @@ pub(crate) fn start(app: &str) -> (Engine, crossbeam_channel::Receiver<MountBatc
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),

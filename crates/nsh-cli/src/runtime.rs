@@ -23,6 +23,10 @@
 //! runtime/web/nsh-syntaxes.bin         the syntaxes it fetches to highlight code
 //! ```
 //!
+//! A release archive holds this machine's own runtime; the others are
+//! components (`crate::component`), added the first time a command needs
+//! them (or with `nsh component add`).
+//!
 //! In a cargo checkout, the same files come from `target/<triple>/<profile>`
 //! (with the profile of this CLI; Linux's, macOS's, Windows' and GPUI's
 //! from `target/<profile>`, as they are built for this machine), and are
@@ -79,12 +83,26 @@ impl Platform {
         }
     }
 
+    /// The component of the distribution holding its runtime
+    /// ([`crate::component`]); `None` for this machine's own, which the
+    /// release archive holds.
+    fn component(self) -> Option<&'static str> {
+        match self {
+            Platform::IphoneOs | Platform::IphoneSimulator | Platform::MacCatalyst => Some("ios"),
+            Platform::Gpui => Some("gpui"),
+            Platform::Tui => Some("tui"),
+            Platform::Linux | Platform::MacOs | Platform::Windows => None,
+        }
+    }
+
     /// The cargo target triple (`None`: this machine's).
     pub(crate) fn triple(self) -> Option<&'static str> {
         match self {
             Platform::IphoneOs => Some("aarch64-apple-ios"),
             Platform::IphoneSimulator => Some("aarch64-apple-ios-sim"),
             Platform::MacCatalyst => Some("aarch64-apple-ios-macabi"),
+            // Packaged off Windows: cross-built ([`cross_build`]).
+            Platform::Windows if !cfg!(windows) => Some(WINDOWS_TRIPLE),
             Platform::Linux
             | Platform::MacOs
             | Platform::Windows
@@ -115,12 +133,7 @@ impl Platform {
     /// The file of [`Platform::binary`]: with this machine's executable
     /// suffix (`.exe`) when it is built for this machine.
     pub(crate) fn file_name(self, runner: bool) -> String {
-        let suffix = if self.triple().is_none() {
-            env::consts::EXE_SUFFIX
-        } else {
-            ""
-        };
-        format!("{}{suffix}", self.binary(runner))
+        format!("{}{}", self.binary(runner), exe_suffix(self.triple()))
     }
 
     /// The development host (`runner` false) or release runner for it, as
@@ -143,6 +156,17 @@ impl Platform {
         };
         format!("the {what} for {platform}")
     }
+}
+
+/// In an installed distribution, adds the component `name` that holds
+/// `missing` ([`crate::component`]) and answers `true`; a checkout's build
+/// (`false`) builds its runtimes with cargo instead.
+fn add_component(name: &str, missing: &Path) -> anyhow::Result<bool> {
+    let Some(root) = crate::component::distribution() else {
+        return Ok(false);
+    };
+    crate::component::ensure(&root, name, missing)?;
+    Ok(true)
 }
 
 /// This `nsh`, through symlinks: an installer links `~/.local/bin/nsh` (or
@@ -189,6 +213,9 @@ fn prebuilt_android(dev: bool) -> anyhow::Result<PathBuf> {
     let bin = exe.parent().context("cli has no parent directory")?;
     let dist = bin.join("../runtime/android").join(variant);
     if dist.join("classes.dex").exists() {
+        return Ok(dist);
+    }
+    if add_component("android", &dist.join("classes.dex"))? {
         return Ok(dist);
     }
     // Cargo checkout: `cargo xtask android [--release] [--dev]` output.
@@ -404,6 +431,11 @@ pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntim
     if let Some(runtime) = found(bin.join("../runtime/web")) {
         return Ok(Some(runtime));
     }
+    if build && add_component("web", &bin.join("../runtime/web").join(kind.file()))? {
+        return found(bin.join("../runtime/web"))
+            .map(Some)
+            .context("the component `web` holds no web runtime");
+    }
     let Some(root) = checkout(bin) else {
         if build {
             bail!(
@@ -488,21 +520,24 @@ pub(crate) fn file(platform: Platform, runner: bool) -> anyhow::Result<PathBuf> 
     if dist.exists() {
         return Ok(dist);
     }
+    if let Some(component) = platform.component()
+        && add_component(component, &dist)?
+    {
+        return Ok(dist);
+    }
     // Cargo checkout: target/<profile>/nsh -> target/<triple>/<profile>/<name>.
     let profile = bin.file_name().context("cli profile dir")?;
+    let mut host_target = None;
     if let Some(root) = checkout(bin) {
         let mut args = vec!["build", "-p", name];
-        // The GPUI backend is a workspace of its own, built into the same
-        // `target/` (cargo reads `crates/gpui/.cargo/config.toml` only when
-        // run from there).
-        let manifest = root.join("crates/gpui/Cargo.toml");
-        let manifest = manifest.to_string_lossy();
-        let target_dir = root.join("target");
-        let target_dir = target_dir.to_string_lossy();
-        if matches!(platform, Platform::Gpui) {
-            args.extend(["--manifest-path", &manifest, "--target-dir", &target_dir]);
+        // GPUI has its own workspace. Run there so Cargo reads its config,
+        // and ask Cargo where it builds rather than imposing the CLI's target.
+        let workspace = if matches!(platform, Platform::Gpui) {
             args.extend(gpui_features());
-        }
+            root.join("crates/gpui")
+        } else {
+            root.clone()
+        };
         if let Some(triple) = platform.triple() {
             args.extend(["--target", triple]);
         }
@@ -519,12 +554,19 @@ pub(crate) fn file(platform: Platform, runner: bool) -> anyhow::Result<PathBuf> 
             Some(other) => format!("{} ({other} build)", platform.host(runner)),
             None => platform.host(runner),
         };
-        cargo(&root, &args, &what)?;
+        cargo(&workspace, &args, &what)?;
+        if matches!(platform, Platform::Gpui) {
+            host_target = Some(
+                crate::rust_app::cargo_target_directory(&workspace)
+                    .context("Cargo did not report the GPUI workspace's target directory")?,
+            );
+        }
     }
-    let mut built = bin
-        .parent()
-        .context("cli is not in a target directory")?
-        .to_path_buf();
+    let mut built = host_target.unwrap_or(
+        bin.parent()
+            .context("cli is not in a target directory")?
+            .to_path_buf(),
+    );
     if let Some(triple) = platform.triple() {
         built.push(triple);
     }
@@ -634,11 +676,57 @@ fn append_web_flags(command: &mut Command, encoded: Option<OsString>, plain: Opt
     }
 }
 
+/// The Windows target a Windows runtime is cross-built for off Windows.
+pub(crate) const WINDOWS_TRIPLE: &str = "x86_64-pc-windows-msvc";
+
+/// The executable suffix of a build for `triple` (`None`: this machine).
+pub(crate) fn exe_suffix(triple: Option<&str>) -> &'static str {
+    match triple {
+        None => env::consts::EXE_SUFFIX,
+        Some(triple) if triple.contains("-windows-") => ".exe",
+        Some(_) => "",
+    }
+}
+
+/// Sets up `cmd` (`cargo` with no arguments yet) to build for `triple`.
+/// A Windows (MSVC) build off Windows links with cargo-xwin, whose
+/// `cargo xwin build` takes the same arguments as `cargo build`, and links
+/// the C runtime statically so the executable needs no Visual C++
+/// redistributable on the machine it runs on.
+pub(crate) fn cross_build(cmd: &mut Command, triple: Option<&str>) -> anyhow::Result<()> {
+    if cfg!(windows) || triple != Some(WINDOWS_TRIPLE) {
+        return Ok(());
+    }
+    let program = cmd.get_program().to_owned();
+    let found = Command::new(&program)
+        .args(["xwin", "--version"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !found {
+        bail!(
+            "building for Windows on this machine needs cargo-xwin and the {WINDOWS_TRIPLE} target:\n  cargo install --locked cargo-xwin\n  rustup target add {WINDOWS_TRIPLE}\nor set NSH_RUNTIME to a runtime with a Windows release runner"
+        );
+    }
+    cmd.arg("xwin").env(
+        "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS",
+        "-C target-feature=+crt-static",
+    );
+    Ok(())
+}
+
 /// Runs cargo in the checkout `root` (the one that runs this CLI under
 /// `cargo run`, else `cargo` from the path): the step "building <what>".
 fn cargo(root: &Path, args: &[&str], what: &str) -> anyhow::Result<()> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    crate::ui::cargo(Command::new(&cargo).args(args).current_dir(root), what)
+    let mut cmd = Command::new(&cargo);
+    let triple = args
+        .iter()
+        .position(|arg| *arg == "--target")
+        .and_then(|i| args.get(i + 1).copied());
+    cross_build(&mut cmd, triple)?;
+    crate::ui::cargo(cmd.args(args).current_dir(root), what)
 }
 
 fn existing(path: PathBuf, platform: Platform, name: &str) -> anyhow::Result<PathBuf> {

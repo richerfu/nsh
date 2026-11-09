@@ -87,6 +87,7 @@ fn app_config(
         ),
         viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -107,6 +108,8 @@ fn app_config(
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     }
 }
 
@@ -1282,6 +1285,58 @@ fn the_clipboard_round_trips_through_the_platform() {
 
 /// Every clipboard function, as each settles: `ok` or the error's class,
 /// `code`, `permission` and `resource`.
+const HAPTICS: &str = r#"import { mount, signal, Text } from "nsh";
+import { Haptics } from "nsh/mobile";
+
+const refused = signal("none");
+setTimeout(() => {
+  Haptics.selection();
+  Haptics.impact();
+  Haptics.impact("rigid");
+  Haptics.notification("error");
+  Haptics.notification();
+  try {
+    Haptics.notification("loud" as never);
+  } catch (e) {
+    refused.set((e as Error).name);
+  }
+}, 0);
+
+mount(() => <Text>{`refused ${refused()}`}</Text>);
+"#;
+
+/// `Haptics` of `nsh/mobile` asks the platform for each haptic, in order
+/// (a notification without a kind is a success); a name it does not know
+/// throws.
+#[test]
+fn haptics_reach_the_platform() {
+    let (_engine, rx) = start(HAPTICS);
+    let mut played = Vec::new();
+    until(&rx, |batch| {
+        for item in &batch.items {
+            if let MountItem::Command {
+                id: ROOT_ID,
+                command: Command::Haptic(haptic),
+            } = item
+            {
+                played.push(*haptic);
+            }
+        }
+        shows(batch, "refused TypeError")
+    });
+    use nsh_core::{Haptic, HapticImpact, HapticNotification};
+    assert_eq!(
+        played,
+        [
+            Haptic::Selection,
+            Haptic::Impact(HapticImpact::Medium),
+            Haptic::Impact(HapticImpact::Rigid),
+            Haptic::Notification(HapticNotification::Error),
+            Haptic::Notification(HapticNotification::Success),
+        ]
+    );
+}
+
 const CLIPBOARD_DENIED: &str = r#"import { mount, signal, Text } from "nsh";
 import { Clipboard } from "nsh";
 
@@ -2271,11 +2326,13 @@ const QUIT: &str = r#"import { mount, Text } from "nsh";
 import { Application } from "nsh/desktop";
 
 Application.quit();
-mount(() => <Text>{`quit ${typeof Application.quit}`}</Text>);
+Application.restart();
+mount(() => <Text>{`quit ${typeof Application.quit} ${typeof Application.restart}`}</Text>);
 "#;
 
 /// `Application.quit()` reaches the platform as the root's quit command, which it
-/// carries out as its quit menu role.
+/// carries out as its quit menu role; `Application.restart()` as the root's
+/// restart command.
 #[test]
 fn app_quit_reaches_the_platform() {
     use nsh_core::desktop::DesktopCommand;
@@ -2287,21 +2344,27 @@ fn app_quit_reaches_the_platform() {
             ..Environment::default()
         },
     );
-    let batches = until(&rx, |batch| shows(batch, "quit function"));
-    assert!(
-        batches.iter().flat_map(|b| &b.items).any(|item| matches!(
-            item,
-            MountItem::Command {
-                id: ROOT_ID,
-                command: Command::Desktop(command),
-            } if **command == DesktopCommand::Quit
-        )),
-        "{batches:?}"
-    );
+    let batches = until(&rx, |batch| shows(batch, "quit function function"));
+    for expected in [DesktopCommand::Quit, DesktopCommand::Restart] {
+        assert!(
+            batches.iter().flat_map(|b| &b.items).any(|item| matches!(
+                item,
+                MountItem::Command {
+                    id: ROOT_ID,
+                    command: Command::Desktop(command),
+                } if **command == expected
+            )),
+            "{expected:?}: {batches:?}"
+        );
+    }
 }
 
+/// German's data stands for what the bundle of an app listing it carries.
 const LOCALE: &str = r#"import { mount, Text } from "nsh";
 import { fontScale, locale } from "nsh";
+import { i18n } from "nsh:rt";
+
+i18n(JSON.stringify({ languages: { de: GERMAN } }));
 
 mount(() => (
   <Text>{`${locale()} ${new Intl.NumberFormat().format(1234.5)} ${fontScale()}`}</Text>
@@ -2310,7 +2373,8 @@ mount(() => (
 
 #[test]
 fn locale_and_font_scale_follow_the_environment() {
-    let (engine, rx) = start(LOCALE);
+    let app = LOCALE.replace("GERMAN", nsh_i18n::language_data("de").unwrap());
+    let (engine, rx) = start(&app);
     let first = until(&rx, |b| shows(b, "en-US 1,234.5 1"));
     assert!(first.iter().any(|b| shows(b, "en-US 1,234.5 1")));
     // What an embedding app sets in place of the system's.

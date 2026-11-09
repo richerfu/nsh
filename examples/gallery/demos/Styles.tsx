@@ -173,6 +173,21 @@ function Borders() {
             <View style={{ width: 112, height: 28, borderRadius: 8, borderWidth: 3, borderColor: colors.warn, borderStyle: "dotted" }} />
           </View>
         </Tile>
+        <Tile label="Single-side dashes" code="border-t · border-l · border-dashed">
+          <View style={{ width: 112, height: 76, gap: 12 }}>
+            <View class="h-px w-full border-t border-dashed" style={{ borderColor: colors.info }} />
+            <View class="flex-1 border-l-2 border-dashed" style={{ borderColor: colors.info }} />
+          </View>
+        </Tile>
+        <Tile label="Unequal sides" note="4 · 2 · 3 · 1 pt, clockwise">
+          <View style={{ ...box(), borderRadius: 16, borderStyle: "dashed", borderColor: colors.info, borderTopWidth: 4, borderRightWidth: 2, borderBottomWidth: 3, borderLeftWidth: 1 }} />
+        </Tile>
+        <Tile label="Single-side dots" code="border-b-4 · border-dotted">
+          <View class="border-b-4 border-dotted" style={{ ...box(), borderColor: colors.warn }} />
+        </Tile>
+        <Tile label="Colored dashes" note="One color per side">
+          <View style={{ ...box(), borderRadius: 16, borderWidth: 3, borderStyle: "dashed", borderTopColor: colors.danger, borderRightColor: colors.up, borderBottomColor: colors.info, borderLeftColor: colors.warn }} />
+        </Tile>
       </Grid>
     </Card>
   );
@@ -387,7 +402,7 @@ function FlipCard() {
               : {
                   backgroundColor: "#eef2fc",
                   backgroundImage: "linear-gradient(180deg, #f0f4fd 0%, #ebf0fb 100%)",
-                  boxShadow: "inset 0 1px 0 #ffffff, 0 8px 20px rgba(20,20,10,0.10)",
+                  boxShadow: "inset 0 1px 0 #ffffff, 0 8px 20px rgba(16,20,30,0.10)",
                   borderColor: "#cdd8f3",
                 }),
             transform: [{ perspective: 800 }, { rotateY: angle }],
@@ -415,7 +430,7 @@ function FlipCard() {
               : {
                   backgroundColor: "#f1f7e2",
                   backgroundImage: "linear-gradient(180deg, #f2f8e4 0%, #eef5da 100%)",
-                  boxShadow: "inset 0 1px 0 #ffffff, 0 8px 20px rgba(20,20,10,0.10)",
+                  boxShadow: "inset 0 1px 0 #ffffff, 0 8px 20px rgba(16,20,30,0.10)",
                   borderColor: "#d3e3a8",
                 }),
             transform: [{ perspective: 800 }, { rotateY: angle.interpolate({ inputRange: [0, 180], outputRange: [180, 360] }) }],

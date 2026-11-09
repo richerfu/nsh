@@ -106,10 +106,12 @@ mount(() => <Text>{{shown()}}</Text>);
             app: nsh_engine::App::Js(bundle),
             viewport: Size::new(nsh_core::geometry::px(400.0), nsh_core::geometry::px(300.0)),
             trace: false,
+            content_culling: false,
             network,
             websocket: None,
             refuse_connections: None,
             filesystem: None,
+            windows: None,
             assets: None,
             environment: Environment {
                 os: Os::Linux,
@@ -129,6 +131,7 @@ mount(() => <Text>{{shown()}}</Text>);
             host: Default::default(),
             picker: None,
             speech: None,
+            audio: None,
         };
         let engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
         Self {

@@ -254,6 +254,8 @@ events! {
     Download = "onDownload": "A web view's download started, finished or failed (payload: `state`, `id`, `url`, `filename`, `path`; `bytes` once finished, `message` when it failed).",
     Notification = "onNotification": "The platform answered a [`Command::Notification`], or the user pressed a notification (root only; payload: the fields of [`crate::notifications::NotificationEvent`]).",
     UrlScheme = "onUrlScheme": "The system handed the app a URL that opens it (root only; payload: `url`, [`crate::url_scheme::URL`]); the core keeps those of the schemes the app claims ([`crate::url_scheme`]).",
+    Audio = "onAudio": "A sound or a player reported (root only; payload: [`EventPayload::Audio`]).",
+    Window = "onWindow" as "": "A window of the app's own reported its state, a close press or that it closed (on its root node; desktops; payload: [`EventPayload::Window`]).",
 
 }
 
@@ -860,6 +862,16 @@ pub enum EventPayload {
         /// What it reported.
         event: crate::speech::SpeechEvent,
     },
+    /// What a sound or a player reported ([`EventKind::Audio`],
+    /// [`crate::audio`]).
+    Audio {
+        /// The sound or player ([`crate::audio::AudioCommand::id`]).
+        id: u32,
+        /// What it reported.
+        event: crate::audio::AudioEvent,
+    },
+    /// What a window of the app's own reported ([`EventKind::Window`]).
+    Window(Box<crate::desktop::WindowEvent>),
     /// The answer to a [`Command::FileRequest`] ([`EventKind::FileRequest`],
     /// [`crate::file_dialog`]).
     FileRequest {
@@ -1818,6 +1830,10 @@ pub enum Command {
     LayoutAnimation(LayoutAnimation),
     /// Leave the app (Android back handling; on the root).
     ExitApp,
+    /// The app's address (`UrlScheme.setUrl`, `set_app_url`; on the root):
+    /// the web replaces the current history entry's, the native platforms
+    /// keep none ([`crate::url_scheme`]).
+    SetAppUrl(String),
     /// What the back button does when none of the app's listeners took
     /// it: the innermost stack pops (or asks, with `popOnBack` false); with
     /// none, the app leaves on Android (on the root).
@@ -1900,6 +1916,11 @@ pub enum Command {
     },
     /// Have the screen reader read a message (on the root).
     Announce(String),
+    /// Turn the performance monitor on or off (on the root;
+    /// `setFpsEnabled`): what the platform has of one, the
+    /// macOS panel or the other platforms' `nsh::fps` lines. Platforms
+    /// without a monitor ignore it.
+    PerfMonitor(bool),
     /// Load the image at `uri` (keeping its bytes for views that show it
     /// next) and report its pixel size as [`EventKind::ImageInfo`] `id`
     /// (on the root).
@@ -2010,9 +2031,18 @@ pub enum Command {
     /// [`EventKind::Speech`] ([`EventPayload::Speech`]). Sent only on
     /// platforms whose [`crate::platform::Environment::speech`] is set.
     Speech(crate::speech::SpeechCommand),
+    /// Load, play and free sounds, open and drive players (on the root;
+    /// `Sound` and `AudioPlayer` of `nsh`, [`crate::audio`]) and report
+    /// what happens as [`EventKind::Audio`] ([`EventPayload::Audio`]). Sent
+    /// only on platforms whose [`crate::platform::Environment::audio`] is
+    /// set.
+    Audio(crate::audio::AudioCommand),
     /// Show a notification, ask for the permission, set the app's badge
     /// (on the root; `Notifications` of `nsh`, [`crate::notifications`]).
     Notification(crate::notifications::NotificationCommand),
+    /// Play a haptic (on the root; `Haptics` of `nsh/mobile`,
+    /// [`crate::element::haptic`]). Platforms without haptics ignore it.
+    Haptic(Haptic),
     /// A desktop command (on the root; `nsh/desktop`): the window, its
     /// title bar, menus. Mobile platforms ignore it.
     Desktop(Box<crate::desktop::DesktopCommand>),
@@ -2036,6 +2066,54 @@ pub enum Command {
         /// Its arguments (any JSON value).
         args: crate::JsonValue,
     },
+}
+
+/// A haptic the device plays ([`Command::Haptic`], TS: `Haptics` of
+/// `nsh/mobile`): grouped as UIKit's feedback generators and Expo's API —
+/// a selection that changed, an impact by weight, a task's outcome. On
+/// Android it is the view's haptic feedback. What the user feels follows
+/// the device and its settings: none with haptics turned off, or on
+/// hardware without them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Haptic {
+    /// A selection changed: a picker's value, a segment, a slider's step
+    /// (`Haptics.selection()`).
+    Selection,
+    /// An element collided; the style is its weight (`Haptics.impact`).
+    Impact(HapticImpact),
+    /// A task ended (`Haptics.notification`).
+    Notification(HapticNotification),
+}
+
+/// The weight of an impact ([`Haptic::Impact`], TS: `Haptics.impact`'s
+/// argument: `"light"` … `"rigid"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PropEnum)]
+#[non_exhaustive]
+pub enum HapticImpact {
+    /// A small, light element.
+    Light,
+    /// A moderate element.
+    Medium,
+    /// A large, heavy element.
+    Heavy,
+    /// A soft, flexible element.
+    Soft,
+    /// A hard, inflexible element.
+    Rigid,
+}
+
+/// How a task ended ([`Haptic::Notification`], TS: `Haptics.notification`'s
+/// argument: `"success"`, `"warning"`, `"error"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PropEnum)]
+#[non_exhaustive]
+pub enum HapticNotification {
+    /// It succeeded.
+    Success,
+    /// It produced a warning.
+    Warning,
+    /// It failed.
+    Error,
 }
 
 /// The status bar's look.
@@ -2113,37 +2191,42 @@ impl StatusBarSetting {
     }
 
     /// The app's default (`nsh.json` `"statusBar"`): `{ "foreground":
-    /// "auto" | "light" | "dark", "hidden": bool }`, both optional. The
-    /// error says what is wrong, for `nsh.json: statusBar: …`.
-    pub fn from_json(value: &crate::JsonValue) -> Result<Self, String> {
-        let Some(object) = value.as_object() else {
-            return Err(format!(
-                "expected an object ({{ \"foreground\": \"light\", \"hidden\": false }}), got {value}"
-            ));
-        };
+    /// "auto" | "light" | "dark", "hidden": bool }`, both optional. What it
+    /// cannot read, an unknown key or a value of a form it does not know,
+    /// is left out and the rest applies: a bundle made by a newer NSH keeps
+    /// its setting on an older runtime.
+    pub fn from_json(value: &crate::JsonValue) -> Self {
+        Self::from_json_lenient(value).0
+    }
+
+    /// [`StatusBarSetting::from_json`], with what it left out
+    /// (`foreground: "dim" is not "auto", "light" or "dark"`), which the
+    /// toolchain warns of (a newer NSH's, or a typo).
+    pub fn from_json_lenient(value: &crate::JsonValue) -> (Self, Vec<String>) {
         let mut setting = Self::default();
+        let mut ignored = Vec::new();
+        let Some(object) = value.as_object() else {
+            ignored.push(format!(
+                "{value} is not an object ({{ \"foreground\": \"light\", \"hidden\": false }})"
+            ));
+            return (setting, ignored);
+        };
         for (key, v) in object {
             match key.as_str() {
-                "foreground" => {
-                    let style = v.as_str().and_then(StatusBarStyle::from_name);
-                    setting.style = Some(style.ok_or_else(|| {
-                        format!("foreground: {v} is not \"auto\", \"light\" or \"dark\"")
-                    })?);
-                }
-                "hidden" => {
-                    setting.hidden = Some(
-                        v.as_bool()
-                            .ok_or_else(|| format!("hidden: {v} is not true or false"))?,
-                    );
-                }
-                other => {
-                    return Err(format!(
-                        "unknown key {other:?} (\"foreground\" and \"hidden\" are known)"
-                    ));
-                }
+                "foreground" => match v.as_str().and_then(StatusBarStyle::from_name) {
+                    Some(style) => setting.style = Some(style),
+                    None => ignored.push(format!(
+                        "foreground: {v} is not \"auto\", \"light\" or \"dark\""
+                    )),
+                },
+                "hidden" => match v.as_bool() {
+                    Some(hidden) => setting.hidden = Some(hidden),
+                    None => ignored.push(format!("hidden: {v} is not true or false")),
+                },
+                other => ignored.push(format!("unknown key `{other}`")),
             }
         }
-        Ok(setting)
+        (setting, ignored)
     }
 
     /// This setting over `below`.
@@ -2286,8 +2369,7 @@ pub enum Prop {
     Scroll(ScrollProp),
     /// `scrollbar`: the scroll indicator shows (default true), or the
     /// app's built-in bar of a theme (an object, `nsh/base`'s
-    /// `ScrollbarTheme`). On the desktop a horizontal view keeps it: it is
-    /// the mouse's scroll bar. A multiline input's is its text's.
+    /// `ScrollbarTheme`). A multiline input's is its text's.
     #[prop(js = "scrollbar", with = crate::js::host_values::scrollbar, reset = Prop::Scrollbar(ScrollbarSetting::Shown), ts = "boolean | import(\"nsh/base\").ScrollbarTheme", on = SCROLL | LIST | INPUT)]
     Scrollbar(ScrollbarSetting),
     /// `refreshing`: the pull-to-refresh spinner shows.
@@ -2475,6 +2557,10 @@ pub enum Prop {
     /// `hitSlop`: extends the touch area beyond the bounds.
     #[prop(js = "hitSlop", with = crate::js::host_values::hit_slop, reset = Prop::HitSlop(EdgeInsets::default()), ts = "number | Partial<Edges>")]
     HitSlop(EdgeInsets),
+    /// Where a link goes (`nsh/base`'s `Link` sets its `href`), carried
+    /// to the platform as data: a terminal draws the text inside the view
+    /// as a hyperlink to it. Set by the link component, never by JS.
+    Href(Option<Arc<str>>),
     /// `panActivation`: the view's touch responder waits for a pan that the
     /// platform activates past an offset on one axis (and fails past one on
     /// the other), deciding on the main thread so the scroll views around
@@ -2594,6 +2680,10 @@ pub enum Prop {
     /// The system material of a backdrop blur (iOS, default `ultraThin`).
     #[prop(ios = "backdropMaterial")]
     BackdropMaterial(crate::BackdropMaterial),
+    /// `macos={{ backdrop }}`: the `NSVisualEffectView` material on macOS
+    /// (default `popover` / `withinWindow` / `active`; `None`: none).
+    #[prop(macos = "backdrop")]
+    MacOsBackdrop(Option<crate::MacOsBackdrop>),
     /// An accessibility property.
     #[prop(nested)]
     Accessibility(AccessibilityProp),
@@ -2607,6 +2697,16 @@ pub enum Prop {
     /// a draggable view stay clickable without it.
     #[prop(desktop = "windowDrag")]
     WindowDrag(Option<bool>),
+    /// `windowControl` (desktops): the view of a title bar the app draws
+    /// acts as one of the system's window buttons (minimize, maximize,
+    /// close): the platform hit-tests it as that button and carries out its
+    /// press.
+    #[prop(desktop = "windowControl")]
+    WindowControl(Option<crate::desktop::WindowControl>),
+    /// `windowResize` (desktops): pressing the view resizes a frameless
+    /// window by that edge or corner.
+    #[prop(desktop = "windowResize")]
+    WindowResize(Option<crate::desktop::ResizeEdge>),
     /// `tooltip`: a hint about the view, shown above it on the desktops
     /// while the pointer rests on it (after half a second) until the
     /// pointer leaves or presses it, never on touch screens; it never takes
@@ -2743,6 +2843,10 @@ pub enum NativeProp {
     /// (with a warning): render a new element to change it.
     #[prop(js = "incognito", on = WEBVIEW)]
     Incognito(bool),
+    /// The URL schemes a web view serves from the app (Rust's
+    /// `WebView::url_scheme`). Read when the web view is made, as
+    /// `incognito`.
+    UrlSchemes(Vec<crate::web_resource::WebUrlScheme>),
     /// `paused` (videos): playback is paused.
     #[prop(js = "paused", on = VIDEO, shared)]
     Paused(bool),
@@ -2844,6 +2948,14 @@ pub enum Op {
         child: NodeId,
         /// Sibling to insert before; `None` appends.
         before: Option<NodeId>,
+    },
+    /// Marks detached view `id` the stand-in of an `<Each>` row not
+    /// rendered yet, sized like its rendered siblings: the core asks JS to
+    /// render the row once the view would be made
+    /// ([`crate::element::JsEvent::Rows`]).
+    Placeholder {
+        /// Node id.
+        id: NodeId,
     },
     /// Detaches `child` from `parent`. The child stays alive until released.
     Remove {

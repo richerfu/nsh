@@ -158,6 +158,9 @@ stack's state, dialogs, the Android back button and tabs.
 - When the user leaves a page natively (the back button, swipe back, Android back, the desktops' back keys, the
   browser's back), the page goes. In TSX the stack removes its route from the state, so `nav.routes()` always matches
   what the user sees. In Rust the page reports `on_dismiss`, where you drop its route (and the routes above it).
+- Android back, the desktops' back keys and the browser's back act on the stack that shows: a stack laid out at no
+  size, or inside a view laid out so (a tab that is not selected, `display: none`), keeps its pages until it shows
+  again.
 - In TSX, a child function that returns something other than a `<NavPage>` gets a page with default options. Return
   a `<NavPage>` to set its header and other options.
 
@@ -205,6 +208,7 @@ const depth = () => nav.routes().length;
 | `children` | `.child(..)` | `(route: R, index: Accessor<number>) => JSX.Element` | Renders a route. Return a `<NavPage>` for its options. Required. |
 | `style`, `class` | style methods | | The stack's style; usually `flex: 1`. |
 | `testID` | `.test_id(..)` | `string` | Finds the stack in tests and `nsh test --trace`. |
+| `onChange` | an `effect` reading the routes' signal | `({ routes }: { routes: readonly R[] }) => void` | The routes changed: pushed, popped, replaced or set by the app, or a page the user went back from (a back button, a swipe, the browser's back). It runs after the change is rendered, and not for the routes the stack starts with. Use it to track screens, save the navigation state, or set the page's address with [`UrlScheme.setUrl`](../modules/nsh.md#urlscheme). |
 
 The TSX child function receives the route value itself and an accessor of its position in the stack.
 

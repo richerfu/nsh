@@ -7,7 +7,7 @@ group: platforms
 
 # Android
 
-NSH apps run on Android with ordinary Android views and `StaticLayout` text, from Android 9 (API 28), on `arm64-v8a`,
+NSH apps run on Android with ordinary Android views and `StaticLayout` text, from Android 8 (API 26), on `arm64-v8a`,
 `armeabi-v7a` and `x86_64`. Whole apps written in Rust and in TSX run and package as on the other platforms, and an existing app
 can embed modules in an `NshView` and load signed packages it downloads, under limits and capabilities it sets. On Android, `os()` is `Os::Android` (`platform.os` is `"android"` in TSX) and TSX's
 `android={{…}}` props apply.
@@ -92,7 +92,7 @@ dist/nsh/embed/android/nsh-dev.aar   also connects to a `nsh dev` server
 
 The AAR holds the Java runtime and `libnsh.so` for `arm64-v8a`, `armeabi-v7a` and `x86_64`, with their symbols: the
 app's Gradle build strips them when it packages the app and keeps the symbols for its crash reports. It declares the
-`INTERNET` permission and needs **API 28** (Android 9) or newer. It carries its R8 rules (`proguard.txt`), which a
+`INTERNET` permission and needs **API 26** (Android 8) or newer. It carries its R8 rules (`proguard.txt`), which a
 minified build applies on its own: the native library finds the runtime's classes by name, so `com.longbridge.nsh`
 stays as it is.
 
@@ -191,6 +191,7 @@ again replaces the running app. The complete sample is
 | `setLocale(Locale locale)` | The app's language and region in place of the user's: `Intl`, `locale()` and the components follow it at once, and the apps loaded later start in it. `null` follows the system's. |
 | `setFontScale(float scale)` | The text size in place of the system's font size (1 is the default): texts and inputs are laid out again at it and `fontScale()` reads it, at once and for the apps loaded later; lengths keep their size. `0` follows the system's. |
 | `setThemeOverrides(String json)` | The host's brand over the app's [theme](./tailwind.md#theme-tokens): a theme file in the format of `nsh.json`'s `"theme"`. Its tokens win over the app's of the same names, in light and dark mode, and the app's others stay. Applies at once and to the apps loaded later; `null` gives the app its own theme back. Throws `IllegalArgumentException` for a file that does not parse. |
+| `registerFont(byte[] data)` | Registers a font file (TrueType, OpenType, WOFF or WOFF2) the host ships. Apps name its family in `fontFamily` and do not bundle the file. A font registered before a load is in that app's first frame; one registered while an app runs is used from the next layout. Throws `IllegalArgumentException` when `data` is not a font. Registering the same file again does nothing. |
 | `setStorageDirectory(File dir)` | Where the apps loaded next keep their [storage](../modules/nsh.md#storage); `null`: `files/nsh/<app id>` in the app's private directory, by the app's own id. |
 | `setCacheOptions(NshCacheOptions options)` | Where the apps loaded next keep their caches, the [images they download](./images-and-assets.md#kept-on-disk), and how much each keeps. Build one with `NshCacheOptions.builder()`: `location(File)`, `systemLocation()` (the default: `nsh` in the cache directory, each app in `<app id>`) or `noDiskCache()`; `imagesMaxMegabytes(int)` (256 by default) or `imagesOff()`. |
 | `loadAssetBundle(String dir)` | Runs `dir/bundle.nshc` from the APK's assets; app assets come from `dir/assets/`. Returns `false` if it cannot be read (also reported to the error listener). |
@@ -373,10 +374,11 @@ config of the app may override it). The release `nsh.aar` does not.
 
 - **Back button.** `NshView` gets back presses by itself while the app wants them (an open dialog, a pushed page, a
   `BackHandler` listener), and leaves them to the activity otherwise. With `android:enableOnBackInvokedCallback="true"`
-  on Android 13 and newer it registers an `OnBackInvokedCallback`; elsewhere (Android 12 and older, or the attribute
+  on Android 13 and newer it registers an `OnBackInvokedCallback`; elsewhere (Android 9 to 12, or the attribute
   off) it takes the back key before the activity's `onBackPressed`, so before AndroidX's `OnBackPressedDispatcher`
-  and the fragments' callbacks. No forwarding is needed, in an activity or a fragment. A host that already forwards
-  presses to `handleBack()` keeps working: a press goes to the app once.
+  and the fragments' callbacks. No forwarding is needed there, in an activity or a fragment. On Android 8 the activity
+  hands its back presses to the view: `if (!nshView.handleBack()) super.onBackPressed();` in `onBackPressed`. A host
+  that forwards presses to `handleBack()` on every version keeps working: a press goes to the app once.
 
   For predictive back on Android 13+, set `android:enableOnBackInvokedCallback="true"` on the `<application>`, as
   packaged NSH apps do.

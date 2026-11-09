@@ -58,7 +58,7 @@ const LATE: f64 = 0.05;
 const TEST_FRAME: f64 = 1.0 / 60.0;
 
 thread_local! {
-    /// The surfaces of this (main) thread, by key.
+    /// The surfaces of this thread, by key.
     static SURFACES: RefCell<FxHashMap<u64, Weak<Surface>>> = RefCell::default();
 }
 
@@ -142,6 +142,9 @@ pub(crate) type ErrorHandler = Box<dyn Fn(&str)>;
 /// One engine and its views.
 pub(crate) struct Surface {
     key: u64,
+    /// The UI thread the surface was made on: where work that finishes
+    /// elsewhere returns to.
+    ui_thread: crate::window::UiThread,
     /// The root view (node [`ROOT_ID`]): fills the window.
     pub(crate) root: NshView,
     /// Views by node id, and what mounting needs between items.
@@ -159,6 +162,9 @@ pub(crate) struct Surface {
     pub(crate) file_drop: crate::file_drop::State,
     engine: RefCell<Option<Engine>>,
     control: RefCell<Option<EngineControl>>,
+    /// The URL the app was launched with, for the next engine to start
+    /// ([`Surface::set_launch_link`]).
+    launch_link: RefCell<Option<String>>,
     rx: RefCell<Option<Receiver<Message>>>,
     pending: RefCell<Arc<AtomicBool>>,
     /// The window drawn into (shared with the engine's sink).
@@ -223,6 +229,8 @@ pub(crate) struct Surface {
     pub(crate) backdrop_readers: RefCell<Vec<NodeId>>,
     /// Where `asset:/` image URIs resolve ([`crate::image::set_asset_base`]).
     pub(crate) asset_base: RefCell<Option<crate::image::AssetBase>>,
+    /// The engine's sounds and players ([`crate::audio`]).
+    pub(crate) audio: crate::audio::Speaker,
     /// The disk cache of downloaded images ([`crate::image::set_disk_cache`]).
     pub(crate) image_cache: RefCell<Option<nsh_core::image::DiskCache>>,
     /// Videos, web views and registered native components.
@@ -264,6 +272,7 @@ impl Surface {
         let mounter = Mounter::new(root.clone());
         let surface = Rc::new(Surface {
             key,
+            ui_thread: crate::window::UiThread::current(),
             root: root.clone(),
             views: mounter.views.clone(),
             mounter: RefCell::new(mounter),
@@ -273,6 +282,7 @@ impl Surface {
             file_drop: Default::default(),
             engine: RefCell::new(None),
             control: RefCell::new(None),
+            launch_link: RefCell::new(None),
             rx: RefCell::new(None),
             pending: RefCell::new(Arc::new(AtomicBool::new(false))),
             hwnd: Arc::new(std::sync::atomic::AtomicIsize::new(0)),
@@ -303,6 +313,7 @@ impl Surface {
             shader_renderer: std::cell::OnceCell::new(),
             backdrop_readers: RefCell::default(),
             asset_base: RefCell::new(None),
+            audio: Default::default(),
             image_cache: RefCell::new(None),
             native: Default::default(),
             keymap: Default::default(),
@@ -350,6 +361,11 @@ impl Surface {
         SURFACES.with(|s| s.borrow().get(&key).and_then(Weak::upgrade))
     }
 
+    /// The UI thread it lives on ([`crate::window::UiThread::invoke`] runs closures there).
+    pub(crate) fn ui_thread(&self) -> crate::window::UiThread {
+        self.ui_thread
+    }
+
     /// Its key ([`Surface::by_key`]).
     pub(crate) fn key(&self) -> u64 {
         self.key
@@ -393,7 +409,7 @@ impl Surface {
     }
 
     /// Measures the surface's frames and commits from now on; one
-    /// `nsh::perf` line a second ([`crate::fps`]). The ticker then runs on
+    /// `nsh::fps` line a second ([`crate::fps`]). The ticker then runs on
     /// every refresh.
     pub(crate) fn enable_fps(self: &Rc<Self>) {
         if self.fps.borrow().is_some() {
@@ -405,6 +421,13 @@ impl Surface {
         self.ensure_ticking();
     }
 
+    /// Stops measuring ([`Surface::enable_fps`]).
+    pub(crate) fn disable_fps(&self) {
+        if self.fps.take().is_some() {
+            self.control(|c| c.set_perf_monitor(None));
+        }
+    }
+
     /// The performance monitor, while one measures.
     pub(crate) fn fps(&self) -> Option<Rc<crate::fps::Fps>> {
         self.fps.borrow().clone()
@@ -413,6 +436,13 @@ impl Surface {
     /// Starts `config`'s app, replacing what ran.
     pub(crate) fn start(self: &Rc<Self>, mut config: EngineConfig) {
         self.stop();
+        // The main window's state and the displays are known from the
+        // first frame on (an embedded surface's window is the host's).
+        let top_level = crate::window_state::top_level(self.hwnd());
+        if top_level {
+            crate::window_state::report_main(self);
+        }
+        let displays = top_level.then(crate::window_state::displays);
         let env = self.environment.get();
         config.viewport = env.window;
         config.environment = env;
@@ -431,11 +461,20 @@ impl Surface {
         *self.rx.borrow_mut() = Some(rx);
         *self.pending.borrow_mut() = pending;
         let family = crate::text::ui_family();
-        // The embedding app's theme overrides are in the first frame.
+        // The embedding app's theme overrides are in the first frame, and
+        // the launch URL is the app's address when its code first runs
+        // (`UrlScheme.url()`).
         let tokens = self.host_tokens.borrow().clone();
+        let launch = self.launch_link.take();
         let setup = |control: &EngineControl| {
             if tokens.is_some() {
                 control.set_tokens(tokens);
+            }
+            if let Some(displays) = displays {
+                control.set_displays(displays);
+            }
+            if let Some(url) = launch {
+                crate::linking::dispatch(control, url);
             }
         };
         match Engine::start_with(config, move || DWriteTextEngine::new(family), sink, setup) {
@@ -482,6 +521,12 @@ impl Surface {
         if let Some(control) = &*self.control.borrow() {
             f(control);
         }
+    }
+
+    /// Sets the URL the app was launched with (`EventKind::UrlScheme`), which
+    /// the next engine to start applies before the app's code first runs.
+    pub(crate) fn set_launch_link(&self, url: String) {
+        *self.launch_link.borrow_mut() = Some(url);
     }
 
     /// Sends an event to JS.
@@ -662,7 +707,11 @@ impl Surface {
     /// Draws the window (`WM_PAINT`).
     pub(crate) fn paint(self: &Rc<Self>) {
         self.invalid.set(false);
-        crate::render::frame(self);
+        // Deferred: the swap chain posts `WM_NSH_PAINT` when it has room, so
+        // `invalid` stays set (no second `WM_PAINT` meanwhile).
+        if crate::render::frame(self) {
+            self.invalid.set(true);
+        }
     }
 
     /// Hosted items drawn by the frame just shown, with their window
@@ -674,30 +723,7 @@ impl Surface {
         drawn: Vec<(Rc<dyn Hosted>, RECT)>,
         redrawn: Option<&[RECT]>,
     ) {
-        let mut placed = self.placed.borrow_mut();
-        let mut next: Vec<(Rc<dyn Hosted>, RECT)> = Vec::with_capacity(drawn.len());
-        for (item, rect) in drawn {
-            // A partial frame draws its areas one by one.
-            if !next.iter().any(|(i, _)| Rc::ptr_eq(i, &item)) {
-                next.push((item, rect));
-            }
-        }
-        for (old, rect) in placed.iter() {
-            if next.iter().any(|(item, _)| Rc::ptr_eq(item, old)) {
-                continue;
-            }
-            let untouched =
-                redrawn.is_some_and(|areas| !areas.iter().any(|a| crate::render::overlap(a, rect)));
-            if untouched {
-                next.push((old.clone(), *rect));
-            } else {
-                old.placed(None);
-            }
-        }
-        for (item, rect) in &next {
-            item.placed(Some(*rect));
-        }
-        *placed = next;
+        items_placed(&self.placed, drawn, redrawn);
     }
 
     /// The window is see-through where the app draws nothing.
@@ -740,28 +766,7 @@ impl Surface {
         composed: Vec<crate::render::Composed>,
         layers: &[usize],
     ) {
-        let old = std::mem::replace(
-            &mut *self.composed.borrow_mut(),
-            composed.iter().map(|c| c.item.clone()).collect(),
-        );
-        if old.is_empty() && composed.is_empty() {
-            return;
-        }
-        for item in &old {
-            if !composed.iter().any(|c| Rc::ptr_eq(&c.item, item)) {
-                item.compose_at(None);
-            }
-        }
-        let mut visuals = Vec::with_capacity(composed.len());
-        for c in &composed {
-            c.item.compose_at(Some(&c.at));
-            if let Some(v) = c.item.visual() {
-                visuals.push(v);
-            }
-        }
-        if let Some(composition) = composition {
-            composition.arrange(&visuals, layers);
-        }
+        composed_placed(&self.composed, composition, composed, layers);
     }
 
     /// Applies what the engine sent (`WM_NSH_WAKE`).
@@ -1060,6 +1065,75 @@ impl Drop for Surface {
     fn drop(&mut self) {
         let key = self.key;
         let _ = SURFACES.try_with(|s| s.borrow_mut().remove(&key));
+    }
+}
+
+/// Hosted items a window's frame drew, with their window rectangles
+/// (`placed`: what its last frame drew): tells them, and the ones no longer
+/// drawn ([`Surface::items_placed`]; each window of the app's own keeps
+/// its own list).
+pub(crate) fn items_placed(
+    placed: &RefCell<Vec<(Rc<dyn Hosted>, RECT)>>,
+    drawn: Vec<(Rc<dyn Hosted>, RECT)>,
+    redrawn: Option<&[RECT]>,
+) {
+    let mut placed = placed.borrow_mut();
+    let mut next: Vec<(Rc<dyn Hosted>, RECT)> = Vec::with_capacity(drawn.len());
+    for (item, rect) in drawn {
+        // A partial frame draws its areas one by one.
+        if !next.iter().any(|(i, _)| Rc::ptr_eq(i, &item)) {
+            next.push((item, rect));
+        }
+    }
+    for (old, rect) in placed.iter() {
+        if next.iter().any(|(item, _)| Rc::ptr_eq(item, old)) {
+            continue;
+        }
+        let untouched =
+            redrawn.is_some_and(|areas| !areas.iter().any(|a| crate::render::overlap(a, rect)));
+        if untouched {
+            next.push((old.clone(), *rect));
+        } else {
+            old.placed(None);
+        }
+    }
+    for (item, rect) in &next {
+        item.placed(Some(*rect));
+    }
+    *placed = next;
+}
+
+/// The composed items a window's frame drew (`last`: what its last frame
+/// drew), where they go, and its layers: tells them, and the ones no
+/// longer drawn, and stacks them in `composition`
+/// ([`Surface::composed_placed`]).
+pub(crate) fn composed_placed(
+    last: &RefCell<Vec<Rc<dyn Hosted>>>,
+    composition: Option<&crate::compose::Composition>,
+    composed: Vec<crate::render::Composed>,
+    layers: &[usize],
+) {
+    let old = std::mem::replace(
+        &mut *last.borrow_mut(),
+        composed.iter().map(|c| c.item.clone()).collect(),
+    );
+    if old.is_empty() && composed.is_empty() {
+        return;
+    }
+    for item in &old {
+        if !composed.iter().any(|c| Rc::ptr_eq(&c.item, item)) {
+            item.compose_at(None);
+        }
+    }
+    let mut visuals = Vec::with_capacity(composed.len());
+    for c in &composed {
+        c.item.compose_at(Some(&c.at));
+        if let Some(v) = c.item.visual() {
+            visuals.push(v);
+        }
+    }
+    if let Some(composition) = composition {
+        composition.arrange(&visuals, layers);
     }
 }
 

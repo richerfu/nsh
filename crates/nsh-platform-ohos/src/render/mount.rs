@@ -1355,7 +1355,12 @@ impl Mounter {
                                 web.command(command)?;
                             }
                         }
-                        Command::LayoutAnimation(_) => {} /* Applied in this batch's animation prepass. */
+                        Command::LayoutAnimation(_)
+                        | Command::SetAppUrl(_)
+                        | Command::Haptic(_) => {}
+                        Command::PerfMonitor(enabled) => {
+                            self.control.set_perf_monitor(enabled.then(Default::default));
+                        }
                         Command::ScrollToIndex { .. }
                         | Command::ScrollToEnd { .. }
                         | Command::SetStatusBar(_)
@@ -1371,6 +1376,9 @@ impl Mounter {
                                 nsh_core::PayloadValue::Number(f64::from(id)),
                             )]),
                         ),
+                        Command::Audio(_) => {
+                            return Err(Error::Unsupported("audio (environment.audio is false)"));
+                        }
                         Command::FileRequest { .. } => {
                             return Err(Error::Unsupported(
                                 "file requests (environment.file_requests is false)",

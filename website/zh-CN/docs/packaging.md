@@ -8,7 +8,7 @@ group: platforms
 # 打包
 
 `nsh package` 把应用变成可以安装的产物：用于 iOS 模拟器的 `.app`、用于 iOS 真机的已签名 `.ipa`、用于 Android 的已签名
-`.apk` 或 `.aab`（Android App Bundle，用于 Google Play）、用于 macOS 的 ad hoc 签名 `.app`、用于 Linux 的目录和 `.tar.gz`、用于 Windows 的目录和 `.zip`，或用于 Web 的静态站点。它不需要 Xcode 项目，也不需要 Gradle。
+`.apk` 或 `.aab`（Android App Bundle，用于 Google Play）、用于 macOS 的 ad hoc 签名 `.app`、用于 Linux 的目录和 `.tar.gz`、用于 Windows 的目录、`.zip` 和安装程序（`<Name>-setup.exe`，需 Inno Setup），或用于 Web 的静态站点。它不需要 Xcode 项目，也不需要 Gradle。
 
 - **Rust 应用**（`nsh.json` 写明 `"root"`）在自己的目录里打包。`nsh` 以 release 模式为目标构建 runner，编译进你的 crate 并挂载根组件，
   不带 QuickJS：需要 Cargo、该平台的 Rust 目标（`rustup target add …`），Android 还需要 NDK。
@@ -56,7 +56,7 @@ nsh package App.tsx --target ios-simulator --run
 | `build` | number | `1` | 构建号（`CFBundleVersion`、`versionCode`）。每次上传新版本都要递增。 |
 | `icon` | string | 无 | 一张正方形 PNG，最好是 1024×1024，路径相对于 `nsh.json`。 |
 
-`nsh.json` 还包含 `rust` 和 `root`（应用的 crate 和根组件，见[用 Rust 开发](./rust.md)）、`theme` 和 `appearance`、`tailwind`（见 [Tailwind](./tailwind.md)）、`capabilities`（见[沙箱与能力](./sandbox-and-capabilities.md)）、`android`（`targetSdk`，见下文“目标 API 级别”）、`ios` 和 `macos`（对应包的 `Info.plist` 键和 entitlements，见[下文](#infoplist-键与-entitlements)）以及让桌面包自我更新的 `updater`（见[应用更新](./app-updates.md)）；[项目结构](./project-structure.md#nshjson)列出了所有键。未知的键会导致报错。
+`nsh.json` 还包含 `rust` 和 `root`（应用的 crate 和根组件，见[用 Rust 开发](./rust.md)）、`theme` 和 `appearance`、`tailwind`（见 [Tailwind](./tailwind.md)）、`capabilities`（见[沙箱与能力](./sandbox-and-capabilities.md)）、`android`（`targetSdk`，见下文“目标 API 级别”）、`ios` 和 `macos`（对应包的 `Info.plist` 键和 entitlements，见[下文](#infoplist-键与-entitlements)）以及让桌面包自我更新、让所有原生包接收 [OTA 更新](./ota-updates.md)的 `updater`（见[应用更新](./app-updates.md)）；[项目结构](./project-structure.md#nshjson)列出了所有键。NSH 读不懂的键或值会给出警告并被略过：为更新的 NSH 写的应用在较旧的 NSH 上照样能构建，拼写错误也会在警告里看到。
 
 上表中的每个键都可以在命令行上覆盖，这在 CI 中很方便：
 
@@ -83,6 +83,7 @@ nsh package --target android --app-version 1.4.0 --build 42
 | `--abi <abi>` | Android：APK 包含的 ABI，可重复或用逗号分隔（默认：`arm64-v8a` 和 `armeabi-v7a`）。 |
 | `--format <apk \| aab>` | Android：写出 APK（默认，直接安装）或用于 Google Play 的 Android App Bundle（见下文“Google Play：App Bundle”）。 |
 | `--run` | 构建完成后安装并启动：在 iOS 模拟器中，或在 `adb` 能看到的 Android 设备或模拟器上；macOS、Linux 和 Windows 应用在本机启动；Web 站点在本机提供服务并在浏览器中打开。不适用于 `--target ios`。 |
+| `--asset-url <URL>` | Web：站点文件所在的 http(s) 地址（CDN），页面按它引用这些文件；`index.html` 和 `manifest.webmanifest` 仍在页面自己的地址下（和不带它时一样按相对路径引用），CDN 要返回 `Access-Control-Allow-Origin`。默认：放在页面旁边，用相对路径引用。`--run` 从本机直接提供站点，所以不带它。 |
 
 ## iOS 模拟器
 
@@ -130,7 +131,7 @@ nsh package --target android --run
 - 一个 JDK，用于首次创建 debug keystore。
 - Rust 应用还需要 Android NDK（`sdkmanager "ndk;<version>"`，或 `ANDROID_NDK_HOME`），用它构建应用的 `libnsh.so`。
 
-应用的目标 API 为 35（`targetSdkVersion`，Google Play 的要求），除非 `nsh.json` 指定了其他级别；应用要求 API 28（Android 9）或更高版本。它包含适用于手机 ABI `arm64-v8a` 和 `armeabi-v7a` 的原生代码；
+应用的目标 API 为 35（`targetSdkVersion`，Google Play 的要求），除非 `nsh.json` 指定了其他级别；应用要求 API 26（Android 8）或更高版本。它包含适用于手机 ABI `arm64-v8a` 和 `armeabi-v7a` 的原生代码；
 加上 `--run` 时还包含设备的 ABI，例如模拟器的 `x86_64`。用 `--abi` 可以自己选择，例如 `--abi arm64-v8a` 只面向 64 位手机，APK 最小：
 
 ```sh
@@ -205,7 +206,8 @@ nsh package --target windows --run
 写出 `.nsh\out\<Name>\`（带应用图标的可执行文件 `<Name>.exe`、`nsh\assets\…`、包含窗口标题、应用 id、版本和外观的 `nsh\app.json`，以及
 TSX 应用的 `nsh\bundle.nshc`），以及同样内容的 `.nsh\out\<Name>.zip`。TSX 应用不需要任何工具；Rust 应用的 runner 用 Visual Studio
 Build Tools 构建。请在 Windows 上打包：运行器是为构建它的机器构建的，而且只有
-Windows 能嵌入图标。应用可以从目录被复制到的任何位置运行，不需要安装。见 [Windows](./windows.md#打包)。
+Windows 能嵌入图标。应用可以从目录被复制到的任何位置运行。`nsh package` 还会写出 Inno Setup 脚本 `.nsh\out\<Name>.iss`，装有 Inno Setup 6
+时编译成 `.nsh\out\<Name>-setup.exe`：按用户安装（不需要管理员权限），带开始菜单快捷方式和“已安装的应用”条目，并支持原地升级。见 [Windows](./windows.md#打包)。
 
 ## Web
 
@@ -310,6 +312,7 @@ Rust 应用构建自己的 runner。对 TSX 应用，`nsh package` 会在 CLI �
 
 - [CLI](./cli.md)：所有命令
 - [应用更新](./app-updates.md)：自我更新的打包应用
+- [OTA 更新](./ota-updates.md)：无需新构建，为打包应用（包括 iOS 和 Android）下发新的 TSX
 - [签名包](./signed-packages.md)：应用下载的更新
 - [项目结构](./project-structure.md)：`nsh.json` 与应用的各个文件
 

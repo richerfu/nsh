@@ -11,7 +11,7 @@ import {
   redo,
   undo,
 } from "nsh/base";
-import { colors, mono, Segmented } from "../ui";
+import { colors, mono, richEditorClasses, Segmented } from "../ui";
 import { IconButton, type LucideIconName, TOOL_GAP, ToggleGroup, type ToggleItem, ToolbarSeparator } from "./RichEditorUi";
 import { createLinkMenu, LinkBubble, type LinkMenu } from "./RichEditorLink";
 
@@ -189,8 +189,11 @@ function Toolbar(props: { editor: RichEditorSession; revision: number; link: Lin
         value={wraps()}
         onToggle={(value) => run(command(WRAP_COMMANDS[value]))}
       />
-      <IconButton icon="list-indent-decrease" label="Outdent" disabled={!can(outdent)} onPress={() => run(outdent)} />
-      <IconButton icon="list-indent-increase" label="Indent" disabled={!can(indent)} onPress={() => run(indent)} />
+      {/* The pair wraps as one, so a narrow bar never splits outdent from indent. */}
+      <View style={{ flexDirection: "row", columnGap: Math.max(TOOL_GAP, 4) }}>
+        <IconButton icon="list-indent-decrease" label="Outdent" disabled={!can(outdent)} onPress={() => run(outdent)} />
+        <IconButton icon="list-indent-increase" label="Indent" disabled={!can(indent)} onPress={() => run(indent)} />
+      </View>
       <IconButton icon="minus" label="Divider" disabled={!can(command("setHorizontalRule"))} onPress={() => run(command("setHorizontalRule"))} />
       <ToolbarSeparator />
       <IconButton icon="table" label="Insert table" short="Table" disabled={!can(INSERT_TABLE)} onPress={() => run(INSERT_TABLE)} />
@@ -211,38 +214,6 @@ function Toolbar(props: { editor: RichEditorSession; revision: number; link: Lin
     </View>
   );
 }
-
-// --- The document ---------------------------------------------------------
-
-/** The document's look, by part, node type (and heading level) and mark. */
-const documentClasses = {
-  // The room around the text is the content's padding, inside the scroll
-  // view: its scroll bar runs along the editor's edge.
-  content: "gap-3 px-6 py-5",
-  placeholder: "text-muted-foreground",
-  listMarker: "text-muted-foreground",
-  taskCheckbox: "size-4 mr-2 mt-1 rounded border border-border",
-  nodes: {
-    paragraph: "leading-relaxed",
-    "heading[level=1]": "text-3xl font-bold tracking-tight",
-    "heading[level=2]": "text-2xl font-semibold tracking-tight",
-    "heading[level=3]": "text-xl font-semibold",
-    blockquote: "border-l-4 border-border pl-4 text-muted-foreground italic",
-    codeBlock: "font-mono text-sm bg-muted rounded-lg px-4 py-3",
-    bulletList: "gap-1.5 pl-6",
-    orderedList: "gap-1.5 pl-6",
-    taskList: "gap-1.5",
-    horizontalRule: "h-px bg-border my-3",
-    tableHeader: "font-semibold",
-  },
-  marks: {
-    bold: "font-bold",
-    italic: "italic",
-    code: "font-mono text-sm bg-muted rounded px-1",
-    link: "text-primary underline",
-    strike: "line-through",
-  },
-};
 
 export function RichEditorDemo() {
   // Mod-K opens the link field, as in most editors.
@@ -296,7 +267,7 @@ export function RichEditorDemo() {
           accessibilityLabel="Document"
           placeholder="Write something…"
           style={{ flex: 1 }}
-          classes={documentClasses}
+          classes={richEditorClasses}
           bubbleMenu={link.mode() === "closed" ? undefined : <LinkBubble menu={link} />}
           bubbleMenuPlacement="bottom"
         />
@@ -306,14 +277,16 @@ export function RichEditorDemo() {
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "space-between",
+          gap: 12,
           paddingHorizontal: 12,
           paddingVertical: 8,
           borderTopWidth: 1,
           borderColor: colors.border,
         }}
       >
-        <Text style={{ fontSize: 12, color: colors.muted, fontVariant: ["tabular-nums"] }}>
-          {`${words()} words · ${text().length} characters`}
+        {/* No-break spaces keep each count whole: a narrow bar wraps between them. */}
+        <Text style={{ flexShrink: 1, fontSize: 12, color: colors.muted, fontVariant: ["tabular-nums"] }}>
+          {`${words()}\u00a0words · ${text().length}\u00a0characters`}
         </Text>
         <View style={{ width: 180 }}>
           <Segmented

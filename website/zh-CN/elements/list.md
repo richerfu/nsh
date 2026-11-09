@@ -111,7 +111,7 @@ virtual_list(move || messages.with(|m| m.len()), move |at| {
 | `onRefresh` | `.on_refresh(..)` | `() => void` | | 用户下拉刷新。 |
 | `refreshIndicator` | `.refresh_indicator(Some(height))` | `{ height: number }` | | 应用自己绘制指示器，高 `height` 点：平台的转圈隐藏，下拉到 `height` 即刷新，刷新中在内容上方留出 `height`。`height` 不大于 0 时视为未设。 |
 | `pullValue` | `.pull_value(&value)` | `AnimatedValue` | | 一个动画值，写入列表被拉过顶部的距离（静止为 0，随下拉增大；刷新中为内容上方留出的空间，设了 `refreshIndicator` 时等于 `height`），用来绘制应用的指示器。 |
-| `scrollbar` | `.scrollbar(..)` | `boolean \| ScrollbarTheme` | `true` | 显示滚动条：平台的滚动指示器，或应用设置主题后的[内置滚动条](./scrollbar.md#内置滚动条)；对象是该视图自己的主题。在桌面和桌面浏览器中，横向视图始终保留滚动条：它是鼠标的滚动条。 |
+| `scrollbar` | `.scrollbar(..)` | `boolean \| ScrollbarTheme` | `true` | 显示滚动条：平台的滚动指示器，或应用设置主题后的[内置滚动条](./scrollbar.md#内置滚动条)；对象是该视图自己的主题。 |
 | `scrollValue` | `.scroll_value(&value)` | `AnimatedValue` | | 接收滚动偏移的动画值，用于随滚动变化的动画。 |
 | `keyboardDismissMode` | `.keyboard_dismiss_mode(..)` | `"none" \| "on-drag" \| "interactive"` | `"none"` | 拖动时是否收起键盘。 |
 | `style` | `Styled` 方法 | `StyleProp<ViewStyle>` | | 列表自身的样式（需要有确定的尺寸：`flex: 1` 或高度）。 |
@@ -222,6 +222,6 @@ virtual_list(move || messages.with(|m| m.len()), move |at| bubble(messages, at))
 
 ## 平台说明
 
-- 在可见行之上插入条目时，两个平台都会保持可见行不动。
+- 列表滚动离开起点后，在可见行之上插入条目时，两个平台都会保持可见行不动；停在起点时，新条目直接显示，和浏览器一致。带 `onLoadMoreAtStart` 的列表在起点也保持可见行不动，前置的一页留在它们上方。
 - 从右到左布局中的横向列表在原生侧镜像。
 - 吸顶标题在每一帧滚动时于原生侧固定。

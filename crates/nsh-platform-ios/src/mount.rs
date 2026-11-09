@@ -493,6 +493,9 @@ struct Slot {
     tracked: u16,
     /// Current interaction states.
     states: u16,
+    /// A style was applied before: a view's first style does not transition
+    /// from the defaults, as in `nsh_core`'s `transition::restyle`.
+    styled: bool,
 }
 
 impl Slot {
@@ -541,6 +544,7 @@ impl Slot {
             image_shown: false,
             tracked: 0,
             states: 0,
+            styled: false,
         }
     }
 }
@@ -567,6 +571,8 @@ pub(crate) struct Mounter {
     target: Retained<EventTarget>,
     animator: Animator,
     images: ImageLoader,
+    /// The engine's sounds and players ([`crate::audio`]).
+    audio: crate::audio::Speaker,
     /// What the app may reach (web view navigations check it).
     access: std::sync::Arc<nsh_engine::Access>,
     control: EngineControl,
@@ -696,6 +702,7 @@ impl Mounter {
                 },
                 access.clone(),
             ),
+            audio: Default::default(),
             control,
             access,
             shared,
@@ -744,9 +751,19 @@ impl Mounter {
     /// Measures the surface's frames and commits with a performance
     /// monitor ([`crate::fps`]) from now on.
     pub(crate) fn measure(&mut self) {
+        if self.fps.is_some() {
+            return;
+        }
         let fps = crate::fps::Fps::start(self.mtm);
         self.control.set_perf_monitor(Some(fps.monitor.clone()));
         self.fps = Some(fps);
+    }
+
+    /// Stops measuring ([`Mounter::measure`]).
+    fn stop_measuring(&mut self) {
+        if self.fps.take().is_some() {
+            self.control.set_perf_monitor(None);
+        }
     }
 
     pub(crate) fn apply(&mut self, batch: MountBatch) {
@@ -1725,12 +1742,23 @@ impl Mounter {
             (Command::Speech(command), _) if id == nsh_core::ROOT_ID => {
                 crate::speech::command(&self.control, &command);
             }
+            (Command::Audio(command), _) if id == nsh_core::ROOT_ID => {
+                use nsh_core::image::loader::AssetBase as Base;
+                let base = self.images.asset_base().map(|base| match base {
+                    crate::image::AssetBase::Http(url) => Base::Http(url.clone()),
+                    crate::image::AssetBase::Directory(dir) => Base::Directory(dir.clone()),
+                });
+                crate::audio::command(&self.audio, &self.control, &command, base.as_ref());
+            }
             (Command::SetJsResponder { block }, _) => self.set_js_responder(id, block),
             (Command::SetSelection { start, end }, Native::Input(input)) => {
                 input.select(start, end)
             }
             (Command::ClearJsResponder, _) => self.clear_js_responder(),
             (Command::Announce(text), _) => crate::system::announce(&text),
+            (Command::Haptic(haptic), _) => crate::system::haptic(haptic),
+            (Command::PerfMonitor(true), _) => self.measure(),
+            (Command::PerfMonitor(false), _) => self.stop_measuring(),
             (Command::Tokens(tokens), _) => self.alert_tint = crate::system::alert_tint(&tokens),
             (Command::ImageInfo { id, uri }, _) => self.images.info(id, &uri),
             (Command::SetClipboard(text), _) => crate::system::set_clipboard(&text),
@@ -2353,11 +2381,14 @@ impl Mounter {
         let keyframes_changed = s.style.animation != style.animation;
         let blend_changed = s.style.blend_mode != style.blend_mode;
         let cursor_changed = s.style.cursor != style.cursor;
-        // Transitions apply to changes of a view already on screen.
+        // Transitions apply to changes of a view already on screen, not to
+        // its first style: there is nothing to transition from (`nsh_core`'s
+        // `transition::restyle` and Android's mounter skip it the same way).
         let transition = style
             .transition
-            .filter(|t| t.duration > 0.0 && view.window().is_some());
+            .filter(|t| t.duration > 0.0 && s.styled && view.window().is_some());
         s.style = style;
+        s.styled = true;
         view.setHidden(s.style.hidden);
         match transition {
             Some(t) => {

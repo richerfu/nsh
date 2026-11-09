@@ -55,6 +55,7 @@ use std::{
 
 use anyhow::{Context as _, bail};
 use nsh_core::element::description::{Description, SetDescription};
+use sha2::{Digest as _, Sha256};
 
 use crate::{runtime::Platform, ui};
 
@@ -74,6 +75,16 @@ static CURRENT: std::sync::Mutex<Option<RustApp>> = std::sync::Mutex::new(None);
 /// app's Rust code: a failed build then waits for the next change instead
 /// of ending the session ([`RustApp::build_with`]).
 static RESTARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set by `nsh run --release`: the development host is an optimized
+/// (`--release`) build too, so what the session shows runs at the speed
+/// the app ships at ([`RustApp::host`]).
+static RELEASE_HOSTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Builds this command's development hosts optimized ([`RELEASE_HOSTS`]).
+pub(crate) fn set_release_hosts() {
+    RELEASE_HOSTS.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Makes `app` the app of this command ([`current`]).
 pub(crate) fn set_current(app: RustApp) {
@@ -275,7 +286,7 @@ impl Nsh {
 
 /// What a generated crate names of a platform crate's features: all but `js`
 /// and the standard JS modules, which a Rust app does not run.
-pub(crate) const RUST_APP_PLATFORM: &str = ", default-features = false, features = [\"shader\", \"editor\", \"highlight\", \"math\", \"plot\", \"rich-editor\"]";
+pub(crate) const RUST_APP_PLATFORM: &str = ", default-features = false, features = [\"shader\", \"editor\", \"emoji-picker\", \"highlight\", \"math\", \"plot\", \"rich-editor\", \"term\"]";
 /// `nsh-base`'s features the hosts and runners name: they show TextView's
 /// code blocks highlighted, whatever `nsh-base`'s defaults are.
 const HIGHLIGHT: &str = ", features = [\"highlight\"]";
@@ -330,6 +341,11 @@ pub(crate) struct RootConfig {
     /// `"schemes"`' schemes (checked, lower case): the URL schemes the
     /// app claims.
     url_schemes: Vec<String>,
+    /// `"window"` (JSON, checked): the main window's launch options.
+    window: Option<String>,
+    /// The app's translations (`locales/`) as JSON, written to the
+    /// workspace and compiled into the runners.
+    translations: Option<PathBuf>,
 }
 
 /// Whether `entry` is a Rust app's (`entry::resolve` gives its `nsh.json`
@@ -565,27 +581,63 @@ fn root_config(
     };
     if let Some(theme) = &theme {
         let json = fs::read_to_string(theme)?;
-        nsh_base::Theme::from_json(&json).map_err(|e| anyhow::anyhow!("nsh.json: theme: {e}"))?;
+        let (_, ignored) = nsh_base::Theme::from_json_lenient(&json)
+            .map_err(|e| anyhow::anyhow!("nsh.json: theme: {e}"))?;
+        for what in ignored {
+            crate::ui::warn(format_args!(
+                "nsh.json: theme: {what}, ignored (one of a newer NSH, or a typo)"
+            ));
+        }
     }
     let appearance = match config.get("appearance").and_then(|a| a.as_str()) {
         None | Some("system") => None,
         Some(a @ ("light" | "dark")) => Some(a.to_owned()),
         Some(other) => {
-            bail!("nsh.json: appearance: {other:?} is not \"light\", \"dark\" or \"system\"")
+            crate::ui::warn(format_args!(
+                "nsh.json: appearance: {other:?} is not \"light\", \"dark\" or \"system\", ignored (one of a newer NSH, or a typo)"
+            ));
+            None
         }
     };
     let status_bar = match config.get("statusBar") {
         None => None,
         Some(v) => {
-            nsh_core::StatusBarSetting::from_json(v)
-                .map_err(|e| anyhow::anyhow!("nsh.json: statusBar: {e}"))?;
+            let (_, ignored) = nsh_core::StatusBarSetting::from_json_lenient(v);
+            for what in ignored {
+                crate::ui::warn(format_args!(
+                    "nsh.json: statusBar: {what}, ignored (one of a newer NSH, or a typo)"
+                ));
+            }
             Some(v.to_string())
         }
     };
     let url_schemes = match config.get("schemes") {
         None => Vec::new(),
-        Some(v) => nsh_core::url_scheme::schemes_from_json(v)
-            .map_err(|e| anyhow::anyhow!("nsh.json: {e}"))?,
+        Some(v) => {
+            let (schemes, ignored) = nsh_core::url_scheme::schemes_from_json_lenient(v);
+            for what in ignored {
+                crate::ui::warn(format_args!(
+                    "nsh.json: {what}, ignored (one of a newer NSH, or a typo)"
+                ));
+            }
+            schemes
+        }
+    };
+    let window = match config.get("window") {
+        None => None,
+        Some(v) => {
+            nsh_core::desktop::MainWindowOptions::from_json(v)
+                .map_err(|e| anyhow::anyhow!("nsh.json: window: {e}"))?;
+            Some(v.to_string())
+        }
+    };
+    let translations = nsh_i18n::read_translations(dir).map_err(|e| anyhow::anyhow!(e))?;
+    let translations = if translations.is_empty() {
+        None
+    } else {
+        let path = workspace.join("translations.json");
+        write(&path, &nsh_i18n::translations_json(&translations))?;
+        Some(path)
     };
     Ok(RootConfig {
         component,
@@ -594,6 +646,8 @@ fn root_config(
         app_id: crate::package::app_id(&dir.join("nsh.json")).ok(),
         status_bar,
         url_schemes,
+        window,
+        translations,
     })
 }
 
@@ -976,6 +1030,26 @@ fn package_name(manifest: &Path) -> anyhow::Result<String> {
     bail!("{}: no [package] name", manifest.display())
 }
 
+/// The name of a generated crate and its binary: `nsh-app-<package>-<what>`
+/// for one crate (`nsh-app-gallery-native-describe`), and for several the
+/// first crate's package and the first 8 hex digits of the SHA-256 of all
+/// of them, sorted (`nsh-app-charts-ef5aa537-describe` for `charts` and
+/// `storage`). The name stays as short with twelve crates as with two:
+/// MSVC's `link.exe` cannot open paths over 260 characters, even with
+/// Windows' long paths on, and `target\debug\deps\<name>.exe` is one.
+fn bin_name(packages: &[&str], what: &str) -> String {
+    match packages {
+        [] | [_] => format!("nsh-app-{}-{what}", packages.join("-")),
+        [first, ..] => {
+            let mut sorted = packages.to_vec();
+            sorted.sort_unstable();
+            let digest = Sha256::digest(sorted.join("\n"));
+            let hex: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+            format!("nsh-app-{first}-{hex}-{what}")
+        }
+    }
+}
+
 /// Writes `path` when its contents differ (Cargo rebuilds on changes).
 fn write(path: &Path, contents: &str) -> anyhow::Result<()> {
     if fs::read_to_string(path).is_ok_and(|old| old == contents) {
@@ -988,12 +1062,11 @@ fn write(path: &Path, contents: &str) -> anyhow::Result<()> {
 }
 
 impl RustApp {
-    /// Its binaries' names, after the app (`nsh-app-gallery-native-cli`;
-    /// the packages of all its crates: `nsh-app-charts-storage-cli`), so
-    /// they do not clash with the app's own binaries in its `target`.
+    /// Its binaries' names, after the app ([`bin_name`]), so they do not
+    /// clash with the app's own binaries in its `target`.
     fn bin(&self, what: &str) -> String {
         let packages: Vec<&str> = self.crates.iter().map(|c| c.package.as_str()).collect();
-        format!("nsh-app-{}-{what}", packages.join("-"))
+        bin_name(&packages, what)
     }
 
     /// Its crates' packages, for what the steps say they build
@@ -1911,12 +1984,7 @@ opt-level = \"s\"
         extra: &[&str],
         what: &str,
     ) -> anyhow::Result<PathBuf> {
-        let suffix = if triple.is_none() {
-            env::consts::EXE_SUFFIX
-        } else {
-            ""
-        };
-        let artifact = format!("{package}{suffix}");
+        let artifact = format!("{package}{}", crate::runtime::exe_suffix(triple));
         let build = Build {
             workspace,
             package,
@@ -1941,6 +2009,7 @@ opt-level = \"s\"
             artifact,
             what,
         } = *build;
+        crate::runtime::cross_build(&mut cmd, triple)?;
         cmd.arg("build")
             .arg("--manifest-path")
             .arg(workspace.join("Cargo.toml"))
@@ -1984,8 +2053,15 @@ opt-level = \"s\"
             return Ok(path);
         }
         // A cargo that keeps its own target directory (a wrapper ignoring
-        // CARGO_TARGET_DIR) built it elsewhere: Cargo says where.
-        Ok(cargo_target_directory(workspace).map(place).unwrap_or(path))
+        // CARGO_TARGET_DIR) built it elsewhere: Cargo says where, or it is
+        // the generated workspace's own `target` (a cargo that always uses
+        // `./target`, whatever its metadata reports).
+        Ok(cargo_target_directory(workspace)
+            .into_iter()
+            .chain([workspace.join("target")])
+            .map(place)
+            .find(|candidate| candidate.exists())
+            .unwrap_or(path))
     }
 
     /// The development host (`runner` false) or release runner of the app,
@@ -2029,11 +2105,17 @@ opt-level = \"s\"
             _ => (self.workspace.clone(), &[][..]),
         };
         let package = self.bin(name);
+        let release = runner || RELEASE_HOSTS.load(std::sync::atomic::Ordering::Relaxed);
+        let what = if release && !runner {
+            format!("{what} (release build)")
+        } else {
+            what
+        };
         self.build(
             &workspace,
             &package,
             platform.triple(),
-            runner,
+            release,
             features,
             &what,
         )
@@ -2368,7 +2450,7 @@ fn set_fn(krate: &AppCrate) -> String {
 }
 
 /// `app_root()`, a Rust app's root (`nsh.json` `"root"`, `"theme"`,
-/// `"appearance"`, `"statusBar"`, `"id"`, `"schemes"`) in the crate the generated code links as `krate`, under
+/// `"appearance"`, `"statusBar"`, `"id"`, `"schemes"`, `"window"`) in the crate the generated code links as `krate`, under
 /// `cfg`.
 fn root_fn(cfg: &str, krate: &str, root: &RootConfig) -> String {
     let mut make = format!(
@@ -2384,6 +2466,12 @@ fn root_fn(cfg: &str, krate: &str, root: &RootConfig) -> String {
     }
     if let Some(id) = &root.app_id {
         make.push_str(&format!("\n        .app_id({id:?})"));
+    }
+    if let Some(translations) = &root.translations {
+        make.push_str(&format!(
+            "\n        .translations_json(include_str!({:?}))",
+            translations.to_string_lossy()
+        ));
     }
     if !root.url_schemes.is_empty() {
         make.push_str(&format!("\n        .url_schemes({:?})", root.url_schemes));
@@ -2402,7 +2490,7 @@ fn root_fn(cfg: &str, krate: &str, root: &RootConfig) -> String {
         .status_bar
         .as_deref()
         .and_then(|json| serde_json::from_str(json).ok())
-        .and_then(|v| nsh_core::StatusBarSetting::from_json(&v).ok())
+        .map(|v| nsh_core::StatusBarSetting::from_json(&v))
     {
         let mut make_setting = "nsh_core::StatusBarSetting::default()".to_owned();
         if let Some(style) = setting.style {
@@ -2417,6 +2505,9 @@ fn root_fn(cfg: &str, krate: &str, root: &RootConfig) -> String {
             make_setting.push_str(&format!(".hidden({hidden})"));
         }
         make.push_str(&format!("\n        .status_bar({make_setting})"));
+    }
+    if let Some(window) = &root.window {
+        make.push_str(&format!("\n        .main_window_json({window:?})"));
     }
     format!(
         "\n/// The app's root (`nsh.json` `\"root\"`), with its theme, appearance and\n\
@@ -2532,9 +2623,8 @@ fn install_stripped(
     Ok(())
 }
 
-/// The cargo to run.
 /// The target directory Cargo reports for the workspace at `workspace`.
-fn cargo_target_directory(workspace: &Path) -> Option<PathBuf> {
+pub(crate) fn cargo_target_directory(workspace: &Path) -> Option<PathBuf> {
     let out = Command::new(cargo())
         .args([
             "metadata",
@@ -2544,6 +2634,7 @@ fn cargo_target_directory(workspace: &Path) -> Option<PathBuf> {
             "--manifest-path",
         ])
         .arg(workspace.join("Cargo.toml"))
+        .current_dir(workspace)
         .output()
         .ok()
         .filter(|out| out.status.success())?;
@@ -2741,6 +2832,8 @@ mod tests {
                 app_id: None,
                 status_bar: None,
                 url_schemes: Vec::new(),
+                window: None,
+                translations: None,
             };
             let app = app(&dir, &[(package, dir.join("native"))], Some(root));
             app.write_workspace().unwrap();
@@ -2957,14 +3050,14 @@ mod tests {
                 "{bad}"
             );
         }
-        assert!(
-            super::root_config(
-                &dir,
-                &config(r#"{ "root": "App", "appearance": "dim" }"#),
-                &ws
-            )
-            .is_err()
-        );
+        // A value of a newer NSH (or a typo) is warned of and left out.
+        let root = super::root_config(
+            &dir,
+            &config(r#"{ "root": "App", "appearance": "dim" }"#),
+            &ws,
+        )
+        .unwrap();
+        assert_eq!(root.appearance, None);
         let root = super::root_config(
             &dir,
             &config(r#"{ "root": "App", "statusBar": { "foreground": "light" } }"#),
@@ -2975,26 +3068,16 @@ mod tests {
             root.status_bar.as_deref(),
             Some(r#"{"foreground":"light"}"#)
         );
-        for (bad, message) in [
-            (r#""light""#, "nsh.json: statusBar: expected an object"),
-            (
-                r#"{ "foreground": "dim" }"#,
-                "nsh.json: statusBar: foreground: \"dim\" is not",
-            ),
-            (
-                r#"{ "hidden": "yes" }"#,
-                "nsh.json: statusBar: hidden: \"yes\" is not true or false",
-            ),
-            (
-                r#"{ "style": "light" }"#,
-                "nsh.json: statusBar: unknown key \"style\"",
-            ),
+        for bad in [
+            r#""light""#,
+            r#"{ "foreground": "dim" }"#,
+            r#"{ "hidden": "yes" }"#,
         ] {
             let json = format!(r#"{{ "root": "App", "statusBar": {bad} }}"#);
-            let err = super::root_config(&dir, &config(&json), &ws)
-                .unwrap_err()
-                .to_string();
-            assert!(err.starts_with(message), "{err}");
+            assert!(
+                super::root_config(&dir, &config(&json), &ws).is_ok(),
+                "{bad}"
+            );
         }
         let code = super::root_fn(
             "#[cfg(x)]\n",
@@ -3006,6 +3089,10 @@ mod tests {
                 app_id: Some("com.example.app".into()),
                 status_bar: Some(r#"{"foreground":"light","hidden":false}"#.into()),
                 url_schemes: vec!["myapp".into()],
+                window: Some(
+                    r#"{"defaultSize":{"width":900,"height":600},"title":"Notes"}"#.into(),
+                ),
+                translations: None,
             },
         );
         for line in [
@@ -3016,6 +3103,7 @@ mod tests {
             ".app_id(\"com.example.app\")",
             ".url_schemes([\"myapp\"])",
             ".status_bar(nsh_core::StatusBarSetting::default().foreground(nsh_core::StatusBarStyle::Light).hidden(false))",
+            r#".main_window_json("{\"defaultSize\":{\"width\":900,\"height\":600},\"title\":\"Notes\"}")"#,
         ] {
             assert!(code.contains(line), "no {line:?} in\n{code}");
         }
@@ -3035,6 +3123,8 @@ mod tests {
                 app_id: None,
                 status_bar: None,
                 url_schemes: Vec::new(),
+                window: None,
+                translations: None,
             }),
         );
         app.write_workspace().unwrap();
@@ -3647,6 +3737,8 @@ panic = \"abort\"
                 app_id: None,
                 status_bar: None,
                 url_schemes: Vec::new(),
+                window: None,
+                translations: None,
             }),
         );
         app.write_workspace().unwrap();
@@ -3777,9 +3869,10 @@ panic = \"abort\"
             .map(|l| l.split(' ').next().unwrap())
             .collect();
         assert_eq!(nsh, ["nsh-core"], "{manifest}");
-        assert!(manifest.contains("name = \"nsh-app-charts-app-storage-describe\""));
-        // Named after all its crates: another app's crates build apart.
-        assert!(read("test/Cargo.toml").contains("name = \"nsh-app-charts-app-storage-test\""));
+        assert!(manifest.contains("name = \"nsh-app-charts-aebab085-describe\""));
+        // Named after its first crate and a digest of all of them: another
+        // app's crates build apart.
+        assert!(read("test/Cargo.toml").contains("name = \"nsh-app-charts-aebab085-test\""));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3861,5 +3954,99 @@ panic = \"abort\"
             .join(path)
             .to_string_lossy()
             .into_owned()
+    }
+
+    /// The names of the generated crates and their binaries
+    /// ([`super::bin_name`]).
+    mod crate_names {
+        use super::super::bin_name;
+
+        /// The twelve bridges of the app that found the bug.
+        const BRIDGES: [&str; 12] = [
+            "shell-bridge",
+            "feed-bridge",
+            "media-bridge",
+            "auth-bridge",
+            "storage-bridge",
+            "network-bridge",
+            "camera-bridge",
+            "location-bridge",
+            "share-bridge",
+            "payments-bridge",
+            "analytics-bridge",
+            "notifications-bridge",
+        ];
+
+        /// What the generated crates are for, the longest included.
+        const WHATS: [&str; 4] = ["describe", "test", "rust-android", "tui-host"];
+
+        #[test]
+        fn one_crate_keeps_its_name() {
+            assert_eq!(
+                bin_name(&["gallery-native"], "describe"),
+                "nsh-app-gallery-native-describe"
+            );
+        }
+
+        #[test]
+        fn several_crates_name_the_first_and_a_digest() {
+            assert_eq!(
+                bin_name(&["charts", "storage"], "describe"),
+                "nsh-app-charts-ef5aa537-describe"
+            );
+            let name = bin_name(&BRIDGES, "describe");
+            assert!(name.starts_with("nsh-app-shell-bridge-"), "{name}");
+            assert!(name.ends_with("-describe"), "{name}");
+        }
+
+        #[test]
+        fn names_stay_short_however_many_crates() {
+            for count in [1, 2, 12] {
+                for what in WHATS {
+                    let name = bin_name(&BRIDGES[..count], what);
+                    assert!(name.len() <= 42, "{count} crates: {name} ({})", name.len());
+                }
+            }
+            // As short with twelve crates as with two.
+            assert_eq!(
+                bin_name(&BRIDGES[..2], "describe").len(),
+                bin_name(&BRIDGES, "describe").len()
+            );
+        }
+
+        #[test]
+        fn names_are_stable() {
+            assert_eq!(bin_name(&BRIDGES, "test"), bin_name(&BRIDGES, "test"));
+            // The digest is of the packages, whatever their order.
+            let mut reordered = BRIDGES;
+            reordered[1..].reverse();
+            assert_eq!(bin_name(&reordered, "test"), bin_name(&BRIDGES, "test"));
+        }
+
+        #[test]
+        fn names_are_distinct() {
+            let mut names = Vec::new();
+            for count in 1..=BRIDGES.len() {
+                for what in WHATS {
+                    names.push(bin_name(&BRIDGES[..count], what));
+                }
+            }
+            // The same first crate with other crates beside it.
+            names.push(bin_name(&["shell-bridge", "other-bridge"], "describe"));
+            // The same crates, another first.
+            names.push(bin_name(&["feed-bridge", "shell-bridge"], "describe"));
+            let count = names.len();
+            names.sort();
+            names.dedup();
+            assert_eq!(names.len(), count, "{names:#?}");
+        }
+
+        #[test]
+        fn names_keep_the_prefix() {
+            for count in [1, 2, 12] {
+                let name = bin_name(&BRIDGES[..count], "describe");
+                assert!(name.starts_with("nsh-app-"), "{name}");
+            }
+        }
     }
 }

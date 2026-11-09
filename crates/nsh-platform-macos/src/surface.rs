@@ -179,6 +179,9 @@ define_class!(
 /// Called when the app reports a fatal error (development hosts show it).
 pub(crate) type ErrorHandler = Box<dyn Fn(&str)>;
 
+/// Turns the performance monitor on or off.
+type PerfToggle = Box<dyn Fn(bool)>;
+
 /// One engine and its views.
 pub(crate) struct Surface {
     key: u64,
@@ -191,6 +194,9 @@ pub(crate) struct Surface {
     pub(crate) anim: RefCell<UiAnimation>,
     /// Stacks, screens and modals.
     pub(crate) nav: RefCell<crate::navigation::Nav>,
+    /// The app's own windows (`Window.open`), by the dialog root each
+    /// shows ([`crate::window`]).
+    pub(crate) windows: RefCell<rustc_hash::FxHashMap<NodeId, crate::window::AppWindow>>,
     /// Pointer input state ([`crate::input`]).
     pub(crate) input: crate::input::Input,
     /// The text selection ([`crate::text::Selected`]).
@@ -213,6 +219,10 @@ pub(crate) struct Surface {
     /// ([`crate::AppView::set_theme_overrides`]): sent to every engine the
     /// surface starts, before its first frame.
     pub(crate) host_tokens: RefCell<Option<nsh_engine::Tokens>>,
+    /// Links that came before the engine started (the one that launched
+    /// the app): sent before the app's code runs, so its first
+    /// `UrlScheme.url()` reads them.
+    pub(crate) launch_links: RefCell<Vec<String>>,
     /// JS asked for a display frame.
     js_frame: Cell<bool>,
     /// Batches that arrived while animations run, and what came after
@@ -224,8 +234,8 @@ pub(crate) struct Surface {
     /// its deadline ([`Next::At`]; a new one's is when it was added).
     frame_callbacks: RefCell<Vec<(FrameCallback, Option<f64>)>>,
     /// How many of the frame callbacks have only cosmetic work left (a
-    /// scroll indicator fading out): what [`Surface::animating`] does not
-    /// count.
+    /// scroll indicator fading out, keyframes repeating forever): what
+    /// [`Surface::animating`] does not count.
     #[cfg(feature = "dev")]
     cosmetic_frames: Cell<usize>,
     /// The model of a test session's app (`nsh test --target`).
@@ -236,6 +246,9 @@ pub(crate) struct Surface {
     /// The rate the display link was last asked for
     /// ([`Surface::frame_rate`]; `None`: the screen's highest).
     link_rate: Cell<Option<f32>>,
+    /// The highest refresh rate of the screen the display link was last
+    /// asked on ([`Surface::frame_rate_range`]), in Hz; `0` before any.
+    link_screen_max: Cell<f32>,
     /// The frame callbacks that asked for a rate in the last frame
     /// ([`Surface::cap_frame`]): how many, and the highest rate.
     capped_frames: Cell<(usize, f32)>,
@@ -243,6 +256,10 @@ pub(crate) struct Surface {
     /// there is one (for the sink, on the engine thread).
     perf: RefCell<Option<Arc<PerfMonitor>>>,
     perf_on: Arc<AtomicBool>,
+    /// Shows or hides the view's performance monitor
+    /// (`setFpsEnabled`): set by its [`crate::AppView`],
+    /// which owns the panel.
+    pub(crate) perf_toggle: RefCell<Option<PerfToggle>>,
     /// When the last frame ran (`CACurrentMediaTime`).
     last_tick: Cell<f64>,
     /// The deadline the timer scheduled waits for
@@ -258,14 +275,28 @@ pub(crate) struct Surface {
     resized: RefCell<Vec<NshView>>,
     /// The background set under the root ([`crate::system`]).
     pub(crate) background: Cell<Option<nsh_core::Color>>,
+    /// The surface fills the standalone runner's window ([`crate::run_app`]),
+    /// not a view of a host app.
+    pub(crate) standalone: Cell<bool>,
+    /// An embedded AppView opts out of painting a surface background
+    /// ([`crate::AppOptions::transparent`]). Standalone windows instead
+    /// track their live transparency in `main_window`.
+    pub(crate) transparent: Cell<bool>,
     on_error: RefCell<Option<ErrorHandler>>,
     on_hot_update_failed: RefCell<Option<Box<dyn Fn()>>>,
     /// Where `asset:/` image URIs resolve ([`crate::image::set_asset_base`]).
     pub(crate) asset_base: RefCell<Option<crate::image::AssetBase>>,
+    /// The engine's sounds and players ([`crate::audio`]).
+    pub(crate) audio: crate::audio::Speaker,
     /// The disk cache of downloaded images ([`crate::image::set_disk_cache`]).
     pub(crate) image_cache: RefCell<Option<nsh_core::image::DiskCache>>,
     /// The window's chrome: title bar, menus ([`crate::chrome`]).
     pub(crate) chrome: crate::chrome::Chrome,
+    /// What is held of the main window: its policies, title bar and look
+    /// ([`crate::window`]).
+    pub(crate) main_window: crate::window::Held,
+    /// The window observed for its bounds ([`crate::window_state`]).
+    pub(crate) window: crate::window_state::Watch,
     /// Videos, web views and registered native components.
     pub(crate) native: crate::native::NativeState,
     /// The app's keyboard shortcuts ([`crate::keymap`]).
@@ -313,6 +344,7 @@ impl Surface {
             mounter: RefCell::new(Mounter::new(root.clone())),
             anim: RefCell::new(UiAnimation::default()),
             nav: RefCell::default(),
+            windows: RefCell::default(),
             input: Default::default(),
             selection: Default::default(),
             engine: RefCell::new(None),
@@ -324,6 +356,7 @@ impl Surface {
             chunks: RefCell::new(None),
             host_environment: Cell::default(),
             host_tokens: RefCell::new(None),
+            launch_links: RefCell::new(Vec::new()),
             js_frame: Cell::new(false),
             queued: RefCell::default(),
             frame_callbacks: RefCell::default(),
@@ -333,23 +366,30 @@ impl Surface {
             test_model: RefCell::default(),
             link: RefCell::new(None),
             link_rate: Cell::new(None),
+            link_screen_max: Cell::new(0.0),
             capped_frames: Cell::new((0, 0.0)),
             perf: RefCell::new(None),
             perf_on: Arc::new(AtomicBool::new(false)),
+            perf_toggle: RefCell::new(None),
             last_tick: Cell::new(0.0),
             keeper: Cell::new(None),
             resize_late: Cell::new(false),
             revisited: Cell::new(0),
             resized: RefCell::default(),
             background: Cell::new(None),
+            standalone: Cell::new(false),
+            transparent: Cell::new(false),
             on_error: RefCell::new(None),
             on_hot_update_failed: RefCell::new(None),
             asset_base: RefCell::new(None),
+            audio: Default::default(),
             image_cache: RefCell::new(None),
             native: Default::default(),
             keymap: Default::default(),
             file_drop: Default::default(),
             chrome: Default::default(),
+            main_window: Default::default(),
+            window: Default::default(),
             shaders: Default::default(),
         });
         SURFACES.with(|s| s.borrow_mut().insert(key, Rc::downgrade(&surface)));
@@ -397,9 +437,23 @@ impl Surface {
         *self.pending.borrow_mut() = pending;
         // The embedding app's theme overrides are in the first frame.
         let tokens = self.host_tokens.borrow().clone();
+        // The displays are there as the app first renders.
+        let displays = crate::window_state::displays(self.mtm);
+        let links = std::mem::take(&mut *self.launch_links.borrow_mut());
         let setup = |control: &EngineControl| {
             if tokens.is_some() {
                 control.set_tokens(tokens);
+            }
+            control.set_displays(displays);
+            for url in links {
+                control.dispatch_event(
+                    nsh_core::ROOT_ID,
+                    nsh_core::EventKind::UrlScheme,
+                    nsh_core::EventPayload::Map(vec![(
+                        nsh_core::url_scheme::URL,
+                        nsh_core::PayloadValue::Str(url),
+                    )]),
+                );
             }
         };
         // Remote images download with NSURLSession.
@@ -434,6 +488,7 @@ impl Surface {
         crate::system::clear(self);
         *self.anim.borrow_mut() = UiAnimation::default();
         self.nav.borrow_mut().reset();
+        crate::window::close_all(self);
         crate::input::reset(self);
         crate::keymap::clear(self);
         crate::tray::release(self.key);
@@ -702,6 +757,7 @@ impl Surface {
             }
         }
         self.mounter.borrow_mut().end_batch(self);
+        crate::window::batch_applied(self);
         #[cfg(feature = "dev")]
         if let Some(model) = &*self.test_model.borrow() {
             model.apply(batch);
@@ -755,8 +811,9 @@ impl Surface {
     }
 
     /// A frame callback's work left became cosmetic (`on`: a scroll
-    /// indicator fading out, which shows nothing the app did) or no longer
-    /// is; it ends with `on` false.
+    /// indicator fading out, which shows nothing the app did; keyframes
+    /// repeating forever, a spinner, which never end) or no longer is; it
+    /// ends with `on` false.
     pub(crate) fn cosmetic_frame(&self, on: bool) {
         #[cfg(feature = "dev")]
         {
@@ -769,9 +826,10 @@ impl Surface {
     }
 
     /// Whether a native animation runs: the graph's (not one looping
-    /// forever, which no test step waits for), or the platform's own
-    /// (scroll glides, zooms; not a scroll indicator's fade, after which
-    /// nothing changes); or batches wait for the next frame.
+    /// forever, which no test step waits for), the platform's own (scroll
+    /// glides, zooms; not a scroll indicator's fade, after which nothing
+    /// changes) or a view's transitions (not its keyframes repeating
+    /// forever); or batches wait for the next frame.
     #[cfg(feature = "dev")]
     pub(crate) fn animating(&self) -> bool {
         self.anim.borrow().finishing()
@@ -909,15 +967,33 @@ impl Surface {
     /// The frame rates the display link asks for ([`frame_rate_range`]) at
     /// the rate it was last asked for, on the window's screen.
     fn frame_rate_range(&self) -> objc2_quartz_core::CAFrameRateRange {
-        let max = self
-            .root
+        let max = self.screen_max();
+        self.link_screen_max.set(max);
+        frame_rate_range(self.link_rate.get(), max)
+    }
+
+    /// The highest refresh rate of the window's screen (the main screen
+    /// while the root is in no window), in Hz.
+    fn screen_max(&self) -> f32 {
+        self.root
             .ns()
             .window()
             .and_then(|w| w.screen())
             .or_else(|| objc2_app_kit::NSScreen::mainScreen(self.mtm))
             .map_or(60, |s| s.maximumFramesPerSecond())
-            .max(1) as f32;
-        frame_rate_range(self.link_rate.get(), max)
+            .max(1) as f32
+    }
+
+    /// Asks the display link for its rates again when the window's screen
+    /// refreshes at another rate than the one they were made for: the
+    /// window moved to another screen, or the screen's mode changed. The
+    /// link follows the window's screen, but its rates stay what they were
+    /// asked for: one resumed on a 60 Hz screen and kept running (a looping
+    /// animation, the performance monitor) stays at 60 Hz on a 120 Hz one.
+    fn follow_screen(&self, link: &CADisplayLink) {
+        if self.screen_max() != self.link_screen_max.get() {
+            link.setPreferredFrameRateRange(self.frame_rate_range());
+        }
     }
 
     /// When the next thing that changes the app's state comes due without
@@ -991,7 +1067,7 @@ impl Surface {
     }
 
     /// Whether `nsh test --target` drives the app ([`Surface::set_test_model`]).
-    fn testing(&self) -> bool {
+    pub(crate) fn testing(&self) -> bool {
         #[cfg(feature = "dev")]
         return self.test_model.borrow().is_some();
         #[cfg(not(feature = "dev"))]
@@ -1004,6 +1080,7 @@ impl Surface {
         if !self.wants_frames() && self.perf.borrow().is_none() {
             link.setPaused(true);
         } else {
+            self.follow_screen(link);
             self.update_frame_rate(link, false);
         }
     }
@@ -1147,7 +1224,7 @@ fn frame_rate_range(rate: Option<f32>, max: f32) -> objc2_quartz_core::CAFrameRa
 }
 
 /// Runs `f` on the main queue after `ms` milliseconds.
-fn after(ms: u64, f: impl FnOnce() + Send + 'static) {
+pub(crate) fn after(ms: u64, f: impl FnOnce() + Send + 'static) {
     let when = dispatch2::DispatchTime::NOW.time((ms * 1_000_000) as i64);
     if let Err(err) = DispatchQueue::main().after(when, f) {
         log::error!("cannot schedule a frame: {err:?}");

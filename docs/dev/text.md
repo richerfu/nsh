@@ -2,7 +2,7 @@
 
 - **Text**: `<Text>`; styles `numberOfLines`, `textOverflow` (`ellipsis|clip|ellipsis-start|ellipsis-middle`: `EllipsizeMode`'s
   `Tail|Clip|Head|Middle`), `fontFamily` (system or imported fonts:
-  `import Inter from "./Inter.ttf"` evaluates to the family name and registers the font before the first frame), `fontWeight`,
+  `import Inter from "./Inter.ttf"` evaluates to the family name and registers the font before the first frame; a host can register the same files itself, `NshView.registerFont` / `NshAppView.registerFont`, and the app names the family), `fontWeight`,
   `fontStyle` (italic runs leave color emoji upright, in runs of their own: `AttributedText::push`, as WebKit does;
   Chrome and Android would slant them), `letterSpacing`, `textDecorationLine` + `textDecorationColor`, `textTransform`, `lineHeight`, `textAlign`,
   `textAlignVertical` (the core moves the content box down). `adjustsFontSizeToFit` shrinks the fonts (down to
@@ -11,6 +11,9 @@
   `TextStyle::set_half_leading(true)`, matching the other text engines' half-leading line boxes. Text without an
   explicit line height keeps its native font metrics. This centers the font's metrics in the line box; visible ink
   still follows each glyph's design.
+  On iOS, a positive fixed-height box keeps its first line even when Dynamic Type makes that line taller than
+  the box. CoreText positions it from the same top edge as an unconstrained line; the view's drawing bounds
+  clip the excess. Empty and zero-height boxes stay empty.
   `onTextLayout` reports the final lines (`TextEngine::lines`: range, box, ascender, descender, cap / x height).
   Final layouts are hit-tested by their engine too, in the content box (`TextEngine::hit_test`,
   `caret_rect`, `range_rects`): the caret position nearest a point (`TextPosition`: a UTF-16 offset and its

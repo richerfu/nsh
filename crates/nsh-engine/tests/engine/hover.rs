@@ -62,6 +62,7 @@ fn start(name: &str) -> (Engine, Receiver<MountBatch>) {
         app: nsh_engine::App::Js(unsafe { Bundle::bytecode(bytecode) }),
         viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -82,6 +83,8 @@ fn start(name: &str) -> (Engine, Receiver<MountBatch>) {
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),

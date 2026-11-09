@@ -51,6 +51,8 @@ mod storage;
 mod trace;
 #[cfg(feature = "js")]
 mod values;
+#[cfg(any(feature = "agent", feature = "js"))]
+mod window_json;
 
 #[cfg(feature = "bundle")]
 use std::{path::Path, sync::Arc};
@@ -66,8 +68,8 @@ use nsh_engine::{Bundle, EngineConfig};
 pub use self::headless::UreqNetwork;
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::headless::{
-    DialogAnswer, DirectoryAssets, Headless, RecordingNetwork, StubHandler, StubNetwork, StubReply,
-    StubResponse, StubRoute, WAIT, default_answer, print_batch, start,
+    AudioCall, DialogAnswer, DirectoryAssets, Headless, RecordingNetwork, StubHandler, StubNetwork,
+    StubReply, StubResponse, StubRoute, WAIT, default_answer, print_batch, start,
 };
 #[cfg(feature = "js")]
 #[allow(deprecated)]
@@ -86,7 +88,7 @@ pub use self::{
     runner::{PROTOCOL, Reply, RunnerMessage, TestRequest, runner},
 };
 pub use self::{
-    screen::{Pick, Screen},
+    screen::{LayoutNode, LayoutScroll, LayoutText, Pick, Screen},
     storage::MemoryStorage,
 };
 

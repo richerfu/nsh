@@ -81,6 +81,7 @@ fn start_in(
         app: nsh_engine::App::Js(app),
         viewport: Size::new(px(320.0), px(480.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -101,6 +102,8 @@ fn start_in(
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),

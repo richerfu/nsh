@@ -139,8 +139,7 @@ fn preload(
             bundle.app_id = Some(id.to_owned());
         }
         if let Some(schemes) = manifest.get("schemes") {
-            bundle.url_schemes = nsh_core::url_scheme::schemes_from_json(schemes)
-                .map_err(|e| format!("app.json: {e}"))?;
+            bundle.url_schemes = nsh_core::url_scheme::schemes_from_json(schemes);
         }
         if let Some(value) = manifest.get("entryChunks") {
             let names: Vec<String> = serde_json::from_value(value.clone())

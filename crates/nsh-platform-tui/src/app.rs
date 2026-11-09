@@ -58,6 +58,10 @@ pub struct TerminalCapabilities {
     /// keyboard protocol. Without it, Ctrl stands in for Cmd in the app's
     /// shortcuts on macOS.
     pub command_key: bool,
+    /// The terminal takes OSC 8 hyperlinks: the text inside a `Link` is
+    /// drawn as a hyperlink to its `href`. Without it, as on the Linux
+    /// console, which shows the sequence, links are plain text.
+    pub hyperlinks: bool,
 }
 
 /// The colors a terminal shows.
@@ -84,6 +88,7 @@ impl Default for TerminalCapabilities {
             background_color: None,
             foreground_color: None,
             command_key: false,
+            hyperlinks: true,
         }
     }
 }
@@ -242,10 +247,11 @@ impl AppView {
             .unwrap_or_else(|| Arc::new(nsh_core::clipboard::MemoryClipboard::default()));
         let surface = Surface::default();
         surface.wake.set(options.wake.clone());
+        let fps = options.fps || nsh_engine::perf::enabled_by_env();
         let output = crate::perf::SharedOutput::default();
-        output.enabled.set(options.fps);
+        output.enabled.set(fps);
         Self {
-            perf: options.fps.then(crate::perf::Monitor::new),
+            perf: fps.then(crate::perf::Monitor::new),
             output,
             options,
             #[cfg(feature = "dev")]
@@ -1060,6 +1066,9 @@ impl AppView {
             )
         });
         self.tree.apply(batch);
+        if let Some(enabled) = self.tree.perf_monitor.take() {
+            self.set_fps_monitor(enabled);
+        }
         #[cfg(feature = "dev")]
         if let Some((model, batch)) = observed {
             model.apply(&batch);
@@ -1661,6 +1670,13 @@ impl AppView {
             perf.pending.draw = drawing.elapsed();
             perf.draw(area, buffer);
         }
+        let painted = if self.options.capabilities.hyperlinks {
+            &self.tree.links
+        } else {
+            &crate::link::Painted::new()
+        };
+        let links = crate::link::finish(buffer, painted, &self.output.links.borrow());
+        *self.output.links.borrow_mut() = links;
         #[cfg(feature = "dev")]
         {
             let requests: Vec<_> = self
