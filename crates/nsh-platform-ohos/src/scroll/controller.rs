@@ -326,8 +326,11 @@ impl Scroller {
             .on_event(E::ScrollEventOnDidScroll, move |event| {
                 callback(|| {
                     if let Some(scroll) = weak.upgrade() {
+                        if scroll.applying_offset.get() {
+                            return scroll.report();
+                        }
                         scroll.queue_report()?;
-                        scroll.phase(event.component_i32(2).unwrap_or(0));
+                        scroll.phase(event.component_i32(2).unwrap_or(0))?;
                     }
                     Ok(())
                 })
@@ -339,8 +342,11 @@ impl Scroller {
             .on_event(E::ScrollEventOnScrollStop, move |_| {
                 callback(|| {
                     if let Some(scroll) = weak.upgrade() {
+                        if scroll.applying_offset.get() {
+                            return scroll.report();
+                        }
                         scroll.queue_report()?;
-                        scroll.phase(0);
+                        scroll.phase(0)?;
                     }
                     Ok(())
                 })
@@ -718,10 +724,13 @@ impl Scroller {
         Ok(())
     }
     pub(crate) fn flush_report(&self) -> Result<()> {
-        self.report_pending.set(false);
+        if !self.report_pending.replace(false) {
+            return Ok(());
+        }
         self.report()
     }
     fn report(&self) -> Result<()> {
+        self.report_pending.set(false);
         let Some(offset) = self.read_native_offset()? else {
             return Ok(());
         };
@@ -1156,6 +1165,9 @@ impl Scroller {
                     .on_event(E::ScrollEventOnDidScroll, move |_| {
                         callback(|| {
                             if let Some(scroll) = weak.upgrade() {
+                                if scroll.applying_offset.get() {
+                                    return scroll.report();
+                                }
                                 scroll.queue_report()?;
                             }
                             Ok(())
@@ -1346,11 +1358,15 @@ impl Scroller {
         }
         Ok(())
     }
-    fn phase(&self, phase: i32) {
+    fn phase(&self, phase: i32) -> Result<()> {
         let previous = self.phase.replace(phase);
         if previous == phase {
-            return;
+            return Ok(());
         }
+        // Flush any queued offset before emitting phase boundaries so the
+        // engine sees the final scroll position before ScrollDragEnd /
+        // MomentumEnd / ScrollEnd and no deferred report trails behind rest.
+        self.report()?;
         if let Some(owner) = self.owner.upgrade() {
             let (x, y) = self.offset.get();
             let payload = EventPayload::Scroll(Point::new(Points(x), Points(y)));
@@ -1373,5 +1389,6 @@ impl Scroller {
                 owner.emit(EventKind::ScrollEnd, payload);
             }
         }
+        Ok(())
     }
 }
