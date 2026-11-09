@@ -206,7 +206,9 @@ public class NshView extends FrameLayout {
         }
         // The back key where the window has no OnBackInvokedCallback in
         // effect (below Android 13, or `enableOnBackInvokedCallback` off).
-        addOnUnhandledKeyEventListener((v, e) -> onBackKey(e));
+        // Android 8 has no such listener: there the activity's
+        // `onBackPressed` hands the press to `handleBack`.
+        if (Build.VERSION.SDK_INT >= 28) addOnUnhandledKeyEventListener((v, e) -> onBackKey(e));
         // Apps keep their data in <dataDir>/<app id>: nsh in the files
         // directory unless the development host's test session says.
         // ... and the images they download in <cacheDir>/<app id>/images: nsh
@@ -305,6 +307,24 @@ public class NshView extends FrameLayout {
         }
     }
 
+    /**
+     * Registers a font file (TrueType, OpenType, WOFF or WOFF2) the host
+     * ships, so every app this view loads can name its family in
+     * {@code fontFamily} without bundling the file. Call it before or after
+     * loading: a font registered before a load is in that app's first frame,
+     * and one registered while an app runs is used from the next layout.
+     * Registering the same file again does nothing.
+     *
+     * @param data the font file
+     * @throws IllegalArgumentException when {@code data} is not a font
+     */
+    public void registerFont(byte[] data) {
+        String error = Native.registerFont(handle, data);
+        if (error != null) {
+            throw new IllegalArgumentException(error);
+        }
+    }
+
     /** The contents of {@code file}, or null when it does not exist. */
     private static String readText(File file) throws java.io.IOException {
         return file.exists() ? new String(Net.readAll(new FileInputStream(file)), StandardCharsets.UTF_8) : null;
@@ -368,7 +388,7 @@ public class NshView extends FrameLayout {
             assetHttp = null;
             assetApk = null;
             assetDir = new File(file.getParentFile(), "assets");
-            Native.load(handle, code, false, map, capabilities, app);
+            Native.load(handle, code, false, map, capabilities, app, null);
             return true;
         } catch (Exception e) {
             reportError("cannot read bundle " + file + ": " + e);
@@ -384,15 +404,27 @@ public class NshView extends FrameLayout {
      * @return false (reported to the error listener) if it cannot be read
      */
     public boolean loadAssetBundle(String dir) {
+        return loadAssetBundle(dir, false);
+    }
+
+    /**
+     * {@link #loadAssetBundle(String)} for the activity of packaged apps
+     * ({@link AppActivity}): with {@code packages}, a newer signed package of
+     * the app's code it downloaded ({@code nsh/updater}'s
+     * {@code downloadPackage}) runs instead, when the app's
+     * {@code assets/nsh-updater.json} trusts package roots.
+     */
+    boolean loadAssetBundle(String dir, boolean packages) {
         try {
             byte[] code = Net.readAll(getContext().getAssets().open(dir + "/bundle.nshc"));
             // Null when the app declares no capabilities / has no id.
             String capabilities = readAssetText(dir + "/capabilities.json");
             String app = readAssetText(dir + "/app.json");
+            String updater = packages ? readAssetText(dir + "/assets/nsh-updater.json") : null;
             assetHttp = null;
             assetDir = null;
             assetApk = dir + "/assets/";
-            Native.load(handle, code, true, null, capabilities, app);
+            Native.load(handle, code, true, null, capabilities, app, updater);
             return true;
         } catch (Exception e) {
             reportError("cannot read the app bundle: " + e);
@@ -529,7 +561,8 @@ public class NshView extends FrameLayout {
 
     /**
      * Hands the app a URL the system opened it with, as its {@code onLink} event (a scheme the app registered, nsh.json
-     * {@code schemes}). URLs given before the app listens are kept until it does. UI thread.
+     * {@code schemes}). URLs given before the app listens are kept until it does; given before an app loads, they are
+     * the address of the next one loaded when its code first runs ({@code UrlScheme.url()}). UI thread.
      *
      * @param url the URL
      */
@@ -785,8 +818,37 @@ public class NshView extends FrameLayout {
             (c.uiMode & Configuration.UI_MODE_TYPE_MASK) == Configuration.UI_MODE_TYPE_TELEVISION ? 3
                     : c.smallestScreenWidthDp >= 600 ? 1 : 0,
             lifecycle,
-        }, dark, locale.toLanguageTag());
+            // 24-hour time: the user's setting, else the locale's.
+            android.text.format.DateFormat.is24HourFormat(getContext()) ? 1 : 0,
+        }, dark, locale.toLanguageTag(), timeZone,
+                // The user's list (an app's own language first, Android 13's
+                // per-app language included), after the embedding app's own.
+                (hostLocale != null ? hostLocale.toLanguageTag() + "," : "") + c.getLocales().toLanguageTags(),
+                // The system's, whatever the embedding app's language: Android
+                // 14 keeps the first day of the week and the temperature unit
+                // in its extension.
+                java.util.Locale.getDefault(java.util.Locale.Category.FORMAT).toLanguageTag());
     }
+
+    /** The system's time zone's ID (`localeSettings()`'s `timeZone`). */
+    private String timeZone = java.util.TimeZone.getDefault().getID();
+
+    /**
+     * The system's time zone changed (the user's setting, or a new zone with
+     * automatic time zones): the broadcast names it, before the process's
+     * default zone may have caught up. Or the time changed, as when the user
+     * switches 24-hour time (`localeSettings()`'s `hourCycle`).
+     */
+    private final android.content.BroadcastReceiver timeChanged = new android.content.BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, android.content.Intent intent) {
+            if (android.content.Intent.ACTION_TIMEZONE_CHANGED.equals(intent.getAction())) {
+                String zone = intent.getStringExtra(android.content.Intent.EXTRA_TIMEZONE);
+                timeZone = zone != null ? zone : java.util.TimeZone.getDefault().getID();
+            }
+            publishEnvironment(getRootWindowInsets());
+        }
+    };
 
     /** The view's activity reported `state` (`lifecycle()`'s values). */
     private void activityState(Activity activity, int state) {
@@ -940,6 +1002,12 @@ public class NshView extends FrameLayout {
             Integer state = lifecycles.state(activity);
             if (state != null) activityState(activity, state);
         }
+        // The zone may have changed while the view was detached. The
+        // broadcasts are the system's alone: no export flag is needed.
+        timeZone = java.util.TimeZone.getDefault().getID();
+        android.content.IntentFilter time = new android.content.IntentFilter(android.content.Intent.ACTION_TIMEZONE_CHANGED);
+        time.addAction(android.content.Intent.ACTION_TIME_CHANGED);
+        getContext().registerReceiver(timeChanged, time);
         // The dispatcher exists once attached.
         if (handle != 0) mounter.updateBack();
     }
@@ -949,6 +1017,7 @@ public class NshView extends FrameLayout {
         super.onDetachedFromWindow();
         accessibility().removeTouchExplorationStateChangeListener(screenReader);
         if (Lifecycles.registered != null) Lifecycles.registered.views.remove(this);
+        getContext().unregisterReceiver(timeChanged);
     }
 
     /** `BackHandler.exitApp()`: what the back button does without the app. */

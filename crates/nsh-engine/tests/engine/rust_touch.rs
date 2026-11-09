@@ -124,6 +124,7 @@ fn a_rust_element_claims_touches_in_a_scroll_view() {
         app: App::Rust(Root::of::<Sketch>()),
         viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -144,6 +145,8 @@ fn a_rust_element_claims_touches_in_a_scroll_view() {
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     let engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
     let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();

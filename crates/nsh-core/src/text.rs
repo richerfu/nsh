@@ -1388,6 +1388,16 @@ pub fn font_data(data: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, String> {
         .map_err(|e| format!("the WOFF font does not decompress: {e:?}"))
 }
 
+/// Keeps a font file a host registers, once: `false` when `fonts` holds the
+/// same bytes already, so registering a file again changes nothing.
+pub fn keep_font(fonts: &mut Vec<Vec<u8>>, data: &[u8]) -> bool {
+    if fonts.iter().any(|font| font == data) {
+        return false;
+    }
+    fonts.push(data.to_vec());
+    true
+}
+
 /// The sizes a WOFF file's table directory declares, summed (`None` for a
 /// directory cut short, which `wuff` rejects): after the 44-byte header,
 /// 20 bytes a table, its `compLength` at 8 and `origLength` at 12. A table
@@ -1413,6 +1423,23 @@ fn woff_tables_size(data: &[u8]) -> Result<Option<u64>, String> {
         size += u64::from(length);
     }
     Ok(Some(size))
+}
+
+/// The family name a font registers under, which `fontFamily` names: its
+/// typographic family (name 16) when it has one, else its family (name
+/// 1). A WOFF or WOFF2 font's is the one of the font it holds.
+pub fn font_family(data: &[u8]) -> Result<String, String> {
+    let data = font_data(data)?;
+    let face = ttf_parser::Face::parse(&data, 0).map_err(|e| format!("not a font: {e}"))?;
+    let name = |id| {
+        face.names()
+            .into_iter()
+            .filter(|n| n.name_id == id && n.is_unicode())
+            .find_map(|n| n.to_string())
+    };
+    name(ttf_parser::name_id::TYPOGRAPHIC_FAMILY)
+        .or_else(|| name(ttf_parser::name_id::FAMILY))
+        .ok_or_else(|| "the font has no family name".to_owned())
 }
 
 #[cfg(test)]
@@ -1739,6 +1766,24 @@ mod tests {
             assert_eq!(face(&data), original);
         }
         assert!(font_data(b"wOF2 and nothing else").is_err());
+        assert_eq!(font_family(ttf).as_deref(), Ok("Pacifico"));
+        assert_eq!(
+            font_family(include_bytes!(
+                "../../../tests/compat/cases/layout/fonts/Pacifico-Regular.woff2"
+            ))
+            .as_deref(),
+            Ok("Pacifico")
+        );
+        assert!(font_family(b"not a font").is_err());
+    }
+
+    #[test]
+    fn keep_font_keeps_each_file_once() {
+        let mut fonts = Vec::new();
+        assert!(keep_font(&mut fonts, b"a"));
+        assert!(!keep_font(&mut fonts, b"a"));
+        assert!(keep_font(&mut fonts, b"b"));
+        assert_eq!(fonts, [b"a".to_vec(), b"b".to_vec()]);
     }
 
     /// A WOFF file of 68 bytes whose one table declares `length` bytes.

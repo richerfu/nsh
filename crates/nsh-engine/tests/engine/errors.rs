@@ -36,6 +36,7 @@ fn config(bundle: Bundle, limits: nsh_engine::Limits) -> EngineConfig {
         app: nsh_engine::App::Js(bundle),
         viewport: Size::new(px(100.0), px(100.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -56,6 +57,8 @@ fn config(bundle: Bundle, limits: nsh_engine::Limits) -> EngineConfig {
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     }
 }
 
@@ -121,6 +124,7 @@ fn first_error(bundle: Bundle) -> String {
         app: nsh_engine::App::Js(bundle),
         viewport: Size::new(px(100.0), px(100.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -141,6 +145,8 @@ fn first_error(bundle: Bundle) -> String {
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     let _engine = Engine::start(config, || ApproxTextEngine, sink).unwrap();
     rx.recv_timeout(Duration::from_secs(5))

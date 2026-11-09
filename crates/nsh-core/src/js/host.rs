@@ -229,7 +229,7 @@ pub mod on {
 }
 
 /// The platform a prop is for: everywhere, or inside `ios={{…}}` /
-/// `android={{…}}` / `desktop={{…}}` / `web={{…}}`.
+/// `android={{…}}` / `macos={{…}}` / `desktop={{…}}` / `web={{…}}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     /// Every platform.
@@ -240,6 +240,8 @@ pub enum Platform {
     Android,
     /// `ohos={{…}}`.
     Ohos,
+    /// `macos={{…}}`.
+    Macos,
     /// `desktop={{…}}` (macOS, Windows, Linux, desktop browsers).
     Desktop,
     /// `web={{…}}`.
@@ -965,6 +967,8 @@ pub const INTERNAL_EVENTS: &[EventKind] = &[
     EventKind::Speech,
     EventKind::Notification,
     EventKind::UrlScheme,
+    EventKind::Audio,
+    EventKind::Window,
     EventKind::KeyCommand,
     EventKind::Menu,
     EventKind::ViewableItemsChange,
@@ -1022,6 +1026,7 @@ pub fn declarations() -> String {
             (Platform::Ios, "IOS", " inside `ios={{…}}`"),
             (Platform::Android, "Android", " inside `android={{…}}`"),
             (Platform::Ohos, "Ohos", " inside `ohos={{…}}`"),
+            (Platform::Macos, "MacOS", " inside `macos={{…}}`"),
             (Platform::Desktop, "Desktop", " inside `desktop={{…}}`"),
             (Platform::Web, "Web", " inside `web={{…}}`"),
         ] {

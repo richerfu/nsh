@@ -56,9 +56,10 @@ dist\nsh\runtime\windows\nsh-windows-host --bundle build\bundle.nshc --window-si
 
 ### Performance monitor
 
-`--fps` (`nsh run App.tsx --target windows --fps`, `nsh test --target windows --fps`, the host's `--fps`, or
-`AppOptions { fps: true, .. }` in a Rust app's `run_app`) logs the performance monitor's readings once a second
-(target `nsh::perf`): frames shown over the display's rate, the main thread's time per frame and its phases (`tick`,
+`--fps` (`nsh run App.tsx --target windows --fps`, `nsh test --target windows --fps`, the host's `--fps`,
+`AppOptions { fps: true, .. }` in a Rust app's `run_app`, the environment variable `NSH_FPS=1`, or the app's own
+`setFpsEnabled(true)`) logs the performance monitor's readings once a second
+(target `nsh::fps`): frames shown over the display's rate, the main thread's time per frame and its phases (`tick`,
 `drain`, `paint`, `present`, `canvas`), the engine's commits, CPU and memory, in the shape the other desktops log
 (milliseconds as mean/p50/p95/max). `nsh test --fps -v` shows them and `examples/gallery/tools/perf.py` reads them
 ([Performance report](./performance-report.md#windows-win32-direct2d)). Measure release builds; the monitor costs
@@ -71,7 +72,7 @@ nsh package --target windows [--run]           # a Rust app, from its directory
 nsh package App.tsx --target windows [--run]   # a TSX app
 ```
 
-Writes a directory and the same as an archive:
+Writes a directory, the same as an archive, and an installer:
 
 ```text
 .nsh\out\<Name>\
@@ -80,10 +81,18 @@ Writes a directory and the same as an archive:
   nsh\assets\…           the assets it imports (a Rust crate's `assets!()` too)
   nsh\app.json           the window title, the app id, the version and the appearance
 .nsh\out\<Name>.zip
+.nsh\out\<Name>.iss        the Inno Setup script for the installer
+.nsh\out\<Name>-setup.exe  the installer, when Inno Setup 6 is installed
 ```
 
 The executable finds `nsh\` next to itself; copy the whole directory (or unpack the `.zip`) wherever the app should
-live: nothing is installed. The icon from `nsh.json` is embedded in the executable (Explorer and the taskbar show it)
+live, or ship the installer. `nsh package` also writes `.nsh\out\<Name>.iss`, an [Inno Setup](https://jrsoftware.org/isinfo.php)
+script, and compiles it to `.nsh\out\<Name>-setup.exe` when Inno Setup 6 is installed (`winget install
+JRSoftware.InnoSetup`). The installer needs no administrator rights: it installs for the current user in
+`%LOCALAPPDATA%\Programs\<Name>`, adds a Start menu shortcut (with the app id, which the taskbar and notifications use)
+and an entry in Installed apps that uninstalls it. Its AppId is the app id, so the installer of a newer version
+upgrades the installed one in place, closing the app first; the app's data is never touched, by upgrades or by the
+uninstaller. The icon from `nsh.json` is embedded in the executable (Explorer and the taskbar show it)
 without any extra tools; packaging on another system keeps the default icon. The app id groups the app's windows in
 the taskbar. `--run` launches the app after packaging it. The executable is not signed: sign it with your own
 certificate (`signtool`) to distribute it.
@@ -172,9 +181,10 @@ The `cursor` style follows updates while the mouse rests over a view. When a bat
 Windows applies the new shape or `"none"` after the whole batch, using the view under the pointer.
 The title bar and resize borders keep their system cursors.
 
-A TSX app opens windows of its own with [`Window.open`](../modules/nsh-desktop.md#windowopen): each is a top-level
-window with its own taskbar button, drawn by the app's engine and running in its one JS runtime, so it shares the
-app's signals and modules directly. Closing the main window closes them and ends the app.
+An app opens windows of its own with [`<Window>` and `Window.open`](../modules/nsh-desktop.md#windows): each is a
+top-level window drawn by the app's engine and running in its one JS runtime, so it shares the app's signals and
+modules directly. A normal window has its own taskbar button; dialogs, panels and popups are owned by their parent
+window. Closing the main window closes them and ends the app.
 
 ### Keyboard
 

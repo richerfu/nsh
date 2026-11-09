@@ -24,6 +24,16 @@ export type IconName =
   | "storage"
   | "stocks"
   | "chat"
+  | "smile"
+  | "clock"
+  | "person"
+  | "leaf"
+  | "food"
+  | "car"
+  | "ball"
+  | "bulb"
+  | "heart"
+  | "flag"
   | "chevron"
   | "pipette"
   | "chevron-up"
@@ -43,8 +53,10 @@ export type IconName =
   | "sidebar"
   | "sun"
   | "moon"
+  | "undo"
   | "volume-low"
   | "volume-high"
+  | "volume-off"
   | "code"
   | "sliders"
   | "stepper"
@@ -89,7 +101,8 @@ export type IconName =
   | "folder"
   | "folder-open"
   | "file"
-  | "tree";
+  | "tree"
+  | "hamburger";
 
 type Draw = (cx: CanvasRenderingContext2D) => void;
 
@@ -236,6 +249,12 @@ const glyphs: Record<IconName, Draw> = {
     line(c, [2.5, 12.5, 17.5, 12.5]);
     line(c, [8, 3.5, 8, 16.5]);
   },
+  // Three bars: a menu of the app's own settings.
+  hamburger: (c) => {
+    line(c, [3.5, 5.5, 16.5, 5.5]);
+    line(c, [3.5, 10, 16.5, 10]);
+    line(c, [3.5, 14.5, 16.5, 14.5]);
+  },
   menu: (c) => {
     rect(c, 3.5, 2.5, 13, 15, 2.5);
     line(c, [6.5, 6.5, 13.5, 6.5]);
@@ -374,6 +393,78 @@ const glyphs: Record<IconName, Draw> = {
     line(c, [13, 3, 13, 15]);
     rect(c, 11.5, 5, 3, 7, 0.8);
     line(c, [3, 17.5, 17, 17.5]);
+  },
+  smile: (c) => {
+    circle(c, 10, 10, 7);
+    circle(c, 7.5, 8.3, 0.9, true);
+    circle(c, 12.5, 8.3, 0.9, true);
+    c.beginPath();
+    c.arc(10, 10.6, 3.5, 0.18 * Math.PI, 0.82 * Math.PI);
+    c.stroke();
+  },
+  clock: (c) => {
+    circle(c, 10, 10, 7);
+    line(c, [10, 6, 10, 10, 12.8, 11.8]);
+  },
+  person: (c) => {
+    circle(c, 10, 7, 3.2);
+    c.beginPath();
+    c.arc(10, 18.5, 6.5, 1.12 * Math.PI, 1.88 * Math.PI);
+    c.stroke();
+  },
+  leaf: (c) => {
+    c.beginPath();
+    c.moveTo(4, 16);
+    c.bezierCurveTo(4, 8.5, 8.5, 4, 16, 4);
+    c.bezierCurveTo(16, 11.5, 11.5, 16, 4, 16);
+    c.stroke();
+    line(c, [4, 16, 11, 9]);
+  },
+  food: (c) => {
+    c.beginPath();
+    c.arc(10, 9.5, 6.5, Math.PI, 0);
+    c.closePath();
+    c.stroke();
+    line(c, [3, 12.5, 17, 12.5]);
+    rect(c, 3.5, 14.5, 13, 2.5, 1.2);
+  },
+  car: (c) => {
+    rect(c, 3, 9, 14, 5, 2);
+    line(c, [5, 9, 6.8, 5.5, 13.2, 5.5, 15, 9]);
+    circle(c, 6.5, 14.5, 1.4, true);
+    circle(c, 13.5, 14.5, 1.4, true);
+  },
+  ball: (c) => {
+    circle(c, 10, 10, 7);
+    line(c, [3, 10, 17, 10]);
+    c.beginPath();
+    c.arc(3.5, 10, 6, -0.42 * Math.PI, 0.42 * Math.PI);
+    c.stroke();
+    c.beginPath();
+    c.arc(16.5, 10, 6, 0.58 * Math.PI, 1.42 * Math.PI);
+    c.stroke();
+  },
+  bulb: (c) => {
+    c.beginPath();
+    c.arc(10, 8, 4.8, 0.78 * Math.PI, 0.22 * Math.PI);
+    c.lineTo(12.4, 13.5);
+    c.lineTo(7.6, 13.5);
+    c.closePath();
+    c.stroke();
+    line(c, [8, 16.3, 12, 16.3]);
+  },
+  heart: (c) => {
+    c.beginPath();
+    c.moveTo(10, 16.5);
+    c.bezierCurveTo(3, 11.5, 3.2, 4.8, 7, 4.8);
+    c.bezierCurveTo(8.6, 4.8, 9.5, 5.8, 10, 7);
+    c.bezierCurveTo(10.5, 5.8, 11.4, 4.8, 13, 4.8);
+    c.bezierCurveTo(16.8, 4.8, 17, 11.5, 10, 16.5);
+    c.stroke();
+  },
+  flag: (c) => {
+    line(c, [5, 17, 5, 3.5]);
+    line(c, [5, 4, 15, 4, 12.8, 7, 15, 10, 5, 10]);
   },
   chat: (c) => {
     line(c, [6, 16.5, 6, 14, 5, 14, 3, 12, 3, 6, 5, 4, 15, 4, 17, 6, 17, 12, 15, 14, 9, 14, 6, 16.5]);
@@ -587,12 +678,27 @@ const glyphs: Record<IconName, Draw> = {
     wave(c, 3.2);
     wave(c, 6.2);
   },
+  "volume-off": (c) => {
+    speaker(c);
+    line(c, [13, 7.5, 18, 12.5]);
+    line(c, [18, 7.5, 13, 12.5]);
+  },
   moon: (c) => {
     // A disc less the one up and to its right: the arcs meet where the circles cross.
     c.beginPath();
     c.arc(10, 10, 6.5, 0.134, Math.PI * 2 - 1.704);
     c.arc(13.2, 6.8, 5.2, Math.PI * 2 - 2.468, 0.898, true);
     c.closePath();
+    c.stroke();
+  },
+  undo: (c) => {
+    // An arrowhead pointing back and the path it came by, turning down and back.
+    line(c, [7.5, 11.5, 3.5, 7.5, 7.5, 3.5]);
+    c.beginPath();
+    c.moveTo(3.5, 7.5);
+    c.lineTo(12, 7.5);
+    c.arc(12, 11.75, 4.25, -Math.PI / 2, Math.PI / 2);
+    c.lineTo(9, 16);
     c.stroke();
   },
 };

@@ -234,6 +234,9 @@ pub struct Attrs {
     /// Where a JS renderer's content goes (the element is its
     /// placeholder: [`super::Renderer::render`]).
     pub(crate) render: Option<super::renderer::RenderAt>,
+    /// A window of the app's own: the dialog root it shows
+    /// ([`super::desktop::window`]).
+    pub(crate) window: Option<Box<crate::desktop::WindowOptions>>,
 }
 
 impl Attrs {
@@ -1770,6 +1773,17 @@ pub trait Interactive: Element {
         self
     }
 
+    /// Where the view goes as a link, carried to the platform as data
+    /// ([`Prop::Href`]). `nsh-base`'s `Link` sets it from its `href`;
+    /// apps use `Link`.
+    #[doc(hidden)]
+    fn __link_href(mut self, href: impl IntoReactive<Option<SharedString>>) -> Self {
+        super::host::bind_prop(self.node(), href, |href: Option<SharedString>| {
+            Prop::Href(href.map(|href| href.to_arc()))
+        });
+        self
+    }
+
     /// How long a press must last to be a long press, in milliseconds.
     fn long_press_delay(mut self, ms: f32) -> Self {
         super::host::set(self.node(), Prop::LongPressDelay(Some(ms)));
@@ -1794,6 +1808,13 @@ pub trait Interactive: Element {
         self
     }
 
+    /// The native material the view draws with on macOS
+    /// (`macos={{ backdrop }}`): an `NSVisualEffectView`, or none.
+    fn macos_backdrop(mut self, backdrop: impl IntoReactive<Option<crate::MacOsBackdrop>>) -> Self {
+        super::host::bind_prop(self.node(), backdrop, Prop::MacOsBackdrop);
+        self
+    }
+
     /// The id UI tests find it by.
     fn test_id(mut self, id: &str) -> Self {
         super::host::set(self.node(), Prop::TestId(Some(id.into())));
@@ -1803,11 +1824,29 @@ pub trait Interactive: Element {
     /// Whether a desktop press drags the window and a double click follows
     /// the system's title-bar behavior. The nearest explicit value wins;
     /// inputs and press/touch handlers inside a drag region stay interactive.
+    /// On macOS and Linux, background clicks reach the app on release,
+    /// including ancestor press handlers; dragging does not deliver a click.
     /// Set false on a child to exclude it from its parent's drag region.
     fn window_drag(mut self, enabled: impl IntoReactive<bool>) -> Self {
         super::host::bind_prop(self.node(), enabled, |enabled| {
             Prop::WindowDrag(Some(enabled))
         });
+        self
+    }
+
+    /// Makes the view one of the system's window buttons in a title bar the
+    /// app draws (TS: `desktop={{ windowControl }}`): the platform hit-tests
+    /// it as that button (the snap layouts over a maximize button on
+    /// Windows) and carries out its press.
+    fn window_control(mut self, control: crate::desktop::WindowControl) -> Self {
+        super::host::set(self.node(), Prop::WindowControl(Some(control)));
+        self
+    }
+
+    /// Pressing the view resizes a frameless window by `edge` (TS:
+    /// `desktop={{ windowResize }}`).
+    fn window_resize(mut self, edge: crate::desktop::ResizeEdge) -> Self {
+        super::host::set(self.node(), Prop::WindowResize(Some(edge)));
         self
     }
 

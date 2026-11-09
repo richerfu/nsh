@@ -51,7 +51,7 @@ mod selectable_view;
 mod shader;
 mod sight;
 // Shared with iOS.
-use nsh_platform_apple::{notifications, speech};
+use nsh_platform_apple::{audio, notifications, speech};
 mod surface;
 #[cfg(feature = "dev")]
 mod synth;
@@ -62,6 +62,8 @@ mod transition;
 mod tray;
 mod view;
 mod visual;
+mod window;
+mod window_state;
 
 pub use nsh_core::platform::{Appearance, Locale};
 pub use nsh_engine::{

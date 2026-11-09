@@ -61,6 +61,7 @@ fn launch(
         ),
         viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -81,6 +82,8 @@ fn launch(
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -172,6 +175,7 @@ fn rust_shares_the_entries_of_js() {
         app: App::Rust(Root::new::<Reader>(|| ReaderProps {})),
         viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -192,6 +196,8 @@ fn rust_shares_the_entries_of_js() {
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     let engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
     assert_eq!(shown(&rx, "rust"), "rust saw 1 from_rust,launches");
@@ -273,6 +279,7 @@ fn rust_edits_the_storage() {
         app: App::Rust(Root::new::<Editor>(|| EditorProps {})),
         viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -294,6 +301,8 @@ fn rust_edits_the_storage() {
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     let _engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
     assert_eq!(shown(&rx, "rust"), "rust b true 0 true");
@@ -357,6 +366,7 @@ fn a_rust_root_keeps_its_data_under_its_id() {
         app: App::Rust(Root::new::<Writer>(|| WriterProps {}).app_id("com.example.rusty")),
         viewport: Size::new(px(390.0), px(844.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -377,6 +387,8 @@ fn a_rust_root_keeps_its_data_under_its_id() {
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     let engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
     assert_eq!(shown(&rx, "rust"), "rust wrote");

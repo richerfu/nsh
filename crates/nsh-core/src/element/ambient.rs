@@ -28,7 +28,7 @@ use crate::{
     Command, Dialog, EdgeInsets, LayoutAnimation, NodeId, Points, Size,
     canvas::CanvasFont,
     color::Hsla,
-    platform::{Appearance, Idiom, Lifecycle, Locale, Os},
+    platform::{Appearance, Idiom, Lifecycle, Locale, LocaleSettings, Os},
     time::Instant,
 };
 
@@ -47,6 +47,16 @@ pub(crate) struct Ambient {
     measure: Option<MeasureFn>,
     /// The app's key-value storage (`nsh/storage`).
     storage: Option<crate::storage::Store>,
+    /// The displays (desktops), as the platform reports them.
+    displays: Option<Signal<Arc<[crate::desktop::Display]>>>,
+    /// Whether the performance monitor measures, as the platform reports
+    /// it.
+    perf_monitor: Option<Signal<bool>>,
+    /// The main window's close presses: how many, and the last one's
+    /// reason ([`crate::element::desktop::WindowRef::on_close_press`]).
+    main_close_press: Option<Signal<(u64, crate::desktop::CloseReason)>>,
+    /// The app's address (`set_app_url` resolves against its page base).
+    app_url: Option<crate::url_scheme::AppUrlCell>,
 }
 
 impl Ambient {
@@ -63,6 +73,7 @@ struct EnvSignals {
     window: Memo<Size<Points>>,
     safe_area: Memo<EdgeInsets>,
     title_bar: Memo<crate::geometry::Edges<crate::geometry::Points>>,
+    window_state: Memo<Option<crate::desktop::WindowState>>,
     keyboard_height: Memo<Points>,
     keyboard_duration: Memo<f32>,
     dark: Memo<bool>,
@@ -72,6 +83,7 @@ struct EnvSignals {
     rtl: Memo<bool>,
     pixel_ratio: Memo<f32>,
     locale: Memo<Locale>,
+    locale_settings: Memo<LocaleSettings>,
     lifecycle: Memo<Lifecycle>,
     screen_color: Memo<bool>,
 }
@@ -90,6 +102,7 @@ impl EnvSignals {
                 window: part!(window),
                 safe_area: part!(safe_area),
                 title_bar: part!(title_bar),
+                window_state: part!(window_state),
                 keyboard_height: part!(keyboard_height),
                 keyboard_duration: part!(keyboard_duration),
                 dark: part!(dark),
@@ -99,6 +112,7 @@ impl EnvSignals {
                 rtl: part!(rtl),
                 pixel_ratio: part!(pixel_ratio),
                 locale: part!(locale),
+                locale_settings: part!(locale_settings),
                 lifecycle: part!(lifecycle),
                 screen_color: part!(screen_color),
             }
@@ -113,6 +127,12 @@ impl super::Runtime {
     pub(crate) fn set_services(&self, executor: Rc<Executor>) {
         let _entered = self.enter();
         with_data(|d| d.ambient.executor = Some(executor));
+    }
+
+    /// The app's address, the core's (`set_app_url`).
+    pub(crate) fn set_app_url(&self, app_url: crate::url_scheme::AppUrlCell) {
+        let _entered = self.enter();
+        with_data(|d| d.ambient.app_url = Some(app_url));
     }
 
     /// Where the app's storage is kept.
@@ -138,6 +158,44 @@ impl super::Runtime {
                 with_data(|d| d.ambient.env = Some(signals));
             }
         }
+    }
+
+    /// The displays now: what read them runs again.
+    pub(crate) fn set_displays(&self, displays: Arc<[crate::desktop::Display]>) {
+        let _entered = self.enter();
+        let signal = displays_signal();
+        if signal.with_untracked(|d| **d != *displays) {
+            signal.set(displays);
+        }
+    }
+
+    /// Whether the performance monitor measures now: what read it runs
+    /// again.
+    pub(crate) fn set_perf_monitor(&self, enabled: bool) {
+        let _entered = self.enter();
+        let signal = perf_monitor_signal();
+        if signal.get_untracked() != enabled {
+            signal.set(enabled);
+        }
+    }
+
+    /// The user asked to close the main window: what listens hears it.
+    pub(crate) fn main_close_pressed(&self, reason: crate::desktop::CloseReason) {
+        let _entered = self.enter();
+        main_close_press_signal().update(|(count, last)| {
+            *count += 1;
+            *last = reason;
+        });
+    }
+
+    /// `placement` fitted on the displays now (`setPlacement`, a restored
+    /// window's), without subscribing to them.
+    pub(crate) fn fit_window_placement(
+        &self,
+        placement: crate::desktop::WindowPlacement,
+    ) -> crate::desktop::WindowPlacement {
+        let _entered = self.enter();
+        displays_signal().with_untracked(|d| placement.fit_on_displays(d))
     }
 
     /// The design tokens now: what read them runs again.
@@ -180,7 +238,7 @@ fn env<T: Clone + 'static>(part: impl FnOnce(&EnvSignals) -> Memo<T>) -> T {
         .get()
 }
 
-fn executor() -> Rc<Executor> {
+pub(super) fn executor() -> Rc<Executor> {
     with_data(|d| d.ambient.executor.clone()).expect("the core sets the executor")
 }
 
@@ -267,6 +325,23 @@ pub fn round_to_nearest_pixel(points: Points) -> Points {
 /// The user's locale (TS: what `Intl` formats for by default).
 pub fn locale() -> Locale {
     env(|e| e.locale)
+}
+
+/// The user's locale settings (TS: `localeSettings()`): the preferred
+/// languages, most preferred first (the app shows its text in the first it
+/// has, the others are its fallbacks; an embedding app's own language comes
+/// first), the device's time zone as the system names it
+/// (`Europe/Berlin`), and the regional preferences: 12- or 24-hour time,
+/// the first day of the week, the measurement system and the temperature
+/// unit, each the system's setting, else the region's. Reading it
+/// subscribes, so what shows them follows the user's settings and travels;
+/// a `computed` of one of them changes only with it. `nsh_base`'s
+/// `TimeField` and `DatePicker` take their `HourCycle::H12` where
+/// [`HourCycle::twelve_hour`](crate::platform::HourCycle::twelve_hour),
+/// else `H23`; its `Calendar` and `DatePicker` count their
+/// `first_day_of_week` from 0 for Sunday: pass `number() % 7`.
+pub fn locale_settings() -> LocaleSettings {
+    env(|e| e.locale_settings)
 }
 
 /// Whether the app is in use: in the foreground, visible without the
@@ -452,6 +527,12 @@ pub fn announce_for_accessibility(message: impl Into<String>) {
     act(super::services::announce(message.into()));
 }
 
+/// The device plays `haptic` (TS: `Haptics` of `nsh/mobile`): iOS and
+/// Android; elsewhere nothing happens.
+pub fn haptic(haptic: crate::Haptic) {
+    act(super::services::haptic(haptic));
+}
+
 /// Runs `f` with the app's storage (`nsh/storage`, [`crate::storage::Storage`]):
 /// the one the engine was given, or one in memory when it was given none.
 pub(crate) fn with_storage<R>(f: impl FnOnce(&crate::storage::Store) -> R) -> R {
@@ -552,6 +633,17 @@ pub fn pick_screen_color() -> Answer<Option<crate::Hsla>> {
 /// copied in a file manager; TS: `Clipboard.readFiles`), to await in a task.
 pub fn clipboard_files() -> Answer<Vec<String>> {
     let (answer, action) = super::services::clipboard_files();
+    act(action);
+    answer
+}
+
+/// Registers a font while the app runs (TS: `registerFont`): one it
+/// downloaded or made, as TrueType, OpenType, WOFF or WOFF2 data. Resolves
+/// to its family name, for `font_family`, or why `data` is no font; to
+/// await in a task. Text that names the family is laid out with it from
+/// then on.
+pub fn register_font(data: impl Into<Vec<u8>>) -> Answer<Result<String, String>> {
+    let (answer, action) = super::services::register_font(data.into());
     act(action);
     answer
 }
@@ -734,6 +826,41 @@ pub fn next_url_scheme_open() -> Answer<String> {
     answer
 }
 
+/// The app's address (TS: `UrlScheme.url()`): on the web the page's, on
+/// the native platforms the last link that opened the app; what
+/// [`set_app_url`] set after it; `None` when there is none
+/// ([`crate::url_scheme`]). To await in a task.
+pub fn app_url() -> Answer<Option<String>> {
+    let (answer, slot) = Answer::new();
+    act(Action::AppUrl(slot));
+    answer
+}
+
+/// Sets the app's address (TS: `UrlScheme.setUrl`): on the web it replaces
+/// the current history entry's; the native platforms keep it for
+/// [`app_url`] ([`crate::url_scheme`]). An address longer than
+/// [`crate::url_scheme::MAX_URL_LEN`] or with whitespace is an error, as
+/// TS's `TypeError`; on the web a URL is resolved against the page's base,
+/// as TS's is, and one of another origin than the page's is an error.
+pub fn set_app_url(url: impl Into<String>) -> Result<(), String> {
+    let mut url = url.into();
+    crate::url_scheme::check_address(&url)?;
+    // Where the app is the page (the web), as TS's `setUrl` there.
+    if try_os() == Some(Os::Web)
+        && let Some(base) = with_data(|d| d.ambient.app_url.as_ref().and_then(|a| a.page_base()))
+    {
+        url = crate::url_scheme::resolve_on_page(&url, &base)?;
+    }
+    act(Action::SetAppUrl(url));
+    Ok(())
+}
+
+/// `UrlScheme.setUrl`'s part in the core: the address again, in order with
+/// what came since the VM wrote it, and the web's history entry.
+pub(crate) fn set_app_url_from_js(url: String) {
+    act(Action::SetAppUrl(url));
+}
+
 /// Whether a web view's ref gives its page trusted input here (TS:
 /// `WebView.inputAvailable()`, [`ElementRef::send_input`](super::ElementRef::send_input)):
 /// the platform delivers it (macOS) and the app's capabilities grant
@@ -881,6 +1008,11 @@ pub fn fetch(request: impl Into<crate::platform::HttpRequest>) -> super::Fetch {
     let (answer, action) = super::services::fetch(request.into());
     act(action);
     answer
+}
+
+/// Asks for the app to show in `locale` ([`crate::i18n::set_locale`]).
+pub(crate) fn act_locale(locale: Option<crate::platform::Locale>) {
+    act(Action::Locale(locale));
 }
 
 /// Shows the surface in `appearance` whatever the system's (TS:
@@ -1097,14 +1229,23 @@ pub fn after_answer(f: impl FnOnce() + 'static) {
 }
 
 /// Runs blocking `f` on the runtime's blocking threads (in a task: await
-/// its result; `tokio::task::spawn_blocking`). Not in WebAssembly: code
-/// that should also run on the web uses the engine's services instead
-/// ([`fetch`], [`timer`]).
+/// its result; `tokio::task::spawn_blocking`), starting at once, whether
+/// called from a task, a render, an effect or a handler. Not in
+/// WebAssembly: code that should also run on the web uses the engine's
+/// services instead ([`fetch`], [`timer`]).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn blocking<R: Send + 'static>(
     f: impl FnOnce() -> R + Send + 'static,
 ) -> tokio::task::JoinHandle<R> {
-    tokio::task::spawn_blocking(f)
+    // Tasks are polled in the runtime's context; outside a task the
+    // surface's runtime is the one they would be.
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => runtime.spawn_blocking(f),
+        Err(_) => match executor().runtime() {
+            Some(runtime) => runtime.spawn_blocking(f),
+            None => tokio::task::spawn_blocking(f),
+        },
+    }
 }
 
 /// Runs `future` on the runtime's threads (in a task: await its result;
@@ -1189,7 +1330,10 @@ pub fn try_apple_keys() -> Option<bool> {
 /// lives (TS: `keymap.bind`): `"mod+k"` (`mod` is Command on Apple
 /// platforms, Control elsewhere), `"shift+mod+l"`, `"escape"`, ... (the
 /// keystrokes of `nsh/keymap`). The handler gets the keystroke as written.
-/// Desktop platforms fire them; elsewhere they are kept but no key does.
+/// It belongs to the window bound in ([`super::desktop::current_window`])
+/// and fires only for keys pressed there; a key it does not take goes on
+/// as usual. Desktop platforms fire them; elsewhere they are kept but no
+/// key does.
 ///
 /// # Panics
 ///
@@ -1215,6 +1359,8 @@ pub fn on_key_with(keystroke: &str, options: KeyOptions, handler: impl Fn(&str) 
     }
     let owner = Owner::current();
     let handler: super::keys::KeyHandler = Rc::new(move |k: &str| owner.run(|| handler(k)));
+    // It belongs to the window whose tree binds it (`current_window`).
+    let window = super::use_context::<super::desktop::WindowRef>().and_then(|w| w.dialog_root());
     let keys = executor().keys.clone();
     let id = keys.borrow_mut().add(
         |id| {
@@ -1223,6 +1369,7 @@ pub fn on_key_with(keystroke: &str, options: KeyOptions, handler: impl Fn(&str) 
         },
         keystroke.into(),
         handler,
+        window,
     );
     let weak = Rc::downgrade(&keys);
     cleanup(move || {
@@ -1422,6 +1569,61 @@ pub fn on_back_press(f: impl Fn() -> bool + 'static) {
 
 pub(crate) fn title_bar() -> crate::geometry::Edges<crate::geometry::Points> {
     env(|e| e.title_bar)
+}
+
+pub(crate) fn window_state() -> Option<crate::desktop::WindowState> {
+    env(|e| e.window_state)
+}
+
+pub(crate) fn displays() -> Vec<crate::desktop::Display> {
+    displays_signal().with(|d| d.to_vec())
+}
+
+/// The displays' signal, made empty on first use (whatever reads it before
+/// the platform reports displays follows them when it does).
+fn displays_signal() -> Signal<Arc<[crate::desktop::Display]>> {
+    if let Some(signal) = with_data(|d| d.ambient.displays) {
+        return signal;
+    }
+    let signal = Owner::detached().run(|| super::signal(Arc::from(Vec::new())));
+    with_data(|d| d.ambient.displays = Some(signal));
+    signal
+}
+
+/// Whether the platform's performance monitor measures (TS:
+/// `fpsEnabled()`), as the platform reports it: reading it in a binding
+/// subscribes it.
+pub fn fps_enabled() -> bool {
+    perf_monitor_signal().get()
+}
+
+/// Turns the platform's performance monitor on or off (TS:
+/// `setFpsEnabled`): the macOS panel, the other platforms' `nsh::fps`
+/// log lines, as `--fps` and `NSH_FPS=1` do at launch. Platforms without a
+/// monitor ignore it; [`fps_enabled`] follows what the platform did.
+pub fn set_fps_enabled(enabled: bool) {
+    act(super::services::perf_monitor(enabled));
+}
+
+/// The performance monitor's signal, off until the platform reports it.
+fn perf_monitor_signal() -> Signal<bool> {
+    if let Some(signal) = with_data(|d| d.ambient.perf_monitor) {
+        return signal;
+    }
+    let signal = Owner::detached().run(|| super::signal(false));
+    with_data(|d| d.ambient.perf_monitor = Some(signal));
+    signal
+}
+
+/// The main window's close presses, none until the platform reports one.
+pub(crate) fn main_close_press_signal() -> Signal<(u64, crate::desktop::CloseReason)> {
+    if let Some(signal) = with_data(|d| d.ambient.main_close_press) {
+        return signal;
+    }
+    let signal =
+        Owner::detached().run(|| super::signal((0, crate::desktop::CloseReason::default())));
+    with_data(|d| d.ambient.main_close_press = Some(signal));
+    signal
 }
 
 /// The views' menu handlers.

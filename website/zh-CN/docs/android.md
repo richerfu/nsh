@@ -7,7 +7,7 @@ group: platforms
 
 # Android
 
-NSH 应用在 Android 上用普通的 Android 视图和 `StaticLayout` 文本运行，要求 Android 9（API 28）及以上，支持 `arm64-v8a`、
+NSH 应用在 Android 上用普通的 Android 视图和 `StaticLayout` 文本运行，要求 Android 8（API 26）及以上，支持 `arm64-v8a`、
 `armeabi-v7a` 和 `x86_64`。用 Rust 和 TSX 编写的完整应用，运行和打包方式与其他平台相同；现有应用也可以在 `NshView` 中嵌入模块，加载它下载的签名包，并按自己设定的限制和能力运行它们。在
 Android 上，`os()` 是 `Os::Android`（TSX 中 `platform.os` 是 `"android"`），TSX 的 `android={{…}}` 属性生效。
 
@@ -84,7 +84,7 @@ dist/nsh/embed/android/nsh-dev.aar   also connects to a `nsh dev` server
 
 AAR 包含 Java 运行时以及适用于 `arm64-v8a`、`armeabi-v7a` 和 `x86_64` 的 `libnsh.so`，库中带有符号：应用的 Gradle
 构建在打包时去除符号，并保留它们用于崩溃报告。它声明了 `INTERNET`
-权限，要求 **API 28**（Android 9）或更高版本。它自带 R8 规则（`proguard.txt`），开启混淆的构建会自动应用：原生库按名字
+权限，要求 **API 26**（Android 8）或更高版本。它自带 R8 规则（`proguard.txt`），开启混淆的构建会自动应用：原生库按名字
 查找运行时的类，因此 `com.longbridge.nsh` 保持原样。
 
 把它加入应用模块，例如从 `libs` 文件夹引入：
@@ -181,6 +181,7 @@ setContentView(column);
 | `setLocale(Locale locale)` | 代替用户设置的语言和地区：`Intl`、`locale()` 和组件立即跟随，此后加载的应用也从它开始。`null` 跟随系统。 |
 | `setFontScale(float scale)` | 代替系统字体大小的文字大小（1 为默认）：文字和输入框按它重新排版，`fontScale()` 读到它，立即生效，此后加载的应用也一样；长度保持原样。`0` 跟随系统。 |
 | `setThemeOverrides(String json)` | 把宿主的品牌加在应用的[主题](./tailwind.md#主题-token)之上：格式与 `nsh.json` 的 `"theme"` 相同的主题文件。其中的 token 在浅色和深色模式下都覆盖应用的同名 token，应用的其他 token 保持不变。立即生效，并作用于之后加载的应用；`null` 恢复应用自己的主题。文件无法解析时抛出 `IllegalArgumentException`。 |
+| `registerFont(byte[] data)` | 注册宿主自带的字体文件（TrueType、OpenType、WOFF 或 WOFF2）。应用在 `fontFamily` 里写它的字体族名，不必把文件打进 bundle。加载前注册的字体在该应用的第一帧就可用；应用运行中注册的，从下一次排版开始使用。`data` 不是字体时抛出 `IllegalArgumentException`。同一文件再注册一次不会重复加入。 |
 | `setStorageDirectory(File dir)` | 接下来加载的应用保存其[存储](../modules/nsh.md#storage)的目录；`null`：应用私有目录内的 `files/nsh/<app id>`，按应用自己的 id。 |
 | `setCacheOptions(NshCacheOptions options)` | 接下来加载的应用保存缓存（[下载的图片](./images-and-assets.md#磁盘缓存)）的位置和每种缓存的大小。用 `NshCacheOptions.builder()` 构建：`location(File)`、`systemLocation()`（默认：缓存目录中的 `nsh`，每个应用在 `<app id>`）或 `noDiskCache()`；`imagesMaxMegabytes(int)`（默认 256）或 `imagesOff()`。 |
 | `loadAssetBundle(String dir)` | 运行 APK assets 中的 `dir/bundle.nshc`；应用资源取自 `dir/assets/`。无法读取时返回 `false`（也会报告给错误监听器）。 |
@@ -347,9 +348,11 @@ adb reverse tcp:8790 tcp:8790
 
 - **返回键。** 当应用需要处理返回键时（有打开的对话框、有被推入的页面、有 `BackHandler` 监听器），`NshView`
   会自己接收返回键，否则交给 Activity。在 Android 13 及更高版本上设置了 `android:enableOnBackInvokedCallback="true"`
-  时，它注册一个 `OnBackInvokedCallback`；其他情况下（Android 12 及更早版本，或未开启该属性），它在 Activity 的
-  `onBackPressed` 之前接收返回键事件，因此也先于 AndroidX 的 `OnBackPressedDispatcher` 和 Fragment 的回调。无论在
-  Activity 还是 Fragment 中都无需手动转发。已经把返回键转发给 `handleBack()` 的宿主照常工作：一次按键只交给应用一次。
+  时，它注册一个 `OnBackInvokedCallback`；其他情况下（Android 9 到 12，或未开启该属性），它在 Activity 的
+  `onBackPressed` 之前接收返回键事件，因此也先于 AndroidX 的 `OnBackPressedDispatcher` 和 Fragment 的回调。这些版本上
+  无论在 Activity 还是 Fragment 中都无需手动转发。在 Android 8 上，由 Activity 把返回键交给视图：在 `onBackPressed` 中
+  写 `if (!nshView.handleBack()) super.onBackPressed();`。在所有版本上都把返回键转发给 `handleBack()` 的宿主照常工作：
+  一次按键只交给应用一次。
 
   如需在 Android 13+ 上支持预测性返回，请像打包出的 NSH 应用那样，在 `<application>` 上设置
   `android:enableOnBackInvokedCallback="true"`。

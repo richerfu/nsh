@@ -47,6 +47,9 @@ go elsewhere under these rules rather than into them.
 - A Rust enum's variants are a string union of the same words (`DialogChangeReason::BackdropPress` →
   `"backdropPress"`).
 - One word stays one word: `readonly`, never `readOnly` (*guides* "readonly"; `docs/READONLY-NAMING-RESEARCH.md`).
+- A runtime module's member is a free function of `nsh_core::prelude` named for what it is, since Rust has no module
+  object to qualify it: `UrlScheme.url()` / `setUrl(url)` → `app_url()` / `set_app_url(url)` (the app's address; a bare
+  `url` would read as any URL), `UrlScheme.on("open", …)` → `next_url_scheme_open()`.
 
 ## Conventions
 
@@ -159,8 +162,8 @@ go elsewhere under these rules rather than into them.
   system feature (a system gesture, a system material) goes in that platform's object; when several platforms have
   it, each object carries it under one name (WebView's `allowsBackForwardNavigationGestures` in `ios={{…}}` and
   `desktop={{…}}`: iOS, macOS, Windows and Linux have the swipes, Android and the web none; decided by the user,
-  2026-10-29). Each object is typed (`IOSProps`, `AndroidProps`, `DesktopProps`, an element's own extending them),
-  so a key no platform has fails the type check.
+  2026-10-29). Each object is typed (`IOSProps`, `AndroidProps`, `MacOSProps`, `DesktopProps`, an element's own
+  extending them), so a key no platform has fails the type check.
 - **One definition of desktop**: desktop is a desktop OS (macOS, Windows, Linux), the web in the desktop idiom or
   a terminal (`Idiom::desktop_on`, `Environment::desktop()`); everything else is mobile, Mac Catalyst included (it
   runs the iOS backend: `ios={{…}}` applies). `desktop={{…}}` props, `platform.select({ desktop, mobile })`,
@@ -188,6 +191,20 @@ be navigated by keyboard once open). So `nsh/base`'s `Select` owns that unstyled
 (`crates/nsh-base/src/listbox.rs`, which `Combobox` will share) and keeps `gpui-component`'s names for its data
 (`SearchableListItem::title`, `SearchableGroup`'s sections) while its look stays the app's.
 
+`EmojiPicker` has no counterpart in `gpui-kit`: its name is that of `gpui-base`'s `*Picker`s (`ColorPicker`,
+`DatePicker`), its behavior and names `Command`'s (`onSelect`, `onHighlightChange({ highlighted })`,
+`onQueryChange`, `onCancel`, the `searchBar` / `search` / `list` / `item` / `group` parts, `renderItem`,
+`renderGroup`, `empty`), and its features those of frimousse and AndroidX's `EmojiPickerView` (rows of `columns`
+cells, a global skin tone, recent emoji the app keeps, a newest Emoji version). The groups' tabs and the skin tone
+choice are the app's `Tabs` and controls in its slots, with `onGroupChange` and `scrollToGroup`.
+Its own names are those the emoji pickers share: `EmojiPicker` as frimousse, emoji_picker_flutter and shadcn's
+registry name it (AndroidX `EmojiPickerView`, emoji-picker-element `<emoji-picker>`); `emojiVersion`, the newest
+Emoji version shown, as frimousse, emoji-mart and emoji-picker-element; `skinTone` and its values (`"mediumLight"`, ...)
+as frimousse's and CLDR's skin tone names; `columns` as frimousse and emoji_picker_flutter; `label` as frimousse's and
+emojibase's; `groups` and the group ids as Unicode's emoji groups (`emoji-test.txt`, emojibase's `smileys-emotion`,
+...), where the pickers say `categories`; `annotations` as CLDR's; `base` as Unicode's emoji modifier base; an
+entry's `hasSkinTones` is a payload's boolean (`has<Noun>`, "States" above).
+
 ## Shapes that can grow
 
 Apps built once run on every later release (`compatibility.md`): types only widen and inputs only gain optional
@@ -195,7 +212,7 @@ members, so a shape decides what can ever be added to it. The API follows these 
 release (item 3 of the API review); where code differs from one, the rule wins and the code follows.
 
 - A method whose parameters may grow takes its options as one object (`scrollTo({ x, y, animated })`,
-  `net.connect({ host, port })`, `Window.setTitleBar({ style, height })`), never a further positional parameter;
+  `net.connect({ host, port })`, `WindowRef.setBounds({ origin, size, animated })`), never a further positional parameter;
   parameters the user judged will not grow stay positional (`setSelection(start, end?)`, `seek(seconds)`,
   `DockArea.addPanel(panel, placement?, size?)`, `DataTable.scrollToRow` / `scrollToColumn(…, animated?)`,
   `Editor.revealPosition(position, center)`, a range's start and end such as `DataTable.dump(start?, end?)`;
@@ -220,7 +237,7 @@ release (item 3 of the API review); where code differs from one, the rule wins a
     error), and Node's codes for I/O (`ENOENT`, `EACCES`:
     the OS refused, never NSH's capabilities) and its own (`ERR_FS_FILE_TOO_LARGE`, `ERR_OUT_OF_RANGE`). Never
     `EACCES` or a code-less message for a capability denial. `nsh/test`'s steps fail with codes of their own
-    (`ERR_NSH_TEST_NOT_FOUND`, `ERR_NSH_TEST_DISABLED`, `ERR_NSH_TEST_NO_BACK`, `ETIMEDOUT`;
+    (`ERR_NSH_TEST_NOT_FOUND`, `ERR_NSH_TEST_DISABLED`, `ERR_NSH_TEST_COVERED`, `ERR_NSH_TEST_NO_BACK`, `ETIMEDOUT`;
     `ERR_NSH_TEST_UNSUPPORTED` for an `open` option the `--target` cannot honor).
   - Never a sentinel (`false`, `-1`, `""`, `[]`) or silence for a failure: the clipboard and the picker reject when
     not granted. `null` stays an answer to a query with nothing there (`groupOf`, `posAtCoords` over nothing,
@@ -300,6 +317,7 @@ them yet (`compatibility.md`). The frozen RN-shaped modules keep their names. A 
 | `source: string \| { uri } \| { html, baseUrl }` | `src?: string`; `html?: string`, `baseUrl?: string` | Addresses | One of `src` and `html` |
 | the page's `window.ReactNativeWebView.postMessage(data)` | `window.nsh.postMessage(data)` | Where names come from | Decided by the user: only `window.nsh` is injected |
 | (new) wry's `WebViewBuilder::with_incognito(bool)` (the web views of GPUI Kit's `gpui-webview`) | `incognito` (`false`), Rust `.incognito(bool)` | States | wry's name, which Tauri's and other web view APIs share: a state of the web view, read when it is made (Rust takes a value, not a signal). A boolean, not a storage mode: a named persistent store would be a prop of its own, which `incognito` composes with |
+| (new) wry's `WebViewBuilder::with_asynchronous_custom_protocol(name, handler)`, WebKit's `setURLSchemeHandler:forURLScheme:` | Rust `.url_scheme(scheme, handler)`; `WebResourceRequest` (`url()`, `method()`, `is_cancelled()`, `respond(WebResource)`, `fail()`), `WebResource { mime_type, bytes }` | Where names come from | WebKit's and RFC 3986's word, "scheme" (wry's "protocol" is the same thing); the request is answered once, from any thread, as wry's responder is. Rust only for now: the bytes are the app's Rust data |
 | **NavPage** | | | |
 | `headerShown` | `headerVisible` (default `true`) | States | `header` is the page's slot; as `headerBackVisible`, which stays |
 | **TextView** (`nsh/base`) | | | |
@@ -308,7 +326,20 @@ them yet (`compatibility.md`). The frozen RN-shaped modules keep their names. A 
 | `codeBlockScrollIndicator`, `tableScrollIndicator` | `codeBlockScrollbar`, `tableScrollbar` (default `true`) | States | As `scrollbar`. Rust `code_block_scrollbar`, `table_scrollbar` |
 | **`nsh/desktop`** | | | |
 | `MenuItem.enabled` | `MenuItem.disabled` | States | |
-| `Window.setTitleBar(style, height?)` | `Window.setTitleBar({ style, height? })` (`TitleBarOptions`) | Shapes that can grow | 2026-10-28: options that may grow are one object. Rust's `set_title_bar(style, height)` unchanged |
+| `Window.setTitleBar(style, height?)` | `WindowRef.set({ titleBar: { style, height? } })` (`TitleBarOptions`) | Shapes that can grow | 2026-10-28: options that may grow are one object; 2026-11-06: an attribute of `set` |
+| `Window.setTitle`, `setTitleBar`, `setLevel`, `minimize`, `toggleMaximize`, `toggleFullScreen`, `setFrame`, `setBounds`, `setSkipTaskbar`, `orderFront`, `close` (static, the main window only) | the methods of `WindowRef` (`currentWindow()`, `Window.get("main")`, any window of the app's own) | Where names come from | 2026-11-06: one handle type for every window. Rust: `WindowRef`'s methods; `set_title`, `set_title_bar`, `set_level`, `set_skip_taskbar`, `toggle_maximize`, `toggle_full_screen`, `set_frame`, `set_window_bounds`, `order_front`, `close_window` are gone |
+| `Window.setTitle(t)`, `setTitleBar(o)`, `setLevel(l)` | `set({ title, titleBar, level })` | Shapes that can grow | One `set(partial)` for every attribute, no per-attribute setters |
+| Rust `WindowHandle`, `window().handle(slot)` | `WindowRef` (one name in Rust and TS); `open_window(window()...) -> Option<WindowRef>` | Where names come from | 2026-11-07: GPUI's `WindowHandle` is another type in the same process; Rust opens windows imperatively as GPUI's `cx.open_window` and TS's `Window.open` do |
+| `aspectRatio`, `colorScheme`, `contentProtected`, `edited`, `representedFile`, `tabGroup` (window attributes), `capabilities.windows.contentProtected` | removed | Speculative configuration | 2026-11-07: single-platform or without a use case yet; the app's `setColorScheme` covers every window. Added back when an app needs one |
+| `Window.toggleMaximize()`, `toggleFullScreen()` | `setMode("maximized" \| "fullScreen" \| "normal")`, `minimize()`, `restore()` | States | Intents, not toggles; minimized is apart from the mode |
+| `Window.setFrame(frame)` | `WindowRef.setBounds({ origin?, size?, animated? })` | Where names come from | It moves and sizes the window's bounds |
+| `Window.setBounds(bounds)` | `WindowRef.setPlacement(placement)` | Where names come from | It restores a saved placement (Win32's `WINDOWPLACEMENT`) |
+| `WindowBounds { mode: "windowed" \| "maximized" \| "fullscreen", bounds }`, `WindowState.windowBounds` | `WindowPlacement { mode: WindowMode, bounds }`, `WindowState.placement`; `WindowMode` `"normal" \| "maximized" \| "fullScreen"` | Where names come from | `WindowState.hidden` became `visible` |
+| `Window.setSkipTaskbar(true)` | `set({ taskbar: false })` | States | An attribute named after what it shows |
+| `Window.orderFront()` | `WindowRef.focus()` | Where names come from | The DOM's and GPUI's verb |
+| `Window.setMenuBar(mode)` | `Menu.setMenuBar(mode)` | Where names come from | The menu bar is the menus' |
+| `Window.open(c, { size, position, level, frame })` → `{ id, focus, hide, close }` | `Window.open(c, WindowOptions)` → `WindowRef`; `<Window>` | Open state | `defaultSize`, `defaultPosition`; `level` and `frame` attributes |
+| (the focused window as "current") | `currentWindow()`: the window the calling component renders in (tree-scoped, through context); `focusedWindow()` the focused one | Environment | Named as Tauri's `getCurrentWindow()` under the accessor rule; the meaning of Flutter's, Qt's and Compose's |
 | **Standard modules** | | | |
 | `net.connect(host, port)` | `net.connect({ host, port })` (`ConnectOptions`) | Shapes that can grow | 2026-10-28: Node's `net.connect(options)`, so a timeout or TLS can join them |
 | **`nsh`: the environment** | | | |
@@ -318,7 +349,7 @@ them yet (`compatibility.md`). The frozen RN-shaped modules keep their names. A 
 | `PixelRatio.get()` | `pixelRatio(): number` (accessor, reactive) | Environment | Follows the window to another screen |
 | `PixelRatio.getFontScale()` | `fontScale()` | Environment | Already exists |
 | `PixelRatio.getPixelSizeForLayoutSize`, `roundToNearestPixel` | (dropped) | | `Math.round(x * pixelRatio()) / pixelRatio()` |
-| `I18nManager` (`isRTL`, `allowRTL`, `forceRTL`, `doLeftAndRightSwapInRTL`, `getConstants`) | (dropped) | Where names come from | Decided by the user: the layout direction follows the locale, a view's `direction` style overrides it (Rust: `.direction(LayoutDirection::..)`; Rust's `rtl()`, `force_rtl` and `allow_rtl` are dropped too); translations, when NSH has them, come from rust-i18n |
+| `I18nManager` (`isRTL`, `allowRTL`, `forceRTL`, `doLeftAndRightSwapInRTL`, `getConstants`) | (dropped) | Where names come from | Decided by the user: the layout direction follows the locale, a view's `direction` style overrides it (Rust: `.direction(LayoutDirection::..)`; Rust's `rtl()`, `force_rtl` and `allow_rtl` are dropped too); translations come from rust-i18n: `nsh/i18n`'s `t`, `setLocale`, `availableLocales` (Rust `t!`, `set_locale`, `available_locales`) |
 | `OS` (type) | unchanged | | `platform.os`'s type |
 | **`nsh`: accessibility** | | | |
 | `AccessibilityInfo.isScreenReaderEnabled()`, `isReduceMotionEnabled()`, `addEventListener` | (dropped) | Listening | `screenReaderEnabled()`, `reduceMotion()` |
@@ -441,7 +472,7 @@ and `Input`'s React Native names follow the rules as well.
 | Tiptap's `Link` extension (`RichEditor`'s class, was `Link`) | `RichLink` (its extension name stays `"link"`) | `RichImage`, `RichTable`, `RichTextStyle` (`rich-editor.md`) | `Link` is `gpui-base`'s component; the editor's class takes the `Rich` prefix its others take where a name is taken (decided by the user, 2026-10-28) |
 | `Link::tab_index`, `tab_stop` | (left out) | | The keyboard focus follows the view tree, as `Button`'s does |
 | a link inside text (`gpui-base`'s `Link` is a `div`) | an inline box of the paragraph (`verticalAlign`, `align-text-bottom`) | `text.md` "Inline attachments" | Every view inside a `<Text>` is one: it keeps its states, focus and role, and stays on one line. A link that wraps with the paragraph's lines is a nested `<Text role="link" onPress>` span (`TextView`'s links), which is no stop of the keyboard focus |
-| HTML's `<a href>` on the web | (left out) | | The web renders a `Link` as `role="link"` on its element; a real `<a href>` (a middle click, "Copy link address") needs `href` carried to the platform as a host prop and the web runtime making an anchor whose default navigation it cancels |
+| HTML's `<a href>` on the web | (left out) | | The web renders a `Link` as `role="link"` on its element; a real `<a href>` (a middle click, "Copy link address") needs the web runtime making an anchor from the view's `href` (the host prop `Href`, `ViewProps::href`, which the link sets while enabled and a terminal draws as an OSC 8 hyperlink) whose default navigation it cancels |
 | (new) | `hitSlop: number \| Partial<Edges>`; Rust `.hit_slop(..)` | the host prop `hitSlop` (every view's), passed to the link's view; `Button`'s `hitSlop` | Neither `gpui-base`'s nor `gpui-component`'s `Link` has one, as with `Button`: GPUI hit-tests a pointer against the bounds, which a mouse needs. A finger needs more around a small target (an icon, a short word), so it is the host prop's name, type and meaning, with no new concept |
 | **HoverCard** (`nsh/base`) | | | |
 | `HoverCard::new(id)`, `trigger`, `content(\|state, ..\|)` / `gpui-component`'s children | `HoverCard`, slot `trigger`, children (made on each opening) | `base/src/hover_card.rs:37-72`; `component/src/hover_card.rs:65-93`, `:129` | The content builder's `HoverCardState` gives it `is_open`, which the app has as `open` / `onOpenChange` |

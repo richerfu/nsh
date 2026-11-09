@@ -97,6 +97,7 @@ impl Platform {
             app: App::Rust(Root::of::<Jumper>()),
             viewport: Size::new(px(390.0), px(844.0)),
             trace: false,
+            content_culling: false,
             network: None,
             websocket: None,
             refuse_connections: None,
@@ -117,6 +118,8 @@ impl Platform {
             host: Default::default(),
             picker: None,
             speech: None,
+            audio: None,
+            windows: None,
         };
         let engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
         let mut platform = Self {

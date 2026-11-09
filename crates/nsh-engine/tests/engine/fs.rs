@@ -69,6 +69,7 @@ mount(() => <Text>{{shown()}}</Text>);
         app: nsh_engine::App::Js(bundle),
         viewport: Size::new(nsh_core::geometry::px(400.0), nsh_core::geometry::px(300.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -96,6 +97,8 @@ mount(() => <Text>{{shown()}}</Text>);
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -641,6 +644,7 @@ mount(() => <Text>{shown()}</Text>);
         app: nsh_engine::App::Js(bundle),
         viewport: Size::new(nsh_core::geometry::px(400.0), nsh_core::geometry::px(300.0)),
         trace: false,
+        content_culling: false,
         network: None,
         websocket: None,
         refuse_connections: None,
@@ -664,6 +668,8 @@ mount(() => <Text>{shown()}</Text>);
         host: Default::default(),
         picker: None,
         speech: None,
+        audio: None,
+        windows: None,
     };
     let _engine = Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap();
     assert_eq!(
