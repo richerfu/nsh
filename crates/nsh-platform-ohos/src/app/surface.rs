@@ -165,6 +165,7 @@ struct State {
     components: Components,
     host_handlers: FxHashMap<String, Rc<HostHandler>>,
     open_url_handler: Option<Rc<OpenUrlHandler>>,
+    pending_urls: Vec<String>,
     errors: Errors,
     phase: SurfacePhase,
     size: (i32, i32),
@@ -399,6 +400,9 @@ impl State {
         )?;
         runtime.set_attached(self.attached)?;
         runtime.set_visible(self.visible)?;
+        for url in std::mem::take(&mut self.pending_urls) {
+            runtime.open_url_scheme(url)?;
+        }
         self.phase = SurfacePhase::Running(runtime);
         Ok(())
     }
@@ -602,6 +606,7 @@ impl State {
         self.components.clear();
         self.host_handlers.clear();
         self.open_url_handler = None;
+        self.pending_urls.clear();
         self.errors.dispose();
         let content = self.content.as_mut().expect("live surface content");
         content.clear_window_callback().map_err(native_error)?;
@@ -684,6 +689,7 @@ impl NshSurface {
             components: components.clone(),
             host_handlers: FxHashMap::default(),
             open_url_handler: None,
+            pending_urls: Vec::new(),
             errors: errors.clone(),
             phase: SurfacePhase::Empty,
             size: (0, 0),
@@ -1164,6 +1170,24 @@ impl NshSurface {
         } else {
             state.config()?.channel.remove_open_url_handler();
             state.open_url_handler = None;
+        }
+        Ok(())
+    }
+
+    /// Hands `url`, one the embedding Ability was opened with (its launch `Want.uri`
+    /// or `onNewWant`), to the running app's `UrlScheme.on("open")` listeners (`nsh`).
+    /// While no app runs, the next one loaded gets it.
+    #[napi]
+    pub fn open_url(&self, url: String) -> Result<()> {
+        self.check()?;
+        let mut state = self.state.try_borrow_mut().map_err(reentry)?;
+        if let Some(runtime) = state.phase.runtime() {
+            runtime.open_url_scheme(url)?;
+        } else {
+            if state.pending_urls.len() >= nsh_core::url_scheme::MAX_PENDING {
+                state.pending_urls.remove(0);
+            }
+            state.pending_urls.push(url);
         }
         Ok(())
     }

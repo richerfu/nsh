@@ -256,6 +256,7 @@ struct State {
     attached: bool,
     visible: bool,
     frame_wanted: bool,
+    vsync_hz: i32,
     retiring_dispatcher: Option<Arc<Dispatcher>>,
     #[cfg(feature = "dev")]
     reload: Option<(u64, std::sync::Weak<crate::app::surface::Queue>)>,
@@ -516,7 +517,28 @@ impl State {
         if wake_engine {
             self.engine.as_ref().unwrap().control().frame();
         }
-        if self.mounter.as_mut().unwrap().frame(timestamp)? || self.frame_wanted {
+        let mounter_wants = self.mounter.as_mut().unwrap().frame(timestamp)?;
+        if mounter_wants || self.frame_wanted {
+            let max = crate::app::frame_rate::display_hz() as i32;
+            let capped = if !self.frame_wanted {
+                self.mounter
+                    .as_ref()
+                    .and_then(|m| m.animator.frame_rate())
+                    .map(|hz| (hz.round() as i32).clamp(1, max))
+            } else {
+                None
+            };
+            let expected = capped.unwrap_or_else(|| max.min(60));
+            if expected != self.vsync_hz {
+                self.vsync_hz = expected;
+                let _ = self.vsync.set_expected_frame_rate_range(
+                    ohos_vsync_binding::OH_NativeVSync_ExpectedRateRange {
+                        min: 0,
+                        max: capped.unwrap_or(max),
+                        expected,
+                    },
+                );
+            }
             self.request_frame()?;
         }
         self.retire()?;
@@ -734,6 +756,7 @@ impl Runtime {
                 attached: true,
                 visible: true,
                 frame_wanted: false,
+                vsync_hz: crate::app::frame_rate::display_hz().min(60) as i32,
                 retiring_dispatcher: None,
                 environment: Environment::default(),
                 #[cfg(feature = "dev")]
@@ -979,6 +1002,20 @@ impl Runtime {
         let state = self.state.try_borrow().map_err(reentry)?;
         if let Some(engine) = &state.engine {
             engine.control().set_tokens(tokens);
+        }
+        Ok(())
+    }
+    pub(crate) fn open_url_scheme(&self, url: String) -> napi_ohos::Result<()> {
+        let state = self.state.try_borrow().map_err(reentry)?;
+        if let Some(engine) = &state.engine {
+            engine.control().dispatch_event(
+                nsh_core::ROOT_ID,
+                nsh_core::EventKind::UrlScheme,
+                nsh_core::EventPayload::Map(vec![(
+                    nsh_core::url_scheme::URL,
+                    nsh_core::PayloadValue::Str(url),
+                )]),
+            );
         }
         Ok(())
     }

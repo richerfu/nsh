@@ -20,9 +20,16 @@ export interface WebSettings {
   downloadDirectory: string;
 }
 
+export interface WebHeader {
+  headerKey: string;
+  headerValue: string;
+}
+
 export interface WebCommand {
   targetId: number;
   kind: string;
+  url?: string | null;
+  headers?: WebHeader[] | null;
   script?: string | null;
   x?: number | null;
   y?: number | null;
@@ -235,8 +242,13 @@ class WebEntry {
       });
       this.controller.setDownloadDelegate(this.downloadDelegate);
       this.controllerReady = true;
-      this.applySource();
       const queued = this.pendingCommands.splice(0);
+      if (this.settings.url === "about:blank" && queued.some((cmd) => cmd.kind === "load")) {
+        clearCookiesIfNeeded(this);
+        this.appliedLoadGeneration = this.settings.loadGeneration;
+      } else {
+        this.applySource();
+      }
       for (const cmd of queued) {
         this.command(cmd);
       }
@@ -533,6 +545,11 @@ class WebEntry {
           .getUIContext()
           .getFocusController()
           .requestFocus(`nsh-web-${this.settings.targetId}`);
+      } else if (command.kind === "load") {
+        if (command.url != null) {
+          clearCookiesIfNeeded(this);
+          this.controller.loadUrl(command.url, command.headers ?? []);
+        }
       } else if (command.kind === "evaluate") {
         if (command.script != null) {
           this.controller.runJavaScript(command.script).catch((error: Error) => {
@@ -550,6 +567,9 @@ class WebEntry {
       try {
         this.controller.stop();
         this.controller.loadUrl("about:blank");
+        if (!this.settings.sharedCookies) {
+          webview.WebCookieManager.clearAllCookiesSync(true);
+        }
       } catch (_error) {}
       this.node.dispose();
       this.disposed = true;

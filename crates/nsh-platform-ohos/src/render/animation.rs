@@ -151,6 +151,32 @@ impl Animator {
     pub(crate) fn frame_time(&self) -> f64 {
         self.frame_time.get()
     }
+    pub(crate) fn frame_rate(&self) -> Option<f32> {
+        use nsh_core::animation::highest_frame_rate;
+        if self.scrolls.borrow().iter().next().is_some()
+            || self.selection.borrow().strong_count() > 0
+        {
+            return None;
+        }
+        let mut rate = None;
+        let mut any = false;
+        {
+            let state = self.state.borrow();
+            if state.graph.is_animating() {
+                any = true;
+                rate = Some(state.graph.frame_rate()?);
+            }
+        }
+        for weak in self.motion.borrow().iter() {
+            let Some(owner) = weak.upgrade() else {
+                continue;
+            };
+            any = true;
+            let live_rate = owner.live.borrow().as_ref().and_then(|l| l.frame_rate())?;
+            rate = highest_frame_rate(rate, Some(live_rate));
+        }
+        if any { rate } else { None }
+    }
     pub(crate) fn flush(&self) -> Result<()> {
         if self.dirty.get() {
             self.write()?;

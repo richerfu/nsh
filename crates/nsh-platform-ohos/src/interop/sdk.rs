@@ -174,9 +174,18 @@ pub(crate) struct WebSettings {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 #[napi(object)]
+pub(crate) struct WebHeader {
+    pub header_key: String,
+    pub header_value: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+#[napi(object)]
 pub(crate) struct WebCommand {
     pub target_id: u32,
     pub kind: String,
+    pub url: Option<String>,
+    pub headers: Option<Vec<WebHeader>>,
     pub script: Option<String>,
     pub x: Option<f64>,
     pub y: Option<f64>,

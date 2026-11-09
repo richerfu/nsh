@@ -639,6 +639,18 @@ pub fn pick_images(request: crate::picker::PickRequest) -> Answer<Vec<crate::pic
     answer
 }
 
+/// Shows the system's picker for files of any type (the open dialog on the
+/// desktops, the document picker on iOS and Android, a file input on the web;
+/// TS: `Picker.pickFiles`), to await in a task: the files the user picked,
+/// their bytes as they are; none when cancelled ([`crate::picker`]).
+pub fn pick_files(
+    request: crate::picker::FilePickRequest,
+) -> Answer<Vec<crate::picker::PickedFile>> {
+    let (answer, action) = super::services::pick_files(request);
+    act(action);
+    answer
+}
+
 /// Whether speech can be recognized here (TS: `Speech.available()`): the
 /// platform recognizes speech (macOS, iOS), or the embedding app gave the
 /// core its own recognizer. To await in a task.
@@ -709,6 +721,16 @@ pub fn next_notification_press() -> Answer<String> {
     act(Action::Notification(super::NotificationAction::NextPress(
         slot,
     )));
+    answer
+}
+
+/// The next link that opens the app (TS: `UrlScheme.on("open", ...)`): a
+/// URL of a scheme the app claims (`nsh.json` `schemes`), those
+/// that came before anything listened first, the one that launched the app
+/// included ([`crate::url_scheme`]). To await in a task.
+pub fn next_url_scheme_open() -> Answer<String> {
+    let (answer, slot) = Answer::new();
+    act(Action::NextUrlSchemeOpen(slot));
     answer
 }
 

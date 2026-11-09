@@ -1,5 +1,5 @@
-//! `nsh/desktop`'s window functions (macOS, Windows, Linux; nothing
-//! happens elsewhere). Menus, which call the app's functions, are
+//! `nsh/desktop`'s window and app functions (macOS, Windows, Linux;
+//! nothing happens elsewhere). Menus, which call the app's functions, are
 //! `nsh-js`'s.
 
 use crate::{
@@ -112,6 +112,14 @@ impl Window {
         desktop(cx, DesktopCommand::SetLevel(level));
     }
 
+    /// Keeps the window out of the taskbar (`true`) or puts it back
+    /// (`false`), for overlays, pets and pop-ups that should not show as
+    /// an app there. Windows only: macOS's Dock and Linux's docks show
+    /// apps, not windows, and are left as they are.
+    pub(crate) fn set_skip_taskbar(skip: bool, cx: &mut ModuleCx) {
+        desktop(cx, DesktopCommand::SetSkipTaskbar(skip));
+    }
+
     /// Brings the window to the front of its level and focuses it (the app
     /// activates). The window keeps its level. On macOS, desktop-level
     /// surfaces stay behind other windows.
@@ -122,5 +130,22 @@ impl Window {
     /// Closes the window; the app ends with it.
     pub(crate) fn close(cx: &mut ModuleCx) {
         desktop(cx, DesktopCommand::Close);
+    }
+}
+
+/// The application as a whole (desktops; its functions do nothing elsewhere).
+#[module]
+pub(crate) struct Application;
+
+#[module]
+impl Application {
+    /// Quits the app, as the application menu's `quit` role and the
+    /// platform's quit key do: its windows close and the app stops as when
+    /// its last window closes, then its run ends, also while closing the
+    /// window alone would leave it running (a window kept hidden, a tray
+    /// icon). A view embedded in another app leaves the app's lifecycle to
+    /// that app.
+    pub(crate) fn quit(cx: &mut ModuleCx) {
+        desktop(cx, DesktopCommand::Quit);
     }
 }

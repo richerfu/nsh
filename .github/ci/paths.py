@@ -24,6 +24,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # What each workflow builds and tests (its `-p` packages), and the files
 # outside those crates it reads (tests' fixtures, `include_bytes!`).
 WORKFLOWS = {
+    "tui.yml": {
+        "packages": ["nsh-platform-tui", "nsh-base"],
+        "files": ["examples/counter/**"],
+    },
     "core.yml": {
         "packages": [
             "nsh-core", "nsh-macros", "nsh-js", "nsh-engine",
@@ -62,11 +66,11 @@ WORKFLOWS = {
         "files": ["examples/counter/**", "examples/gallery/**"],
     },
     "rust-app.yml": {
-        "packages": ["gallery-native", "rust-exports-native", "nsh-cli", "nsh-platform-web"],
+        "packages": ["gallery-native", "rust-exports-native", "tasks-rs", "nsh-cli", "nsh-platform-web"],
         # `nsh test` runs the examples' tests.
         "files": [
             "examples/counter/**", "examples/gallery/**", "examples/gallery-rs/**",
-            "examples/rust-exports/**",
+            "examples/rust-exports/**", "examples/tasks-rs/**",
         ],
     },
 }

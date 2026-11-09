@@ -1265,10 +1265,21 @@ impl Mounter {
                             )?;
                         }
                         Command::PickImages { id, request } => {
-                            if let Err(error) =
-                                self.host.pick_images(self.dispatcher.clone(), id, request)
-                            {
+                            if let Err(error) = self.host.pick(
+                                self.dispatcher.clone(),
+                                id,
+                                nsh_core::picker::Pick::Images(request),
+                            ) {
                                 log::warn!("OHOS pickImages failed: {error}");
+                            }
+                        }
+                        Command::PickFiles { id, request } => {
+                            if let Err(error) = self.host.pick(
+                                self.dispatcher.clone(),
+                                id,
+                                nsh_core::picker::Pick::Files(request),
+                            ) {
+                                log::warn!("OHOS pickFiles failed: {error}");
                             }
                         }
                         Command::Native { name, args } => {
@@ -1338,6 +1349,7 @@ impl Mounter {
                         | Command::StopLoading
                         | Command::InjectJavaScript(_)
                         | Command::PostMessage(_)
+                        | Command::Load(_)
                         | Command::SendInput(_)) => {
                             if let Some(web) = self.node(id)?.web.borrow().as_ref() {
                                 web.command(command)?;

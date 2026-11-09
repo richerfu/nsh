@@ -116,6 +116,7 @@ pub(crate) struct Area {
     pub(crate) model: SelectionModel,
     members: Vec<Weak<Node>>,
     kept: KeptRows,
+    reported: String,
 }
 impl Area {
     pub(crate) fn root(node: &Rc<Node>) -> Rc<Node> {
@@ -135,6 +136,7 @@ impl Area {
             model: SelectionModel::new(),
             members: Vec::new(),
             kept: KeptRows::default(),
+            reported: String::new(),
         }
     }
     pub(crate) fn update(
@@ -178,6 +180,28 @@ impl Area {
                 .control
                 .keep_rendered(nodes.into_iter().map(|id| id as u32).collect());
         }
+        if !root.pending_delete.get()
+            && root
+                .interaction
+                .mask()
+                .contains(nsh_core::EventKind::SelectionChange)
+        {
+            let (text, start) = if self.model.is_empty() {
+                (String::new(), 0)
+            } else {
+                (self.model.text(&texts), self.model.start_offset(&texts))
+            };
+            if text != self.reported {
+                self.reported = text.clone();
+                root.emit(
+                    nsh_core::EventKind::SelectionChange,
+                    nsh_core::EventPayload::Map(vec![
+                        ("text", nsh_core::PayloadValue::Str(text)),
+                        ("start", nsh_core::PayloadValue::Number(f64::from(start))),
+                    ]),
+                );
+            }
+        }
         Ok(())
     }
     pub(crate) fn text(&self) -> Result<String> {
@@ -194,6 +218,22 @@ impl Area {
             owner
                 .control
                 .keep_rendered(nodes.into_iter().map(|id| id as u32).collect());
+        }
+        if !std::mem::take(&mut self.reported).is_empty()
+            && let Some(root) = self.root.upgrade()
+            && !root.pending_delete.get()
+            && root
+                .interaction
+                .mask()
+                .contains(nsh_core::EventKind::SelectionChange)
+        {
+            root.emit(
+                nsh_core::EventKind::SelectionChange,
+                nsh_core::EventPayload::Map(vec![
+                    ("text", nsh_core::PayloadValue::Str(String::new())),
+                    ("start", nsh_core::PayloadValue::Number(0.0)),
+                ]),
+            );
         }
         Ok(())
     }

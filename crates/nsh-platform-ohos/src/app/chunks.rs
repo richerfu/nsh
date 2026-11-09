@@ -138,6 +138,10 @@ fn preload(
         if let Some(id) = manifest.get("id").and_then(serde_json::Value::as_str) {
             bundle.app_id = Some(id.to_owned());
         }
+        if let Some(schemes) = manifest.get("schemes") {
+            bundle.url_schemes = nsh_core::url_scheme::schemes_from_json(schemes)
+                .map_err(|e| format!("app.json: {e}"))?;
+        }
         if let Some(value) = manifest.get("entryChunks") {
             let names: Vec<String> = serde_json::from_value(value.clone())
                 .map_err(|e| format!("app.json entryChunks: {e}"))?;
@@ -306,7 +310,7 @@ mod tests {
                 resources(&[
                     (
                         "app.json",
-                        r#"{"id":"com.test.app","entryChunks":["a.js","b.js"]}"#,
+                        r#"{"id":"com.test.app","schemes":["myapp"],"entryChunks":["a.js","b.js"]}"#,
                     ),
                     ("a.js", "export const a = 1;"),
                     ("b.js", "export const b = 2;"),
@@ -314,6 +318,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(bundle.app_id.as_deref(), Some("com.test.app"));
+            assert_eq!(bundle.url_schemes, vec!["myapp".to_owned()]);
             assert_eq!(
                 bundle
                     .chunks

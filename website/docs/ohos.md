@@ -137,6 +137,7 @@ The slot's size is the app's window: NSH lays the app out at the slot's size and
 | `send(name: string, data?: object \| string \| number \| boolean \| null)` | Send an event to the app (`host.on(name, …)`); kept until the app listens, or for the next app when none is running. |
 | `handle(name: string, handler?: ((data: object \| string \| number \| boolean \| null, reply: NshHostReply) => void) \| null)` | Handle the app's calls (`host.call`) and posts (`host.post`) for `name` on the UI thread; `null` (or `removeHandler(name)`) removes the handler. Answer once via `reply.resolve(value)` or `reply.reject(message)`. |
 | `setOpenUrlHandler(handler?: ((url: string) => boolean) \| null)` | Intercept URLs the app opens; return `true` if handled by the host, or `false` to let the system open it. |
+| `openUrl(url: string)` | Hand a custom-scheme URL the Ability was opened with (`Want.uri` in `onCreate` / `onNewWant`) to the app's `UrlScheme.on("open")` listeners; queued if no app is running yet. |
 | `connectDevServer(url: string)` | Development: load from a `nsh dev` server and reload on every change (requires the `--dev` SDK). |
 | `disconnectDevServer()` | Disconnect from the dev server while keeping the current app running. |
 | `activate()` | Mark this surface as the active target for the system back gesture when switching between multiple surfaces. |

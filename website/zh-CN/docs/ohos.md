@@ -135,6 +135,7 @@ Column() {
 | `send(name: string, data?: object \| string \| number \| boolean \| null)` | 向应用发送一个事件（`host.on(name, …)`）；应用开始监听前会一直保留，没有应用运行时留给下一个应用。 |
 | `handle(name: string, handler?: ((data: object \| string \| number \| boolean \| null, reply: NshHostReply) => void) \| null)` | 在 UI 线程处理应用对 `name` 的调用（`host.call`）和投递（`host.post`）；传 `null`（或调用 `removeHandler(name)`）移除处理函数。通过 `reply.resolve(value)` 或 `reply.reject(message)` 回答一次。 |
 | `setOpenUrlHandler(handler?: ((url: string) => boolean) \| null)` | 拦截应用打开的 URL；宿主自行处理时返回 `true`，交由系统打开时返回 `false`。 |
+| `openUrl(url: string)` | 将 Ability 打开时收到的自定义 scheme 链接（`onCreate` / `onNewWant` 中的 `Want.uri`）交给应用的 `UrlScheme.on("open")` 监听器；尚无应用运行时保留给下一个加载的应用。 |
 | `connectDevServer(url: string)` | 开发用：从 `nsh dev` 服务器加载，每次修改后重新加载（需使用 `--dev` SDK）。 |
 | `disconnectDevServer()` | 断开开发服务器连接，保持当前应用继续运行。 |
 | `activate()` | 在多个视图之间切换时，将该视图标记为系统返回手势的当前活动目标。 |
