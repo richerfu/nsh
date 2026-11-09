@@ -7,6 +7,10 @@
   Chrome and Android would slant them), `letterSpacing`, `textDecorationLine` + `textDecorationColor`, `textTransform`, `lineHeight`, `textAlign`,
   `textAlignVertical` (the core moves the content box down). `adjustsFontSizeToFit` shrinks the fonts (down to
   `minimumFontScale`, at least 0.1) until the text fits its box and lines (`Paragraph::fit`, a binary search in the core).
+  OHOS distributes the extra space from an explicit `lineHeight` equally above and below the font with
+  `TextStyle::set_half_leading(true)`, matching the other text engines' half-leading line boxes. Text without an
+  explicit line height keeps its native font metrics. This centers the font's metrics in the line box; visible ink
+  still follows each glyph's design.
   `onTextLayout` reports the final lines (`TextEngine::lines`: range, box, ascender, descender, cap / x height).
   Final layouts are hit-tested by their engine too, in the content box (`TextEngine::hit_test`,
   `caret_rect`, `range_rects`): the caret position nearest a point (`TextPosition`: a UTF-16 offset and its
