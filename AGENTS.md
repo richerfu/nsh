@@ -557,10 +557,14 @@ What apps call to build UI in Rust stays stable and strongly typed:
 
 Details and examples: "Commits and pull requests" in `CONTRIBUTING.md`.
 
-- **All changes go through a pull request. Never push commits directly to `main`.** This includes code,
+- **Open pull requests in the current repository.** Resolve the repository from `origin` and check its default
+  branch before opening a PR. This checkout uses `richerfu/nsh`, whose default branch is `ohos`; explicitly select
+  that repository and base branch. Open a PR against `upstream` (`longbridge/nsh`) only when the user requests it.
+- **All changes go through a pull request. Never push commits directly to `main` or `ohos`.** This includes code,
   documentation, release / version updates and CI / workflow fixes. Create a topic branch, push it and open a PR
-  targeting `main`; merge through the PR after required checks pass. Do not use administrator bypass to skip this
-  workflow. A request to release or push changes does not authorize a direct push to `main`.
+  targeting the current repository's default branch, unless the user specifies another base. Merge through the PR
+  after required checks pass. Do not use administrator bypass to skip this workflow. A request to release or push
+  changes does not authorize a direct push to an integration branch.
 
 - Subjects and PR titles are `<area>: <What the change does>`: the area in lower case (a crate without `nsh-`:
   `core`, `js`, `engine`, `bundler`, `cli`, ...; never `base`: a change to `nsh-base` names its component in snake

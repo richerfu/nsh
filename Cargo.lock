@@ -4375,9 +4375,9 @@ checksum = "fa6cca5bbc6612f386af26a41f458913aa6b9a06b90bcff36fb8a436f6996e7c"
 
 [[package]]
 name = "ohos-drawing-binding"
-version = "0.2.7"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "878fac5f31c29350c8b5b82b743400f6259e280e3cc64251cda4ca9d86424d14"
+checksum = "04b89af49880606b18401049501a57622d24dd0576aa874572775e9d1816a06c"
 dependencies = [
  "ohos-enum-derive",
  "ohos-native-drawing-sys",
