@@ -6,7 +6,7 @@
 //! and reserves the left and right edges reported by [`title_bar`]. Native
 //! window controls and title-bar double-click behavior remain the platform's.
 //! The window's other functions ([`set_title`], [`minimize`], ...) are
-//! `Window`'s. The application menu ([`set_application_menu`]) and context
+//! `Window`'s, [`quit`] is `Application`'s. The application menu ([`set_application_menu`]) and context
 //! menus ([`popup_menu`]) are [`MenuItem`]s whose [`MenuItem::on_select`]
 //! runs when the user chooses the item, by a click or its shortcut.
 //!
@@ -107,6 +107,12 @@ pub fn set_level(level: WindowLevel) {
     super::desktop_command(DesktopCommand::SetLevel(level));
 }
 
+/// Keeps the window out of the taskbar (`true`) or puts it back; Windows
+/// only (TS: `Window.setSkipTaskbar`).
+pub fn set_skip_taskbar(skip: bool) {
+    super::desktop_command(DesktopCommand::SetSkipTaskbar(skip));
+}
+
 /// Brings the window to the front of its level and focuses it; the app
 /// activates (TS: `Window.orderFront`).
 pub fn order_front() {
@@ -118,6 +124,21 @@ pub fn order_front() {
 /// On platforms without desktop windows this has no effect.
 pub fn close_window() {
     super::desktop_command(DesktopCommand::Close);
+}
+
+/// Quits the app, as the application menu's Quit item
+/// ([`MenuRole::Quit`]) and the platform's quit key do (TS: `Application.quit`):
+/// its windows close and the engine stops as when the last window closes
+/// (an embedding app's close handling runs as it does for the Quit item),
+/// then the app's run ends, also when closing the window alone would leave
+/// it running (a window kept hidden for the Dock, a tray icon). As with the
+/// Quit item, the app cannot cancel it; a GPUI host that owns the window is
+/// asked first and quits when it is ready. For a menu item or a button of
+/// the app's own that quits, and for restarting after an update. A view
+/// embedded in another app leaves the app's lifecycle to that app. On
+/// platforms without desktop windows this has no effect.
+pub fn quit() {
+    super::desktop_command(DesktopCommand::Quit);
 }
 
 /// An item of a menu (TS: `nsh/desktop`'s `MenuItem`): an item that runs

@@ -302,6 +302,7 @@ pub(crate) const REFS: &[(&str, Option<&str>, &str, &[&str])] = &[
             "injectJavaScript",
             "postMessage",
             "sendInput",
+            "load",
         ],
     ),
     ("VideoRef", Some("ViewRef"), "A `<Video>`'s ref.", &["seek"]),
