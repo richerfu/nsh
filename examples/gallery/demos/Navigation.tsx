@@ -117,7 +117,7 @@ function OffsetRow(props: { n: number; inset?: number }) {
 function LargeTitle() {
   const refresh = createRefresh();
   return (
-    <NavPage title="Large title" {...header} headerLargeTitle headerTransparent header={<PageHeader title="Large title" />}>
+    <NavPage title="Large title" {...header} headerLargeTitle={platform.os === "ios"} headerTransparent={platform.os === "ios"} header={<PageHeader title="Large title" />}>
       <Page intro={largeTitleIntro(refresh)} refresh={refresh}>
         <Card flush>
           <Inset padding={0} gap={0}>
@@ -134,7 +134,7 @@ function LargeTitleList() {
   const refresh = createRefresh();
   const rows = Array.from({ length: 200 }, (_, i) => i + 1);
   return (
-    <NavPage title="Large title list" {...header} headerLargeTitle headerTransparent header={<PageHeader title="Large title list" />}>
+    <NavPage title="Large title list" {...header} headerLargeTitle={platform.os === "ios"} headerTransparent={platform.os === "ios"} header={<PageHeader title="Large title list" />}>
       <List
         each={rows}
         estimatedItemSize={48}
