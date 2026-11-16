@@ -6652,6 +6652,9 @@ impl<M: TextEngine> Core<M> {
             && !parent_list
         {
             flags |= dirty::SCROLL;
+            if scroll.behavior != ScrollBehavior::default() {
+                flags |= dirty::SCROLL_BEHAVIOR;
+            }
             if scroll.refreshing {
                 flags |= dirty::REFRESHING;
             }
