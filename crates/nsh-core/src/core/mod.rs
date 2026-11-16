@@ -6680,6 +6680,7 @@ impl<M: TextEngine> Core<M> {
             flags |= dirty::PAN;
         }
         if node.props.is_some()
+            || node.class_pointer != crate::props::PointerEvents::Auto
             || node.spare
             || node.hidden_in_text
             || node.list.as_ref().is_some_and(|l| l.parent)

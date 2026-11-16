@@ -30090,6 +30090,69 @@ fn a_culled_view_reports_its_layout_and_is_made_for_a_command() {
 }
 
 #[test]
+fn a_culled_view_mounts_its_style_pointer_events() {
+    use crate::PointerEvents as P;
+
+    for (name, pointer) in [
+        ("auto", P::Auto),
+        ("none", P::None),
+        ("box-none", P::BoxNone),
+        ("box-only", P::BoxOnly),
+    ] {
+        let mut c = core();
+        let mut ops = vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::Scroll,
+            },
+            style_op(2, &[("height", StyleValue::Number(100.0))]),
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ];
+        ops.extend(child_view(4, 2, 2000.0, &[]));
+        ops.extend(child_view(
+            6,
+            2,
+            100.0,
+            &[("pointerEvents", StyleValue::Str(name))],
+        ));
+        apply(&mut c, ops);
+        let batch = c.commit().unwrap();
+        assert!(!created_in(&batch).contains(&6));
+        assert!(
+            !batch
+                .items
+                .iter()
+                .any(|item| matches!(item, MountItem::ViewProps { id: 6, .. }))
+        );
+        c.set_scroll_offset(2, point(Points::ZERO, Points(2000.0)), 0);
+        for remount in [false, true] {
+            if remount {
+                c.remount();
+            }
+            let batch = c.commit().unwrap();
+            let pointers: Vec<_> = batch
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    MountItem::ViewProps { id: 6, props } => Some(props.pointer_events),
+                    _ => None,
+                })
+                .collect();
+            let expected: Vec<_> = (pointer != P::Auto)
+                .then_some(pointer)
+                .into_iter()
+                .collect();
+            assert_eq!(pointers, expected, "{name}, remount={remount}");
+            assert!(c.commit().is_none());
+        }
+    }
+}
+
+#[test]
 fn a_visible_scroll_mounts_only_its_nondefault_behavior_once() {
     use crate::ops::ScrollProp;
 
