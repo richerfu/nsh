@@ -23,6 +23,7 @@ mod errors;
 mod external_wake;
 mod fetch;
 mod focus;
+mod frames;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod fs;
 mod handle_bench;

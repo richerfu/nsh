@@ -1254,7 +1254,7 @@ enum Message {
     Displays(Arc<[nsh_core::desktop::Display]>),
     RootSize(NodeId, Size<Points>, EdgeInsets),
     ScreenHeader(NodeId, Option<Points>),
-    Frame,
+    Frame(Option<Box<dyn FnOnce() + Send>>),
     States(NodeId, u16),
     Modality(nsh_core::platform::InputModality),
     FontsChanged,
@@ -1457,7 +1457,22 @@ impl EngineControl {
     /// A display frame began, after [`MountSink::request_frame`]: runs the
     /// `requestAnimationFrame` callbacks and the tasks waiting for it.
     pub fn frame(&self) {
-        let _ = self.tx.send(Message::Frame);
+        let _ = self.tx.send(Message::Frame(None));
+    }
+
+    /// As [`Self::frame`], with `done` called on the engine thread after
+    /// this request's turn commits and requests any following frame
+    /// ([`MountSink::request_frame`]), even when it produces no batch.
+    /// A platform may release this request's in-flight demand then,
+    /// keeping any request for the next frame.
+    ///
+    /// This acknowledges processing the request, not presenting a frame
+    /// or the app becoming idle. On a clock that moves with frames, the
+    /// request's clock move finishes first; frames the clock runs on its
+    /// own do not call `done`. Shutdown may discard an uncommitted request
+    /// and its callback.
+    pub fn frame_with_completion(&self, done: impl FnOnce() + Send + 'static) {
+        let _ = self.tx.send(Message::Frame(Some(Box::new(done))));
     }
 
     /// Moves the engine's manual clock ([`EngineConfig::clock`]) forward
@@ -2144,6 +2159,7 @@ impl<M: TextEngine + 'static> Driver<M> {
             core,
             js_tokens,
             frame_requested: false,
+            frame_completions: Vec::new(),
             ops: Vec::new(),
             binds: Vec::new(),
             events: Vec::new(),
@@ -2313,6 +2329,9 @@ impl<M: TextEngine + 'static> Driver<M> {
         state.load_chunks(script, &**sink);
         state.request_frame(script, &**sink);
         driver.check_stopped();
+        for done in driver.state.frame_completions.drain(..) {
+            done();
+        }
         for message in moves {
             if !driver.handle(message, rx) {
                 return None;
@@ -2365,15 +2384,18 @@ impl<M: TextEngine + 'static> Driver<M> {
                 done(running && self.idle(rx));
                 running
             }
-            // A test's clock on a real platform: the display's frame moves it
-            // to the frame's time first (a frame after the last, else now),
-            // as a headless run's frames do.
-            Message::Frame if self.clock.moves_with_frames() => {
-                // The frame runs there, once, as the frames a move runs on
-                // the way do (whatever the messages handled meanwhile do).
+            Message::Frame(done) if self.clock.moves_with_frames() => {
+                // A test's display frame moves its clock first. The
+                // frame runs there once, whatever messages are handled
+                // recursively on the way. Complete this request only
+                // after the entire move returns.
                 self.state.frame_requested = true;
                 let by = self.next_frame() - self.clock.now();
-                self.advance(by, rx, true)
+                let running = self.advance(by, rx, true);
+                if running && let Some(done) = done {
+                    self.state.frame_completions.push(done);
+                }
+                running
             }
             message => handle(self.script.as_ref(), &mut self.state, message),
         }
@@ -2483,7 +2505,7 @@ impl<M: TextEngine + 'static> Driver<M> {
     /// frames, now.
     fn frame(&mut self) {
         self.last_frame = Some(self.clock.now());
-        handle(self.script.as_ref(), &mut self.state, Message::Frame);
+        handle(self.script.as_ref(), &mut self.state, Message::Frame(None));
     }
 
     /// Runs what the handled messages and the time made due, and submits
@@ -2564,6 +2586,9 @@ impl<M: TextEngine + 'static> Driver<M> {
         state.request_frame(script, &**sink);
         self.check_stopped();
         self.sync_quit_listeners();
+        for done in self.state.frame_completions.drain(..) {
+            done();
+        }
     }
 
     /// Tells the [`Engine`] whether the app has quit listeners now.
@@ -2696,6 +2721,10 @@ struct State<M: TextEngine> {
     app_locale: Option<nsh_core::platform::Locale>,
     /// A display frame was requested and has not begun yet.
     frame_requested: bool,
+    /// External frame requests processed, completed after their turn.
+    /// A manual request enters this queue only after its clock move
+    /// returns, including any earlier timers and recursively handled input.
+    frame_completions: Vec<Box<dyn FnOnce() + Send>>,
     ops: Vec<Op>,
     /// List render requests not yet sent to JS.
     binds: Vec<ListBind>,
@@ -3806,11 +3835,14 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
         }
         Message::RootSize(id, size, insets) => state.core.set_root_size(id, size, insets),
         Message::ScreenHeader(id, height) => state.core.set_screen_header(id, height),
-        Message::Frame => {
+        Message::Frame(done) => {
             state.frame_requested = false;
             state.core.run_frame(nsh_core::time::now());
             if let Some(script) = script {
                 script.run_frame();
+            }
+            if let Some(done) = done {
+                state.frame_completions.push(done);
             }
         }
         Message::States(id, states) => state.core.set_states(id, states),
