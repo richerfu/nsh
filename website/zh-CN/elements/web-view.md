@@ -133,6 +133,21 @@ web_view("https://example.com").on_download_pending(|event: &WebDownloadPending|
 | `injectJavaScript(script)` | `inject_java_script(script)` | 在页面中执行 JavaScript。 |
 | `postMessage(data)` | `post_message(data)` | 向页面发送一个字符串，页面会在 `window` 上收到 `message` 事件。 |
 | `load({ src, headers })` | `load(WebLoad::new(src, headers)?)` | 加载 `src`，只给页面自身的请求带上 `headers`（如 `Authorization`），子资源和之后的导航不带（[指南](../docs/web-view-and-video.md#已登录的页面请求头)）。 |
+| `cookieStore.getAll(options)` | `cookies(options)` | 读取匹配 `http://` 或 `https://` URL 的所有 Cookie（包含 `HttpOnly`）。 |
+| `cookieStore.get(options)` | `cookies(options)` | 读取匹配 `http://` 或 `https://` URL 的首个 Cookie（无匹配时返回 `null`）。 |
+
+## Cookie
+
+应用可通过 `WebViewRef.cookieStore`（Rust 为 `ElementRef::cookies`）只读查询当前 web view 会话下的 Cookie（包括页面脚本无法读取的 `HttpOnly` Cookie）：
+
+```tsx
+const cookies = await page.cookieStore.getAll({ url: "https://example.com/account" });
+const session = await page.cookieStore.get({ url: "https://example.com/account", name: "sid" });
+```
+
+- **能力检查**：`options.url` 必须是 `capabilities.webview` 允许的 `http://` 或 `https://` URL，否则拒绝并返回 `ERR_ACCESS_DENIED`（非 HTTP(S) URL 返回 `TypeError`）。
+- **无痕隔离**：在 macOS、iOS、Windows 和 Linux 上，`incognito` 视图仅读取各自的临时会话存储。在 Android 上，`android.webkit.CookieManager` 为进程级全局共享。
+- **平台差异**：全平台均返回 `name` 与 `value`；macOS、iOS、Windows 和 Linux 还会提供 `domain`、`path`、`expires`（Unix 毫秒时间戳）、`httpOnly`、`secure` 与 `sameSite`；Android 受限于系统公开接口 `CookieManager.getCookie(url)` 只返回 `name=value` 键值对（不包含额外元数据）；Web、TUI 与 GPUI 后端返回 `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`。
 
 ## 通信
 

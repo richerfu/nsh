@@ -19,6 +19,29 @@ export function createDom(invoke, values, reactive, live, wake) {
     error.code = "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM";
     throw error;
   };
+  Object.defineProperty(prototype, "cookieStore", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      if (!values.nodeIds.has(this)) throw new TypeError("nsh: not a node");
+      const query = async (options) => {
+        if (options === null || typeof options !== "object" || Array.isArray(options)) throw new TypeError("cookieStore expects an options object with url");
+        if (typeof options.url !== "string") throw new TypeError("cookieStore options.url must be a string");
+        let parsed;
+        try { parsed = new URL(options.url); } catch { throw new TypeError("cookieStore options.url must be a valid http(s) URL"); }
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new TypeError("cookieStore options.url must use the http or https scheme");
+        if (options.name !== undefined && typeof options.name !== "string") throw new TypeError("cookieStore options.name must be a string");
+        if (options.timeout !== undefined) {
+          if (typeof options.timeout !== "number") throw new TypeError("cookieStore's timeout must be a number");
+          if (!Number.isFinite(options.timeout) || options.timeout <= 0 || options.timeout > 0xffffffff) throw new RangeError("cookieStore's timeout must be a positive number of milliseconds");
+        }
+        const error = new Error("web views expose no cookie store here");
+        error.code = "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM";
+        throw error;
+      };
+      return { getAll: query, get: query };
+    },
+  });
   prototype.setSelection = function (start, end = start) { return call(314, [values.nodeIds.get(this), "setSelection", { start: Number(start), end: Number(end) }]); };
   prototype.command = function (name, args) { return call(314, [values.nodeIds.get(this), "native", { name, args }]); };
   // A layout animation of this node's change whose `update` phase is

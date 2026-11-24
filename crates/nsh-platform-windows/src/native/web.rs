@@ -87,6 +87,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use nsh_core::{
@@ -94,17 +95,19 @@ use nsh_core::{
     WebSource,
     access::WebMedia,
     webview::{
-        self, DownloadEnd, DownloadOffer, DownloadOutcome, WebDownloadSource, WebViewOperation,
-        WebViewRequest,
+        self, CookieSameSite, DownloadEnd, DownloadOffer, DownloadOutcome, WebCookie,
+        WebDownloadSource, WebViewOperation, WebViewRequest, cookies,
     },
 };
 use webview2_com::{
     AddScriptToExecuteOnDocumentCreatedCompletedHandler,
     CreateCoreWebView2CompositionControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, CursorChangedEventHandler,
-    DownloadStartingEventHandler, FocusChangedEventHandler,
+    DownloadStartingEventHandler, FocusChangedEventHandler, GetCookiesCompletedHandler,
     Microsoft::Web::WebView2::Win32::{
-        COREWEBVIEW2_COLOR, COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON,
+        COREWEBVIEW2_COLOR, COREWEBVIEW2_COOKIE_SAME_SITE_KIND,
+        COREWEBVIEW2_COOKIE_SAME_SITE_KIND_LAX, COREWEBVIEW2_COOKIE_SAME_SITE_KIND_NONE,
+        COREWEBVIEW2_COOKIE_SAME_SITE_KIND_STRICT, COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON,
         COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_HASH_MISMATCH,
         COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_TOO_SHORT,
         COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_NO_RANGE,
@@ -130,10 +133,11 @@ use webview2_com::{
         COREWEBVIEW2_WEB_ERROR_STATUS, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT, ICoreWebView2,
         ICoreWebView2_2, ICoreWebView2_4, ICoreWebView2CompositionController,
         ICoreWebView2Controller, ICoreWebView2Controller2, ICoreWebView2Controller3,
-        ICoreWebView2Deferral, ICoreWebView2DownloadOperation,
-        ICoreWebView2DownloadStartingEventArgs, ICoreWebView2Environment,
-        ICoreWebView2Environment2, ICoreWebView2Environment3, ICoreWebView2Environment10,
-        ICoreWebView2ExecuteScriptCompletedHandler, ICoreWebView2Settings2, ICoreWebView2Settings6,
+        ICoreWebView2Cookie, ICoreWebView2CookieList, ICoreWebView2Deferral,
+        ICoreWebView2DownloadOperation, ICoreWebView2DownloadStartingEventArgs,
+        ICoreWebView2Environment, ICoreWebView2Environment2, ICoreWebView2Environment3,
+        ICoreWebView2Environment10, ICoreWebView2ExecuteScriptCompletedHandler,
+        ICoreWebView2Settings2, ICoreWebView2Settings6,
     },
     MoveFocusRequestedEventHandler, NavigationCompletedEventHandler,
     NavigationStartingEventHandler, NewWindowRequestedEventHandler,
@@ -701,6 +705,7 @@ impl WebItem {
     /// has instead.
     fn unavailable(&self, why: &str) {
         self.failed.set(true);
+        self.fail_queued_requests(why);
         self.portal.borrow_mut().take();
         static WARNED: AtomicBool = AtomicBool::new(false);
         if !WARNED.swap(true, Ordering::Relaxed) {
@@ -1325,12 +1330,93 @@ impl WebItem {
             WebViewOperation::CancelDownload { id } => {
                 self.cancel_download(request.id, id);
             }
+            WebViewOperation::GetCookies { url } => {
+                self.get_cookies(request, url);
+            }
             // A newer core's operation: answer it rather than leave it
             // pending.
             _ => self.reply(
                 request.id,
                 Err("this Windows backend does not know the web view operation".into()),
             ),
+        }
+    }
+
+    /// Reads cookies matching `url` via `ICoreWebView2CookieManager::GetCookies`,
+    /// queuing while the controller initializes and failing immediately if closed
+    /// or unavailable.
+    fn get_cookies(&self, request: &WebViewRequest, url: &str) {
+        if self.closed.get() || self.closing.get() {
+            self.reply(request.id, Err("the web view is closed".into()));
+            return;
+        }
+        if self.failed.get() {
+            self.reply(request.id, Err("WebView is not available".into()));
+            return;
+        }
+        let Some(webview) = self.webview.borrow().clone() else {
+            self.queued
+                .borrow_mut()
+                .push(Command::WebViewRequest(request.clone()));
+            return;
+        };
+        let Ok(webview2) = webview.cast::<ICoreWebView2_2>() else {
+            self.reply(
+                request.id,
+                Err("this WebView2 runtime cannot read cookies".into()),
+            );
+            return;
+        };
+        // SAFETY: `webview2` is a live `ICoreWebView2_2` on this UI STA thread.
+        let manager = match unsafe { webview2.CookieManager() } {
+            Ok(manager) => manager,
+            Err(err) => {
+                self.reply(
+                    request.id,
+                    Err(format!("WebView2 cookie manager is unavailable: {err}")),
+                );
+                return;
+            }
+        };
+        let control = self.engine_control();
+        let weak_surface = self.surface.clone();
+        let node = self.id;
+        let request_id = request.id;
+        let query_url = url.to_owned();
+        let dispatch = move |outcome: Result<JsonValue, String>| {
+            if let Some(control) = &control {
+                control.dispatch_event(
+                    node,
+                    EventKind::WebViewReply,
+                    nsh_core::webview::reply(request_id, outcome),
+                );
+            } else if let Some(surface) = weak_surface.upgrade() {
+                reply(&surface, node, request_id, outcome);
+            }
+        };
+        let handler = GetCookiesCompletedHandler::create(Box::new(move |result, list| {
+            let outcome = match (result, list) {
+                (Ok(()), Some(list)) => extract_windows_cookies(&list, &query_url),
+                (Ok(()), None) => Ok(JsonValue::Array(Vec::new())),
+                (Err(err), _) => Err(format!("cannot read cookies: {err}")),
+            };
+            dispatch(outcome);
+            Ok(())
+        }));
+        // SAFETY: `manager` is a live `ICoreWebView2CookieManager` and `handler`
+        // stays alive inside COM for the duration of `GetCookies`.
+        if let Err(err) = unsafe { manager.GetCookies(&HSTRING::from(url), &handler) } {
+            self.reply(request.id, Err(format!("cannot read cookies: {err}")));
+        }
+    }
+
+    /// Fails any `Command::WebViewRequest` queued before initialization finished.
+    fn fail_queued_requests(&self, reason: &str) {
+        let queued = std::mem::take(&mut *self.queued.borrow_mut());
+        for command in queued {
+            if let Command::WebViewRequest(request) = command {
+                self.reply(request.id, Err(reason.to_owned()));
+            }
         }
     }
 
@@ -2088,7 +2174,7 @@ impl WebItem {
             self.focus_window();
         }
         self.webview.borrow_mut().take();
-        self.queued.borrow_mut().clear();
+        self.fail_queued_requests("the web view is closed");
         self.composition.borrow_mut().take();
         if let Some(controller) = self.controller.borrow_mut().take() {
             // SAFETY: closes the live controller; it is not used afterwards
@@ -3040,9 +3126,172 @@ fn interrupt_message(reason: i32) -> String {
     message.to_owned()
 }
 
+/// Extracts and filters cookies returned by WebView2's cookie manager.
+fn extract_windows_cookies(list: &ICoreWebView2CookieList, url: &str) -> Result<JsonValue, String> {
+    let mut count = 0u32;
+    // SAFETY: `list` is a live `ICoreWebView2CookieList` on this STA thread.
+    unsafe { list.Count(&mut count) }.map_err(|err| format!("cannot read cookies: {err}"))?;
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    let mut matched = Vec::new();
+    for i in 0..count {
+        if matched.len() >= 4096 {
+            break;
+        }
+        // SAFETY: `i < count` on the live cookie list.
+        let cookie: ICoreWebView2Cookie = unsafe { list.GetValueAtIndex(i) }
+            .map_err(|err| format!("cannot read cookie: {err}"))?;
+        let (name, value, domain, path, expires, http_only, secure, same_site) =
+            read_windows_cookie(&cookie)?;
+        if !cookies::cookie_matches_url(
+            url,
+            Some(&domain),
+            Some(&path),
+            Some(secure),
+            expires,
+            now_ms,
+        ) {
+            continue;
+        }
+        let mut record = WebCookie::new(name, value);
+        if !domain.is_empty() {
+            record.domain = Some(domain);
+        }
+        if !path.is_empty() {
+            record.path = Some(path);
+        }
+        record.expires = expires;
+        record.http_only = Some(http_only);
+        record.secure = Some(secure);
+        record.same_site = same_site;
+        matched.push(record);
+    }
+    serde_json::to_value(matched).map_err(|err| format!("failed to serialize cookies: {err}"))
+}
+
+fn read_windows_cookie(
+    cookie: &ICoreWebView2Cookie,
+) -> Result<
+    (
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+        bool,
+        bool,
+        Option<CookieSameSite>,
+    ),
+    String,
+> {
+    let read_str = |raw: PWSTR| -> String {
+        // SAFETY: `raw` was just allocated by WebView2 COM and is freed by `take_pwstr`.
+        unsafe { take_pwstr(raw) }
+    };
+    let mut raw_name = PWSTR::null();
+    // SAFETY: `cookie` is a live `ICoreWebView2Cookie` on this STA thread.
+    unsafe { cookie.Name(&mut raw_name) }
+        .map_err(|err| format!("cannot read cookie name: {err}"))?;
+    let name = read_str(raw_name);
+
+    let mut raw_value = PWSTR::null();
+    // SAFETY: `cookie` is a live `ICoreWebView2Cookie` on this STA thread.
+    unsafe { cookie.Value(&mut raw_value) }
+        .map_err(|err| format!("cannot read cookie value: {err}"))?;
+    let value = read_str(raw_value);
+
+    let mut raw_domain = PWSTR::null();
+    // SAFETY: `cookie` is a live `ICoreWebView2Cookie` on this STA thread.
+    unsafe { cookie.Domain(&mut raw_domain) }
+        .map_err(|err| format!("cannot read cookie domain: {err}"))?;
+    let domain = read_str(raw_domain);
+
+    let mut raw_path = PWSTR::null();
+    // SAFETY: `cookie` is a live `ICoreWebView2Cookie` on this STA thread.
+    unsafe { cookie.Path(&mut raw_path) }
+        .map_err(|err| format!("cannot read cookie path: {err}"))?;
+    let path = read_str(raw_path);
+
+    let mut is_session = BOOL::default();
+    // SAFETY: `cookie` is a live `ICoreWebView2Cookie` on this STA thread.
+    unsafe { cookie.IsSession(&mut is_session) }
+        .map_err(|err| format!("cannot read cookie session flag: {err}"))?;
+
+    let mut expires_secs = 0.0f64;
+    // SAFETY: `cookie` is a live `ICoreWebView2Cookie` on this STA thread.
+    unsafe { cookie.Expires(&mut expires_secs) }
+        .map_err(|err| format!("cannot read cookie expiry: {err}"))?;
+
+    let mut is_http_only = BOOL::default();
+    // SAFETY: `cookie` is a live `ICoreWebView2Cookie` on this STA thread.
+    unsafe { cookie.IsHttpOnly(&mut is_http_only) }
+        .map_err(|err| format!("cannot read cookie HttpOnly flag: {err}"))?;
+
+    let mut is_secure = BOOL::default();
+    // SAFETY: `cookie` is a live `ICoreWebView2Cookie` on this STA thread.
+    unsafe { cookie.IsSecure(&mut is_secure) }
+        .map_err(|err| format!("cannot read cookie Secure flag: {err}"))?;
+
+    let mut same_site = COREWEBVIEW2_COOKIE_SAME_SITE_KIND::default();
+    // SAFETY: `cookie` is a live `ICoreWebView2Cookie` on this STA thread.
+    unsafe { cookie.SameSite(&mut same_site) }
+        .map_err(|err| format!("cannot read cookie SameSite flag: {err}"))?;
+
+    Ok((
+        name,
+        value,
+        domain,
+        path,
+        windows_cookie_expires_ms(is_session.as_bool(), expires_secs),
+        is_http_only.as_bool(),
+        is_secure.as_bool(),
+        windows_same_site(same_site),
+    ))
+}
+
+fn windows_cookie_expires_ms(is_session: bool, expires_secs: f64) -> Option<i64> {
+    (!is_session && expires_secs.is_finite() && expires_secs >= 0.0)
+        .then_some((expires_secs * 1000.0).round() as i64)
+}
+
+fn windows_same_site(kind: COREWEBVIEW2_COOKIE_SAME_SITE_KIND) -> Option<CookieSameSite> {
+    if kind == COREWEBVIEW2_COOKIE_SAME_SITE_KIND_STRICT {
+        Some(CookieSameSite::Strict)
+    } else if kind == COREWEBVIEW2_COOKIE_SAME_SITE_KIND_LAX {
+        Some(CookieSameSite::Lax)
+    } else if kind == COREWEBVIEW2_COOKIE_SAME_SITE_KIND_NONE {
+        Some(CookieSameSite::None)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_windows_cookie_metadata() {
+        assert_eq!(windows_cookie_expires_ms(true, 1_700_000_000.0), None);
+        assert_eq!(windows_cookie_expires_ms(false, -1.0), None);
+        assert_eq!(
+            windows_cookie_expires_ms(false, 1_700_000_000.25),
+            Some(1_700_000_000_250)
+        );
+        assert_eq!(
+            windows_same_site(COREWEBVIEW2_COOKIE_SAME_SITE_KIND_STRICT),
+            Some(CookieSameSite::Strict)
+        );
+        assert_eq!(
+            windows_same_site(COREWEBVIEW2_COOKIE_SAME_SITE_KIND_LAX),
+            Some(CookieSameSite::Lax)
+        );
+        assert_eq!(
+            windows_same_site(COREWEBVIEW2_COOKIE_SAME_SITE_KIND_NONE),
+            Some(CookieSameSite::None)
+        );
+    }
 
     #[test]
     fn escapes_js_strings() {

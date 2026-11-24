@@ -249,6 +249,7 @@ pub use crate::{
         SizeClass, TemperatureUnit, TimeZone, Weekday,
     },
     style::Color,
+    webview::{CookieQueryOptions, CookieSameSite, WebCookie},
 };
 
 /// What the macros' code and nsh's generated workspace name.

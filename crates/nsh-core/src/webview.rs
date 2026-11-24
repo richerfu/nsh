@@ -39,8 +39,10 @@ use std::path::PathBuf;
 
 use crate::{EventPayload, JsonValue};
 
+pub mod cookies;
 pub mod downloads;
 
+pub use cookies::{CookieQueryOptions, CookieSameSite, WebCookie};
 pub(crate) use downloads::DownloadHandle;
 pub use downloads::{
     CancelReason, DownloadDestination, WebDownload, WebDownloadPending, WebDownloadSource,
@@ -56,7 +58,8 @@ pub use downloads::{
 ///
 /// A platform answers each with [`crate::EventKind::WebViewReply`]:
 /// `StartDownload` once it accepted the staging path and its transfer
-/// continued, `CancelDownload` only after its writer stopped.
+/// continued, `CancelDownload` only after its writer stopped, and
+/// `GetCookies` with a JSON array of [`WebCookie`] objects.
 #[doc(hidden)]
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +78,12 @@ pub enum WebViewOperation {
     CancelDownload {
         /// The download.
         id: String,
+    },
+    /// Reads cookies (including `HttpOnly`) matching `url` from this
+    /// web view's store.
+    GetCookies {
+        /// Normalized `http://` or `https://` query URL.
+        url: String,
     },
 }
 

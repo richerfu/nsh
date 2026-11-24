@@ -50222,6 +50222,284 @@ fn web_evaluation_requires_a_capable_host_even_with_a_mobile_environment() {
     drop(future);
 }
 
+fn cookie_core(hosts: &[&str]) -> Core<FakeEngine> {
+    let mut c = core();
+    c.set_environment(crate::element::Environment {
+        os: crate::platform::Os::MacOs,
+        web_views: true,
+        webview_requests: true,
+        ..Default::default()
+    });
+    c.set_access(Arc::new(crate::access::Access {
+        declared: crate::access::Capabilities::from_json(
+            &serde_json::json!({ "webview": { "hosts": hosts } }),
+        )
+        .unwrap(),
+        granted: None,
+    }));
+    apply(
+        &mut c,
+        vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::WebView,
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ],
+    );
+    c.commit();
+    c
+}
+
+#[test]
+fn web_cookies_reads_httponly_filters_by_name_and_ignores_foreign_or_duplicate_replies() {
+    use crate::{
+        element::Answer,
+        webview::{CookieQueryOptions, CookieSameSite, WebViewOperation, WebViewRequest},
+    };
+    let mut c = cookie_core(&["example.com"]);
+    let (all_ans, all_slot) = Answer::new();
+    let (one_ans, one_slot) = Answer::new();
+    c.start_web_cookies(
+        2,
+        CookieQueryOptions::new("https://example.com/app"),
+        all_slot.clone(),
+    );
+    c.start_web_cookies(
+        2,
+        CookieQueryOptions::new("https://example.com/app").with_name("sid"),
+        one_slot.clone(),
+    );
+    let batch = c.commit().unwrap();
+    let requests: Vec<_> = batch
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            MountItem::Command {
+                id: 2,
+                command:
+                    Command::WebViewRequest(WebViewRequest {
+                        id,
+                        operation: WebViewOperation::GetCookies { url },
+                    }),
+            } => Some((*id, url.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].1, "https://example.com/app");
+
+    let payload = |request, value| {
+        EventPayload::Json(serde_json::json!({
+            "id": request,
+            "ok": true,
+            "value": value,
+        }))
+    };
+    let cookies_json = serde_json::json!([
+        {
+            "name": "sid",
+            "value": "secret-session",
+            "domain": "example.com",
+            "path": "/app",
+            "expires": 1_800_000_000_000i64,
+            "httpOnly": true,
+            "secure": true,
+            "sameSite": "lax"
+        },
+        {
+            "name": "prefs",
+            "value": "dark",
+            "domain": "example.com",
+            "path": "/",
+            "httpOnly": false,
+            "secure": true,
+            "sameSite": "strict"
+        }
+    ]);
+
+    // Foreign node reply must be ignored.
+    assert!(c.component_event(
+        99,
+        EventKind::WebViewReply,
+        &payload(requests[0].0, cookies_json.clone())
+    ));
+    assert!(all_slot.borrow().value.is_none());
+
+    // Matching node delivers both cookies on `all_slot`, and filters by name on `one_slot`.
+    assert!(c.component_event(
+        2,
+        EventKind::WebViewReply,
+        &payload(requests[0].0, cookies_json.clone())
+    ));
+    assert!(c.component_event(
+        2,
+        EventKind::WebViewReply,
+        &payload(requests[1].0, cookies_json.clone())
+    ));
+    // Duplicate reply is ignored.
+    assert!(c.component_event(
+        2,
+        EventKind::WebViewReply,
+        &payload(requests[0].0, serde_json::json!([]))
+    ));
+
+    let all = all_slot.borrow_mut().value.take().unwrap().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].name, "sid");
+    assert_eq!(all[0].value, "secret-session");
+    assert_eq!(all[0].http_only, Some(true));
+    assert_eq!(all[0].same_site, Some(CookieSameSite::Lax));
+
+    let one = one_slot.borrow_mut().value.take().unwrap().unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].name, "sid");
+    assert_eq!(one[0].value, "secret-session");
+    drop((all_ans, one_ans));
+}
+
+#[test]
+fn web_cookies_validates_url_access_timeout_unmount_and_platform_gates() {
+    use crate::{
+        element::{Answer, JsError},
+        webview::{CookieQueryOptions, WebViewOperation, WebViewRequest},
+    };
+
+    let mut c = cookie_core(&["allowed.example"]);
+
+    // Non-HTTP(S) URL fails immediately with TypeError.
+    let (bad_ans, bad_slot) = Answer::new();
+    c.start_web_cookies(
+        2,
+        CookieQueryOptions::new("file:///etc/passwd"),
+        bad_slot.clone(),
+    );
+    assert!(matches!(
+        bad_slot.borrow_mut().value.take(),
+        Some(Err(JsError::Type(_)))
+    ));
+    drop(bad_ans);
+
+    // Host outside `capabilities.webview` fails immediately with ERR_ACCESS_DENIED.
+    let (denied_ans, denied_slot) = Answer::new();
+    c.start_web_cookies(
+        2,
+        CookieQueryOptions::new("https://evil.example/"),
+        denied_slot.clone(),
+    );
+    assert_eq!(
+        denied_slot
+            .borrow_mut()
+            .value
+            .take()
+            .unwrap()
+            .unwrap_err()
+            .code(),
+        Some("ERR_ACCESS_DENIED")
+    );
+    drop(denied_ans);
+
+    // Android gate (`web_views + web_evaluate`, even with `webview_requests: false`) succeeds.
+    c.set_environment(crate::element::Environment {
+        os: crate::platform::Os::Android,
+        web_views: true,
+        webview_requests: false,
+        web_evaluate: true,
+        ..Default::default()
+    });
+    let (and_ans, and_slot) = Answer::new();
+    c.start_web_cookies(
+        2,
+        CookieQueryOptions::new("https://allowed.example/"),
+        and_slot.clone(),
+    );
+    let batch = c.commit().unwrap();
+    let req_id = batch
+        .items
+        .iter()
+        .find_map(|item| match item {
+            MountItem::Command {
+                id: 2,
+                command:
+                    Command::WebViewRequest(WebViewRequest {
+                        id,
+                        operation: WebViewOperation::GetCookies { .. },
+                    }),
+            } => Some(*id),
+            _ => None,
+        })
+        .expect("Android host dispatches GetCookies");
+    drop(and_ans);
+
+    // Timeout rejects with ETIMEDOUT.
+    c.timeout_web_cookies(req_id);
+    assert_eq!(
+        and_slot
+            .borrow_mut()
+            .value
+            .take()
+            .unwrap()
+            .unwrap_err()
+            .code(),
+        Some("ETIMEDOUT")
+    );
+
+    // Unavailable platform (`webview_requests: false`, non-Android) rejects immediately.
+    c.set_environment(crate::element::Environment {
+        os: crate::platform::Os::Linux,
+        web_views: false,
+        webview_requests: false,
+        ..Default::default()
+    });
+    let (unavail_ans, unavail_slot) = Answer::new();
+    c.start_web_cookies(
+        2,
+        CookieQueryOptions::new("https://allowed.example/"),
+        unavail_slot.clone(),
+    );
+    assert_eq!(
+        unavail_slot
+            .borrow_mut()
+            .value
+            .take()
+            .unwrap()
+            .unwrap_err()
+            .code(),
+        Some("ERR_FEATURE_UNAVAILABLE_ON_PLATFORM")
+    );
+    drop(unavail_ans);
+
+    // Unmounting aborts in-flight queries with ERR_NSH_WEBVIEW_ABORTED.
+    c.set_environment(crate::element::Environment {
+        os: crate::platform::Os::MacOs,
+        web_views: true,
+        webview_requests: true,
+        ..Default::default()
+    });
+    let (abort_ans, abort_slot) = Answer::new();
+    c.start_web_cookies(
+        2,
+        CookieQueryOptions::new("https://allowed.example/"),
+        abort_slot.clone(),
+    );
+    c.apply(Op::Release { id: 2 }).unwrap();
+    assert_eq!(
+        abort_slot
+            .borrow_mut()
+            .value
+            .take()
+            .unwrap()
+            .unwrap_err()
+            .code(),
+        Some("ERR_NSH_WEBVIEW_ABORTED")
+    );
+    drop(abort_ans);
+}
+
 /// An `svg()` the platform draws as an image (the web) is sent with its text
 /// color, inherited, for its `currentColor`; an image is not (#1466).
 #[test]

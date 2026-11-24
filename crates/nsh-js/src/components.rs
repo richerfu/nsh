@@ -270,7 +270,13 @@ pub(crate) fn evaluate(
         Some(script) => script,
         None => return reject(JsError::Type("evaluate expects a script string".into())),
     };
-    let timeout = match evaluate_timeout(cx, options) {
+    let timeout = match parse_timeout(
+        cx,
+        options,
+        "evaluate",
+        nsh_core::element::EvaluateOptions::default().timeout,
+        true,
+    ) {
         Ok(timeout) => timeout,
         Err(error) => return reject(error),
     };
@@ -298,19 +304,137 @@ pub(crate) fn evaluate(
     promise
 }
 
-/// `evaluate`'s `options.timeout` (milliseconds, 30 seconds when absent).
-fn evaluate_timeout(
+/// `ref.cookieStore.getAll(options)` / `ref.cookieStore.get(options)` of a
+/// web view: returns a promise settled by the core with matching cookies.
+pub(crate) fn web_cookies(
+    cx: *mut JsContext,
+    id: Option<u32>,
+    options: JsValue,
+    single: bool,
+) -> JsValue {
+    use nsh_core::element::{IntoThrown, JsError};
+    let call = next_call(cx);
+    let promise = promise(cx, call);
+    // SAFETY: an inline tag check of the newly allocated promise.
+    if unsafe { qjs::JS_IsException(promise) } {
+        return promise;
+    }
+    let reject = |error: JsError| {
+        let _ = settle(cx, call, Err(error.into_thrown()));
+        promise
+    };
+    let Some(id) = id else {
+        return reject(JsError::Type("nsh: not a node".into()));
+    };
+    // SAFETY: checks the borrowed argument's tag (`JS_IsObject` is false for null/undefined).
+    if !unsafe { qjs::JS_IsObject(options) }
+        || unsafe { qjs::JS_IsFunction(cx, options) }
+        || unsafe { qjs::JS_IsArray(options) }
+    {
+        return reject(JsError::Type(
+            "cookieStore expects an options object with url".into(),
+        ));
+    }
+    // SAFETY: reads `options.url`; the owned value is freed below.
+    let url_val = unsafe { qjs::JS_GetPropertyStr(cx, options, c"url".as_ptr()) };
+    let url = unsafe {
+        if qjs::JS_IsException(url_val) {
+            qjs::JS_FreeValue(cx, qjs::JS_GetException(cx));
+            Err(JsError::Type(
+                "cookieStore options.url could not be read".into(),
+            ))
+        } else if !qjs::JS_IsString(url_val) {
+            Err(JsError::Type(
+                "cookieStore options.url must be a string".into(),
+            ))
+        } else {
+            string_arg(cx, url_val)
+                .ok_or_else(|| JsError::Type("cookieStore options.url must be a string".into()))
+        }
+    };
+    // SAFETY: frees the owned property value.
+    unsafe { qjs::JS_FreeValue(cx, url_val) };
+    let url = match url {
+        Ok(url) => match nsh_core::webview::cookies::validate_url(&url) {
+            Ok(normalized) => normalized,
+            Err(message) => return reject(JsError::Type(message)),
+        },
+        Err(error) => return reject(error),
+    };
+    // SAFETY: reads `options.name`; the owned value is freed below.
+    let name_val = unsafe { qjs::JS_GetPropertyStr(cx, options, c"name".as_ptr()) };
+    let name = unsafe {
+        if qjs::JS_IsException(name_val) {
+            qjs::JS_FreeValue(cx, qjs::JS_GetException(cx));
+            Err(JsError::Type(
+                "cookieStore options.name could not be read".into(),
+            ))
+        } else if qjs::JS_IsUndefined(name_val) {
+            Ok(None)
+        } else if !qjs::JS_IsString(name_val) {
+            Err(JsError::Type(
+                "cookieStore options.name must be a string".into(),
+            ))
+        } else {
+            string_arg(cx, name_val)
+                .map(Some)
+                .ok_or_else(|| JsError::Type("cookieStore options.name must be a string".into()))
+        }
+    };
+    // SAFETY: frees the owned property value.
+    unsafe { qjs::JS_FreeValue(cx, name_val) };
+    let name = match name {
+        Ok(name) => name,
+        Err(error) => return reject(error),
+    };
+    let timeout = match parse_timeout(
+        cx,
+        options,
+        "cookieStore",
+        nsh_core::webview::cookies::DEFAULT_TIMEOUT,
+        false,
+    ) {
+        Ok(timeout) => timeout,
+        Err(error) => return reject(error),
+    };
+    if dom::push_op(
+        cx,
+        Op::WebCookies {
+            id,
+            call,
+            url,
+            name,
+            timeout,
+            single,
+        },
+    )
+    .is_err()
+    {
+        // SAFETY: takes the exception `push_op` raised on this live VM.
+        unsafe { qjs::JS_FreeValue(cx, qjs::JS_GetException(cx)) };
+        return reject(JsError::Error(
+            "the engine stopped before reading cookies".into(),
+        ));
+    }
+    promise
+}
+
+/// Reads `options.timeout` (milliseconds, defaulting to `default` when omitted).
+fn parse_timeout(
     cx: *mut JsContext,
     options: JsValue,
+    what: &str,
+    default: std::time::Duration,
+    allow_undefined_options: bool,
 ) -> Result<std::time::Duration, nsh_core::element::JsError> {
-    use nsh_core::element::{EvaluateOptions, JsError};
+    use nsh_core::element::JsError;
     // SAFETY: tag checks of a borrowed argument.
-    if unsafe { qjs::JS_IsUndefined(options) } {
-        return Ok(EvaluateOptions::default().timeout);
+    if allow_undefined_options && unsafe { qjs::JS_IsUndefined(options) } {
+        return Ok(default);
     }
     // SAFETY: as above.
     if !unsafe { qjs::JS_IsObject(options) } {
-        return Err(JsError::Type("evaluate's options must be an object".into()));
+        return Err(JsError::Type(format!("{what}'s options must be an object")));
     }
     // SAFETY: reads a property of a live object; the value is freed below.
     let timeout = unsafe { qjs::JS_GetPropertyStr(cx, options, c"timeout".as_ptr()) };
@@ -318,20 +442,20 @@ fn evaluate_timeout(
     let result = unsafe {
         if qjs::JS_IsException(timeout) {
             qjs::JS_FreeValue(cx, qjs::JS_GetException(cx));
-            Err(JsError::Type("evaluate's timeout could not be read".into()))
+            Err(JsError::Type(format!("{what}'s timeout could not be read")))
         } else if qjs::JS_IsUndefined(timeout) {
-            Ok(EvaluateOptions::default().timeout)
+            Ok(default)
         } else if !qjs::JS_IsNumber(timeout) {
-            Err(JsError::Type("evaluate's timeout must be a number".into()))
+            Err(JsError::Type(format!("{what}'s timeout must be a number")))
         } else {
             let mut ms = 0f64;
             qjs::JS_ToFloat64(cx, &mut ms, timeout);
             if ms.is_finite() && ms > 0.0 && ms <= u32::MAX as f64 {
                 Ok(std::time::Duration::from_secs_f64(ms / 1000.0))
             } else {
-                Err(JsError::Range(
-                    "evaluate's timeout must be a positive number of milliseconds".into(),
-                ))
+                Err(JsError::Range(format!(
+                    "{what}'s timeout must be a positive number of milliseconds"
+                )))
             }
         }
     };

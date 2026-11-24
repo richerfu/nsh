@@ -2113,6 +2113,41 @@ extern "system" fn Java_com_longbridge_nsh_Native_eventMap(
         }
         return;
     }
+    if kind == EventKind::WebViewReply {
+        let EventPayload::Map(fields) = &payload else {
+            return;
+        };
+        let find_str = |wanted: &str| {
+            fields.iter().find_map(|(key, value)| match value {
+                PayloadValue::Str(v) if *key == wanted => Some(v.as_str()),
+                _ => None,
+            })
+        };
+        let generation = find_str("generation").and_then(|v| v.parse::<u64>().ok());
+        let Some(request) = find_str("id").and_then(|v| v.parse::<u64>().ok()) else {
+            return;
+        };
+        let reply_payload = if let Some(error) = find_str("error") {
+            nsh_core::webview::reply(request, Err(error.to_owned()))
+        } else {
+            let cookies =
+                nsh_core::webview::cookies::parse_cookie_header(find_str("data").unwrap_or(""));
+            let value = serde_json::to_value(cookies)
+                .unwrap_or_else(|_| nsh_core::JsonValue::Array(Vec::new()));
+            nsh_core::webview::reply(request, Ok(value))
+        };
+        // Fence on `web_generation` under the same engine lock `load()` uses.
+        let control = {
+            let engine = host.engine.lock().expect("engine");
+            (generation == Some(host.web_generation.load(Ordering::Relaxed)))
+                .then(|| engine.as_ref().map(Engine::control))
+                .flatten()
+        };
+        if let Some(control) = control {
+            control.dispatch_event(id as NodeId, kind, reply_payload);
+        }
+        return;
+    }
     match host.control() {
         Some(control) => control.dispatch_event(id as NodeId, kind, payload),
         // A link before the app runs (the launch intent's): the engine

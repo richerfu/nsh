@@ -330,6 +330,24 @@ impl Dom {
                 let cname = std::ffi::CString::new(*name).unwrap_or_default();
                 qjs::JS_SetPropertyStr(raw, proto, cname.as_ptr(), f);
             }
+            let cookie_store_get = qjs::JS_NewCFunction2(
+                raw,
+                Some(node_cookie_store),
+                c"get cookieStore".as_ptr(),
+                0,
+                qjs::JSCFunctionEnum_JS_CFUNC_generic,
+                0,
+            );
+            let cookie_store_atom = qjs::JS_NewAtom(raw, c"cookieStore".as_ptr());
+            qjs::JS_DefinePropertyGetSet(
+                raw,
+                proto,
+                cookie_store_atom,
+                cookie_store_get,
+                UNDEFINED,
+                (qjs::JS_PROP_CONFIGURABLE | qjs::JS_PROP_ENUMERABLE) as c_int,
+            );
+            qjs::JS_FreeAtom(raw, cookie_store_atom);
             qjs::JS_SetClassProto(raw, classes.node, proto);
             classes
         };
@@ -738,6 +756,47 @@ unsafe extern "C" fn node_method(
         Err(rquickjs::Error::Exception) => qjs::JS_EXCEPTION,
         Err(e) => throw_type(cx, &format!("nsh: {name}: {e}")),
     }
+}
+
+/// `node.cookieStore`: returns a read-only `{ getAll, get }` wrapper bound to
+/// `this` node, or throws `TypeError` when the receiver is not a node.
+unsafe extern "C" fn node_cookie_store(
+    cx: *mut JsContext,
+    this: JsValue,
+    _argc: c_int,
+    _argv: *mut JsValue,
+) -> JsValue {
+    if node_id(cx, this).is_none() {
+        return throw_type(cx, "nsh: not a node");
+    }
+    // SAFETY: `this` is a live JS object; `JS_NewCFunctionData` dups the data
+    // value and takes ownership of the property functions set on `store`.
+    unsafe {
+        let store = qjs::JS_NewObject(cx);
+        let mut data = [this];
+        let get_all =
+            qjs::JS_NewCFunctionData(cx, Some(node_cookie_store_call), 1, 0, 1, data.as_mut_ptr());
+        let get =
+            qjs::JS_NewCFunctionData(cx, Some(node_cookie_store_call), 1, 1, 1, data.as_mut_ptr());
+        qjs::JS_SetPropertyStr(cx, store, c"getAll".as_ptr(), get_all);
+        qjs::JS_SetPropertyStr(cx, store, c"get".as_ptr(), get);
+        store
+    }
+}
+
+/// `cookieStore.getAll(options)` (`magic == 0`) / `cookieStore.get(options)`
+/// (`magic == 1`) bound to `data[0]`.
+unsafe extern "C" fn node_cookie_store_call(
+    cx: *mut JsContext,
+    _this: JsValue,
+    argc: c_int,
+    argv: *mut JsValue,
+    magic: c_int,
+    data: *mut JsValue,
+) -> JsValue {
+    // SAFETY: `data` points to the 1-element closure data array owned by QuickJS.
+    let node = unsafe { *data };
+    crate::components::web_cookies(cx, node_id(cx, node), arg(argc, argv, 0), magic != 0)
 }
 
 /// Makes the root view's object (after the state is installed).
@@ -5286,6 +5345,67 @@ mod tests {
             [
                 "true",
                 r#"["TypeError","TypeError","TypeError","RangeError"]"#
+            ]
+        );
+    }
+
+    #[test]
+    fn cookie_store_validates_receivers_options_and_queues_ops() {
+        let host = Host::new().unwrap();
+        host.eval_source(&format!(r#"{REPORT}
+            import {{ element }} from "nsh:rt";
+            const web = element("webview");
+            let getterError = "";
+            try {{
+                Object.getOwnPropertyDescriptor(Object.getPrototypeOf(web), "cookieStore").get.call({{}});
+            }} catch (err) {{
+                getterError = err.name;
+            }}
+            report(getterError);
+            const bad = [
+                web.cookieStore.getAll(),
+                web.cookieStore.getAll(null),
+                web.cookieStore.getAll({{}}),
+                web.cookieStore.getAll({{ url: "javascript:alert(1)" }}),
+                web.cookieStore.get({{ url: "https://example.com/", name: 42 }}),
+                web.cookieStore.get({{ url: "https://example.com/", timeout: -1 }}),
+            ];
+            report(bad.every(value => value instanceof Promise));
+            Promise.all(bad.map(value => value.catch(error => error.name))).then(report);
+            const okAll = web.cookieStore.getAll({{ url: "https://example.com/a" }});
+            const okOne = web.cookieStore.get({{ url: "https://example.com/b", name: "sid", timeout: 5000 }});
+            report([okAll instanceof Promise, okOne instanceof Promise]);
+            globalThis.keep = [web, okAll, okOne];
+        "#)).unwrap();
+        host.run_jobs();
+        let mut raw_ops = Vec::new();
+        host.take_ops(&mut raw_ops);
+        let texts: Vec<String> = raw_ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::CreateText { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "\"TypeError\"",
+                "true",
+                "[true,true]",
+                r#"["TypeError","TypeError","TypeError","TypeError","TypeError","RangeError"]"#
+            ]
+        );
+        let cookie_ops: Vec<String> = raw_ops
+            .iter()
+            .filter(|op| matches!(op, Op::WebCookies { .. }))
+            .map(|op| format!("{op:?}"))
+            .collect();
+        assert_eq!(
+            cookie_ops,
+            [
+                "WebCookies { id: 2, call: 7, url: \"https://example.com/a\", name: None, timeout: 30s, single: false }",
+                "WebCookies { id: 2, call: 8, url: \"https://example.com/b\", name: Some(\"sid\"), timeout: 5s, single: true }",
             ]
         );
     }

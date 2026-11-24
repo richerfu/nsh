@@ -855,13 +855,19 @@ pub(crate) fn encode(batch: MountBatch, web_generation: u64) -> Encoded {
                     // No host answers `nsh/host` here (`Environment::host`):
                     // the core rejects the calls first.
                     | Command::HostCall { .. }
-                    | Command::HostPost { .. }
-                    // No desktop web view controls (`Environment::webview_requests`):
-                    // the core answers these first.
-                    | Command::WebViewRequest(_)
+                    | Command::HostPost { .. } => e.int(-1),
+                    Command::WebViewRequest(request) => match request.operation {
+                        nsh_core::webview::WebViewOperation::GetCookies { url } => {
+                            e.int(53);
+                            e.string(request.id.to_string());
+                            e.string(web_generation.to_string());
+                            e.string(url);
+                        }
+                        _ => e.int(-1),
+                    },
                     // No eyedropper (`Environment::screen_color`): the core
                     // answers no color first.
-                    | Command::PickScreenColor { .. } => e.int(-1),
+                    Command::PickScreenColor { .. } => e.int(-1),
                     // Not carried out on Android yet: the app's paste is
                     // lost, so say so.
                     Command::InsertText(_) => {
@@ -2526,5 +2532,42 @@ mod tests {
         let reset_ints = ints_for(reset);
         assert_eq!(reset_ints[7], 0.0f32.to_bits() as i32);
         assert_eq!(*reset_ints.last().unwrap(), 0);
+    }
+
+    #[test]
+    fn encodes_webview_cookie_store_requests() {
+        use nsh_core::webview::{WebViewOperation, WebViewRequest};
+
+        let encoded = encode(
+            MountBatch {
+                items: vec![MountItem::Command {
+                    id: 6,
+                    command: Command::WebViewRequest(WebViewRequest {
+                        id: 42,
+                        operation: WebViewOperation::GetCookies {
+                            url: "https://example.com/auth".into(),
+                        },
+                    }),
+                }],
+            },
+            7,
+        );
+        let ints: Vec<_> = encoded
+            .bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| i32::from_le_bytes(*chunk))
+            .collect();
+        // COMMAND (7), node 6, op 53, strings[0..3]
+        assert_eq!(&ints[ints.len() - 5..], &[6, 53, 0, 1, 2]);
+        assert_eq!(
+            encoded.strings,
+            vec![
+                "42".to_string(),
+                "7".to_string(),
+                "https://example.com/auth".to_string(),
+            ]
+        );
     }
 }

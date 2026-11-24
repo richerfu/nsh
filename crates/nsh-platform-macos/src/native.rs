@@ -2591,7 +2591,7 @@ impl Drop for WebHost {
 fn web_request(
     surface: &Rc<Surface>,
     node: NodeId,
-    _web: &AnyObject,
+    web: &AnyObject,
     handler: &WebHandler,
     request: &WebViewRequest,
 ) {
@@ -2625,6 +2625,22 @@ fn web_request(
             if let Err(error) = result {
                 reply(surface, node, request.id, Err(error));
             }
+        }
+        WebViewOperation::GetCookies { url } => {
+            let control = surface.event_control();
+            let weak_surface = Rc::downgrade(surface);
+            let request_id = request.id;
+            nsh_platform_apple::web_cookies::get_cookies(web, url.clone(), move |result| {
+                if let Some(control) = &control {
+                    control.dispatch_event(
+                        node,
+                        EventKind::WebViewReply,
+                        nsh_core::webview::reply(request_id, result),
+                    );
+                } else if let Some(surface) = weak_surface.upgrade() {
+                    reply(&surface, node, request_id, result);
+                }
+            });
         }
         // A newer core's operation: answer it rather than leave it pending.
         _ => reply(

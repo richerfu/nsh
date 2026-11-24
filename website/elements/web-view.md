@@ -164,6 +164,21 @@ lifecycle. Applications can compose a save-path picker with `accept` where the p
 | `injectJavaScript(script)` | `inject_java_script(script)` | Runs JavaScript in the page. |
 | `postMessage(data)` | `post_message(data)` | Sends a string to the page, which receives a `message` event on `window`. |
 | `load({ src, headers })` | `load(WebLoad::new(src, headers)?)` | Loads `src` with `headers` (e.g. `Authorization`) on the page's own request only, not its subresources or later navigations ([guide](../docs/web-view-and-video.md#signed-in-pages-request-headers)). |
+| `cookieStore.getAll(options)` | `cookies(options)` | Reads matching cookies (including `HttpOnly`) for an `http://` or `https://` URL. |
+| `cookieStore.get(options)` | `cookies(options)` | Reads the first matching cookie (or `null` when absent) for an `http://` or `https://` URL. |
+
+## Cookies
+
+`WebViewRef.cookieStore` (`ElementRef::cookies` in Rust) provides read-only access to cookies stored for the web view's session, including `HttpOnly` cookies that `evaluate` and `document.cookie` cannot observe:
+
+```tsx
+const cookies = await page.cookieStore.getAll({ url: "https://example.com/account" });
+const session = await page.cookieStore.get({ url: "https://example.com/account", name: "sid" });
+```
+
+- **Capabilities**: `options.url` must be an `http://` or `https://` URL permitted by `capabilities.webview`; otherwise the call rejects with `ERR_ACCESS_DENIED` (or `TypeError` for non-HTTP(S) URLs).
+- **Incognito isolation**: On macOS, iOS, Windows, and Linux, `incognito` web views read only from their own ephemeral store. On Android, `android.webkit.CookieManager` is process-wide and shared across web views.
+- **Metadata**: `name` and `value` are populated on every supported platform; `domain`, `path`, `expires` (Unix epoch milliseconds), `httpOnly`, `secure`, and `sameSite` are populated on macOS, iOS, Windows, and Linux and omitted on Android because Android's public `CookieManager.getCookie(url)` API exposes only `name=value` pairs. Web, TUI, and GPUI backends reject with `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`.
 
 ## Messaging
 
