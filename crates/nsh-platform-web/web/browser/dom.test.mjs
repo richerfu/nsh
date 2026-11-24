@@ -49,3 +49,20 @@ test("WebView evaluate returns rejected promises on the browser backend", async 
   await assert.rejects(web.evaluate.call(null, "1"), TypeError);
   await assert.rejects(web.evaluate("1", 5), TypeError);
 });
+
+test("WebView cookieStore validates arguments and rejects on the browser backend", async () => {
+  const values = { nodeIds: new WeakMap(), nodes: new Map() };
+  createDom(() => { throw new Error("unexpected native operation"); }, values, { getOwner: () => null }, () => false, () => {});
+  const web = values.makeNode(2);
+  assert.throws(() => Object.getOwnPropertyDescriptor(Object.getPrototypeOf(web), "cookieStore").get.call(null), TypeError);
+  for (const method of ["getAll", "get"]) {
+    const unsupported = web.cookieStore[method]({ url: "https://example.com/" });
+    assert.ok(unsupported instanceof Promise);
+    await assert.rejects(unsupported, { code: "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM" });
+    await assert.rejects(web.cookieStore[method](null), TypeError);
+    await assert.rejects(web.cookieStore[method]({ url: 42 }), TypeError);
+    await assert.rejects(web.cookieStore[method]({ url: "file:///etc/passwd" }), TypeError);
+    await assert.rejects(web.cookieStore[method]({ url: "https://example.com/", name: 42 }), TypeError);
+    await assert.rejects(web.cookieStore[method]({ url: "https://example.com/", timeout: -1 }), RangeError);
+  }
+});

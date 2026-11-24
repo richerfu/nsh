@@ -681,6 +681,7 @@ struct SecondInstances {
 /// The core's component state.
 pub(super) struct Components {
     pub(super) web_evaluations: super::web_evaluation::Evaluations,
+    pub(super) web_cookies: super::web_cookies::WebCookies,
     pub(super) canvas_renders: super::canvas_render::Renders,
     registry: Registry,
     /// The specs of the components made by type (not by name from the
@@ -1018,6 +1019,7 @@ impl Default for Components {
             host_requests: Vec::new(),
             host_inbox: Default::default(),
             web_evaluations: Default::default(),
+            web_cookies: Default::default(),
             canvas_renders: Default::default(),
             fetches: FxHashMap::default(),
             fetch_requests: Vec::new(),
@@ -6614,6 +6616,10 @@ impl<M: TextEngine> Core<M> {
                 self.start_web_evaluation(node, script, timeout, answer)
             }
             Action::WebEvaluationTimeout(request) => self.timeout_web_evaluation(request),
+            Action::WebCookies(node, options, answer) => {
+                self.start_web_cookies(node, options, answer)
+            }
+            Action::WebCookiesTimeout(request) => self.timeout_web_cookies(request),
             Action::CanvasRenderTimeout(id) => self.timeout_canvas_render(id),
             Action::TransitionTime(id, answer) => {
                 self.components.transition_times.push((id, answer))
@@ -7186,13 +7192,14 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
-    /// A request id no outstanding download command uses (downloads and
-    /// the app's platform replies share one id space per core).
-    fn alloc_webview_request(&mut self) -> u64 {
+    /// A request id no outstanding download or cookie command uses
+    /// (downloads, cookies and the app's platform replies share one id
+    /// space per core).
+    pub(super) fn alloc_webview_request(&mut self) -> u64 {
         loop {
             let id = self.components.next_webview_request;
             self.components.next_webview_request = id.wrapping_add(1);
-            if !self.components.downloads.tracks(id) {
+            if !self.components.downloads.tracks(id) && !self.components.web_cookies.tracks(id) {
                 break id;
             }
         }
@@ -8091,20 +8098,25 @@ impl<M: TextEngine> Core<M> {
                     log::debug!(target: "js", "web view: dropped a reply without a request's id: {reply}");
                     return true;
                 };
-                if !self.components.downloads.tracks(request) {
-                    log::debug!(target: "js", "web view: dropped a reply to unknown request {request}: {reply}");
-                    return true;
+                if self.components.downloads.tracks(request) {
+                    let result = match reply.get("ok").and_then(crate::JsonValue::as_bool) {
+                        Some(true) => Ok(()),
+                        _ => Err(reply
+                            .get("error")
+                            .and_then(crate::JsonValue::as_str)
+                            .unwrap_or("the web view did not answer")
+                            .to_owned()),
+                    };
+                    let effects = self.components.downloads.reply(id, request, result);
+                    self.apply_download_effects(effects);
+                } else if self.components.web_cookies.tracks(request) {
+                    self.answer_web_cookies(id, request, reply);
+                } else {
+                    log::debug!(
+                        target: "js",
+                        "web view: dropped a reply to unknown request {request}"
+                    );
                 }
-                let result = match reply.get("ok").and_then(crate::JsonValue::as_bool) {
-                    Some(true) => Ok(()),
-                    _ => Err(reply
-                        .get("error")
-                        .and_then(crate::JsonValue::as_str)
-                        .unwrap_or("the web view did not answer")
-                        .to_owned()),
-                };
-                let effects = self.components.downloads.reply(id, request, result);
-                self.apply_download_effects(effects);
                 true
             }
             EventKind::Clipboard if id == crate::ROOT_ID => {

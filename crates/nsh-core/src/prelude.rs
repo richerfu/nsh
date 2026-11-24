@@ -299,6 +299,7 @@ pub use crate::{
         when, window,
     },
     host_channel::{HostCallOptions, HostError},
+    webview::{CookieQueryOptions, CookieSameSite, WebCookie},
 };
 /// Translations ([`crate::i18n`]).
 pub use crate::{

@@ -521,6 +521,11 @@ covers [nsh] WebView
 tap id:case-web-evaluate
 tap id:evaluate
 expect Evaluation: false/TypeError,RangeError/ERR_FEATURE_UNAVAILABLE_ON_PLATFORM
+# web-cookies (headless backend validates arguments and rejects as unavailable)
+tap id:case-web-cookies
+tap id:cookies
+expect Cookies: TypeError,TypeError,RangeError/ERR_FEATURE_UNAVAILABLE_ON_PLATFORM,ERR_FEATURE_UNAVAILABLE_ON_PLATFORM
+covers [nsh] WebView
 # web-available
 tap id:case-web-available
 expect Web views available: true

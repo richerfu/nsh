@@ -98,6 +98,45 @@ export interface DesktopProps extends DesktopHostProps {}
 /** Web-only props of every element (`web={{…}}`). */
 export interface WebProps extends WebHostProps {}
 
+/** SameSite attribute of a cookie returned by `WebViewRef.cookieStore`. */
+export type CookieSameSite = "strict" | "lax" | "none";
+
+/** A cookie read from a `<WebView>`'s cookie store.
+ *
+ * `name` and `value` are populated on every supported platform. Metadata fields
+ * are populated on macOS, iOS, Windows, and Linux and omitted on Android. */
+export interface CookieListItem {
+  name: string;
+  value: string;
+  domain?: string;
+  path?: string;
+  expires?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: CookieSameSite;
+}
+
+/** Options for reading cookies from a `<WebView>` (`ref.cookieStore`). */
+export interface CookieStoreGetOptions {
+  /** Target `http://` or `https://` URL to match cookies against. */
+  url: string;
+  /** Optional exact cookie name filter. */
+  name?: string;
+  /** Timeout in milliseconds (30 000 by default). */
+  timeout?: number;
+}
+
+/** Read-only cookie store for a `<WebView>` (`ref.cookieStore`), including
+ * `HttpOnly` cookies matching the queried URL. Requires `capabilities.webview`
+ * to allow `options.url`. */
+export interface WebViewCookieStore {
+  /** Returns every cookie matching `options.url` (and optional `options.name`). */
+  getAll(options: CookieStoreGetOptions): Promise<CookieListItem[]>;
+  /** Returns the first cookie matching `options.url` (and optional `options.name`),
+   * or `null` when none matches. */
+  get(options: CookieStoreGetOptions): Promise<CookieListItem | null>;
+}
+
 /** Android-only props of every element (`android={{…}}`). */
 export interface AndroidProps extends AndroidHostProps {}
 
@@ -373,6 +412,14 @@ fn element_types() -> String {
             };
             doc_comment(&mut out, doc, "  ");
             let _ = writeln!(out, "  {method}{signature};");
+        }
+        if *name == "WebViewRef" {
+            doc_comment(
+                &mut out,
+                "Read-only cookie store for this `<WebView>`, including `HttpOnly` cookies.",
+                "  ",
+            );
+            out.push_str("  readonly cookieStore: WebViewCookieStore;\n");
         }
         out.push_str("}\n");
     }
@@ -957,6 +1004,8 @@ mod tests {
         let ts = element_types();
         assert!(!ts.contains("YNode"));
         assert!(ts.contains("export interface InputRef extends ViewRef {"));
+        assert!(ts.contains("export interface WebViewCookieStore {"));
+        assert!(ts.contains("readonly cookieStore: WebViewCookieStore;"));
     }
 
     #[derive(Default, nsh_core::element::JsObject)]

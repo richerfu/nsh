@@ -30,6 +30,10 @@ pub mod text_access;
 // hidden from the docs, so it stays out of what NSH keeps compatible.
 #[doc(hidden)]
 pub mod unified_log;
+// The `WKHTTPCookieStore` reader iOS and macOS share, no API of apps':
+// hidden from the docs, so it stays out of what NSH keeps compatible.
+#[doc(hidden)]
+pub mod web_cookies;
 // The `WKDownload` transport iOS and macOS share, no API of apps': hidden
 // from the docs, so it stays out of what NSH keeps compatible.
 #[doc(hidden)]

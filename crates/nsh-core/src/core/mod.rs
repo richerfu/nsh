@@ -24,6 +24,7 @@ mod tests;
 mod touch;
 mod views;
 mod watch;
+mod web_cookies;
 mod web_evaluation;
 
 /// The most network image checks [`Core`] remembers for its canvases; past
@@ -2792,6 +2793,7 @@ impl<M: TextEngine> Core<M> {
     fn apply_op(&mut self, op: Op) -> Result<(), ApplyError> {
         if !self.runs.is_empty()
             && let Op::Evaluate { id, .. }
+            | Op::WebCookies { id, .. }
             | Op::Draw { id, .. }
             | Op::SetStyle { id, .. }
             | Op::SetProp { id, .. }
@@ -2809,6 +2811,22 @@ impl<M: TextEngine> Core<M> {
                 timeout,
             } => {
                 self.start_js_web_evaluation(id, call, script, timeout);
+                Ok(())
+            }
+            Op::WebCookies {
+                id,
+                call,
+                url,
+                name,
+                timeout,
+                single,
+            } => {
+                self.start_js_web_cookies(
+                    id,
+                    call,
+                    crate::webview::CookieQueryOptions { url, name, timeout },
+                    single,
+                );
                 Ok(())
             }
             Op::RenderCanvas { call, request } => {
@@ -7471,6 +7489,7 @@ impl<M: TextEngine> Core<M> {
             run.block = NO_KEY;
         }
         self.cancel_web_evaluations(id);
+        self.cancel_web_cookies(id);
         self.webview_released(id);
         if key == self.root {
             return Ok(());

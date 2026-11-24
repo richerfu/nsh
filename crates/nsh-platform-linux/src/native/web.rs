@@ -78,14 +78,15 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use gtk4::{self as gtk, gdk, gio, glib, prelude::*};
 use nsh_core::{
     Command, EventKind, EventPayload, JsonValue, PayloadValue, WebProps, WebSource,
     webview::{
-        self, DownloadEnd, DownloadOffer, DownloadOutcome, WebDownloadSource, WebViewOperation,
-        WebViewRequest,
+        self, CookieSameSite, DownloadEnd, DownloadOffer, DownloadOutcome, WebCookie,
+        WebDownloadSource, WebViewOperation, WebViewRequest, cookies,
     },
 };
 use nsh_engine::{Access, EngineControl};
@@ -93,7 +94,7 @@ use webkit6::{
     CookiePersistentStorage, Download, DownloadError, LoadEvent, NavigationPolicyDecision,
     NetworkError, NetworkSession, PolicyDecisionType, PolicyError, ResponsePolicyDecision,
     URIRequest, UserContentInjectedFrames, UserContentManager, UserMediaPermissionRequest,
-    UserScript, UserScriptInjectionTime, UserStyleLevel, UserStyleSheet, WebView, prelude::*,
+    UserScript, UserScriptInjectionTime, UserStyleLevel, UserStyleSheet, WebView, prelude::*, soup,
 };
 
 use super::{Emitter, UNSCROLLABLE, error, fill_sized};
@@ -703,12 +704,81 @@ pub(super) fn web_request(web: &WebView, shared: &Rc<Shared>, request: &WebViewR
         WebViewOperation::CancelDownload { id: download } => {
             cancel_download(shared, download, id);
         }
+        WebViewOperation::GetCookies { url } => {
+            get_cookies(web, shared, id, url);
+        }
         // A newer core's operation: answered, never left waiting.
         _ => {
-            let _ = web;
             shared.reply(id, Err("unsupported web view operation".into()));
         }
     }
+}
+
+/// Reads cookies matching `url` from `web`'s network session cookie manager,
+/// respecting `incognito` isolation and including `HttpOnly` cookies.
+fn get_cookies(web: &WebView, shared: &Rc<Shared>, id: u64, url: &str) {
+    let Some(manager) = web
+        .network_session()
+        .and_then(|session| session.cookie_manager())
+    else {
+        shared.reply(id, Err("WebKit cookie manager is unavailable".into()));
+        return;
+    };
+    let shared = shared.clone();
+    let url = url.to_owned();
+    let query_url = url.clone();
+    manager.cookies(&query_url, None::<&gio::Cancellable>, move |result| {
+        let cookies = match result {
+            Ok(cookies) => cookies,
+            Err(err) => {
+                shared.reply(id, Err(format!("cannot read cookies: {err}")));
+                return;
+            }
+        };
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let mut matched = Vec::new();
+        for mut cookie in cookies {
+            if matched.len() >= 4096 {
+                break;
+            }
+            let name = cookie.name().map(|s| s.to_string()).unwrap_or_default();
+            let value = cookie.value().map(|s| s.to_string()).unwrap_or_default();
+            let domain = cookie.domain().map(|s| s.to_string());
+            let path = cookie.path().map(|s| s.to_string());
+            let expires = cookie.expires().map(|dt| dt.to_unix().saturating_mul(1000));
+            let http_only = cookie.is_http_only();
+            let secure = cookie.is_secure();
+            let same_site = match cookie.same_site_policy() {
+                soup::SameSitePolicy::Strict => Some(CookieSameSite::Strict),
+                soup::SameSitePolicy::Lax => Some(CookieSameSite::Lax),
+                soup::SameSitePolicy::None => Some(CookieSameSite::None),
+                _ => None,
+            };
+            if !cookies::cookie_matches_url(
+                &url,
+                domain.as_deref(),
+                path.as_deref(),
+                Some(secure),
+                expires,
+                now_ms,
+            ) {
+                continue;
+            }
+            let mut record = WebCookie::new(name, value);
+            record.domain = domain;
+            record.path = path;
+            record.expires = expires;
+            record.http_only = Some(http_only);
+            record.secure = Some(secure);
+            record.same_site = same_site;
+            matched.push(record);
+        }
+        let encoded = serde_json::to_value(matched)
+            .map_err(|err| format!("failed to serialize cookies: {err}"));
+        shared.reply(id, encoded);
+    });
 }
 
 /// WebKit reported a download of this page: held without a destination

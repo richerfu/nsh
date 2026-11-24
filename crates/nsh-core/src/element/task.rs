@@ -283,6 +283,15 @@ pub(crate) enum Action {
     ),
     /// Rejects a request that exceeded its deadline.
     WebEvaluationTimeout(u32),
+    /// Reads cookies from a web view's store within a timeout, with its
+    /// answer kept by the core.
+    WebCookies(
+        NodeId,
+        crate::webview::CookieQueryOptions,
+        AnswerSlot<Result<Vec<crate::webview::WebCookie>, super::JsError>>,
+    ),
+    /// Rejects a cookie store query that exceeded its deadline.
+    WebCookiesTimeout(u64),
     /// An offscreen canvas render's deadline passed.
     CanvasRenderTimeout(u32),
     /// How long the node's transitions run with the styles of the commit
